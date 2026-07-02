@@ -1,7 +1,9 @@
 """FastAPI route tests."""
 
+import pytest
 from fastapi.testclient import TestClient
 
+import api.main as api_main
 from api.main import create_app
 
 
@@ -21,3 +23,14 @@ def test_start_chat_returns_session_id() -> None:
 
     assert response.status_code == 200
     assert response.json()["session_id"]
+
+
+def test_create_runtime_graph_returns_none_when_configuration_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raise_settings_error() -> object:
+        raise RuntimeError("missing config")
+
+    monkeypatch.setattr(api_main, "get_settings", raise_settings_error)
+
+    assert api_main.create_runtime_graph() is None
