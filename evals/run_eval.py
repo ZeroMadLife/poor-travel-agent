@@ -7,7 +7,9 @@ from typing import Any
 
 def load_cases(path: str) -> list[dict[str, Any]]:
     """Load JSONL travel eval cases."""
-    return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line]
+    return [
+        json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line
+    ]
 
 
 def summarize_results(results: list[dict[str, Any]]) -> dict[str, float]:
