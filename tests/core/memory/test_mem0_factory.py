@@ -1,5 +1,6 @@
 """Mem0 client factory tests."""
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from core.memory.mem0_factory import create_mem0_client
@@ -48,3 +49,10 @@ def test_create_mem0_client_accepts_invalid_qdrant_port() -> None:
         client = create_mem0_client()
 
         assert client is None
+
+
+def test_huggingface_embedder_dependency_is_declared() -> None:
+    """The default Mem0 embedder depends on sentence-transformers at runtime."""
+    requirements = Path("requirements.txt").read_text(encoding="utf-8")
+
+    assert "sentence-transformers" in requirements
