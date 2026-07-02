@@ -17,9 +17,11 @@ def create_memory_node(
     def _node(state: dict[str, Any]) -> dict[str, Any]:
         destination = str(state.get("destination", ""))
         preferences = state.get("preferences", [])
-        prefs_text = " ".join(str(preference) for preference in preferences) if isinstance(
-            preferences, list
-        ) else ""
+        prefs_text = (
+            " ".join(str(preference) for preference in preferences)
+            if isinstance(preferences, list)
+            else ""
+        )
         query = f"{destination} {prefs_text} 行程偏好".strip()
 
         try:

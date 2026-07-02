@@ -33,9 +33,7 @@ def test_memory_node_returns_memory_context(mock_memory_manager: MagicMock) -> N
     result = node(state)
 
     assert "海鲜" in result["memory_context"]
-    assert result["memory_facts"] == [
-        {"content": "用户喜欢海鲜", "score": 0.95, "fact_id": "1"}
-    ]
+    assert result["memory_facts"] == [{"content": "用户喜欢海鲜", "score": 0.95, "fact_id": "1"}]
 
 
 def test_memory_node_queries_with_destination_and_preferences(

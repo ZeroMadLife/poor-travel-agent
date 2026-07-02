@@ -93,9 +93,7 @@ class ShortTermMemory:
             return messages
 
         system_messages = [message for message in messages if message.get("role") == "system"]
-        non_system_messages = [
-            message for message in messages if message.get("role") != "system"
-        ]
+        non_system_messages = [message for message in messages if message.get("role") != "system"]
         if len(non_system_messages) <= keep_count:
             return messages
 
@@ -113,7 +111,9 @@ class ShortTermMemory:
         try:
             response = await llm.ainvoke([{"role": "user", "content": summary_prompt}])
             summary_content = getattr(response, "content", response)
-            summary_text = summary_content if isinstance(summary_content, str) else str(summary_content)
+            summary_text = (
+                summary_content if isinstance(summary_content, str) else str(summary_content)
+            )
         except Exception as exc:
             logger.warning("Summary compression failed for %s: %s", self._session_id, exc)
             return messages

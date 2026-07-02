@@ -61,9 +61,7 @@ def test_search_accepts_mem0_results_wrapped_in_results_key(mock_mem0: MagicMock
 
     facts = memory.search("预算偏好")
 
-    assert facts == [
-        MemoryFact(content="用户预算通常500元以内", score=0.77, fact_id="123")
-    ]
+    assert facts == [MemoryFact(content="用户预算通常500元以内", score=0.77, fact_id="123")]
 
 
 def test_search_returns_empty_on_error(memory: LongTermMemory) -> None:
@@ -80,9 +78,7 @@ async def test_extract_and_store_calls_mem0_add(
     mock_mem0: MagicMock,
 ) -> None:
     """Conversation extraction delegates to Mem0 add with user scope."""
-    await memory.extract_and_store(
-        conversation="用户: 我对海鲜过敏\n助手: 好的，我会避免推荐海鲜"
-    )
+    await memory.extract_and_store(conversation="用户: 我对海鲜过敏\n助手: 好的，我会避免推荐海鲜")
 
     mock_mem0.add.assert_called_once_with(
         "用户: 我对海鲜过敏\n助手: 好的，我会避免推荐海鲜",
