@@ -1,80 +1,95 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { buildChatStreamUrl, startChat } from '../api/chat'
-import type { ErrorEvent, ProgressEvent, ResultEvent, ServerEvent, ToolCallEvent } from '../types/api'
-
-export type ConnectionStatus = 'idle' | 'connecting' | 'connected' | 'closed' | 'error'
-export type SocketFactory = (url: string) => WebSocket
+import type {
+  AgentResultEvent,
+  ErrorEvent,
+  ProgressEvent,
+  ServerEvent,
+  ToolCallEvent,
+} from '../types/api'
 
 export const useChatStore = defineStore('chat', () => {
   const events = ref<ProgressEvent[]>([])
   const toolCalls = ref<ToolCallEvent[]>([])
   const errors = ref<ErrorEvent[]>([])
-  const result = ref<ResultEvent | null>(null)
+  const result = ref<AgentResultEvent | null>(null)
   const currentSessionId = ref('')
-  const connectionStatus = ref<ConnectionStatus>('idle')
+  const isExecuting = ref(false)
   let activeSocket: WebSocket | null = null
 
-  function resetStreamState() {
+  function _resetTurnState() {
     events.value = []
     toolCalls.value = []
     errors.value = []
     result.value = null
   }
 
-  function handleServerEvent(event: ServerEvent) {
+  function _handleServerEvent(event: ServerEvent) {
     if (event.type === 'progress') {
       events.value.push(event)
-      return
-    }
-    if (event.type === 'tool_call') {
+    } else if (event.type === 'tool_call') {
       toolCalls.value.push(event)
-      return
-    }
-    if (event.type === 'result') {
+    } else if (event.type === 'result') {
       result.value = event
-      return
+      isExecuting.value = false
+    } else if (event.type === 'error') {
+      errors.value.push(event)
+      isExecuting.value = false
+    } else if (event.type === 'busy') {
+      errors.value.push({ type: 'error', message: event.message, recoverable: true })
     }
-    errors.value.push(event)
-    connectionStatus.value = 'error'
+  }
+
+  function _connect(sessionId: string) {
+    if (activeSocket) {
+      activeSocket.close()
+    }
+    const socket = new WebSocket(buildChatStreamUrl(sessionId))
+    activeSocket = socket
+
+    socket.onmessage = (msg: MessageEvent) => {
+      const event = JSON.parse(String(msg.data)) as ServerEvent
+      _handleServerEvent(event)
+    }
+    socket.onerror = () => {
+      errors.value.push({
+        type: 'error',
+        message: 'WebSocket连接失败',
+        recoverable: true,
+      })
+      isExecuting.value = false
+    }
+    socket.onclose = () => {
+      if (isExecuting.value) {
+        isExecuting.value = false
+      }
+    }
+  }
+
+  async function sendMessage(content: string, userId = 'anonymous') {
+    _resetTurnState()
+    isExecuting.value = true
+
+    if (!currentSessionId.value || !activeSocket || activeSocket.readyState !== WebSocket.OPEN) {
+      // 创建新 session
+      const response = await startChat(content, userId)
+      currentSessionId.value = response.session_id
+      _connect(response.session_id)
+      // 等连接建立后发消息
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      if (activeSocket?.readyState === WebSocket.OPEN) {
+        activeSocket.send(JSON.stringify({ content }))
+      }
+    } else {
+      // 已有 session, 通过 WebSocket 发消息
+      activeSocket.send(JSON.stringify({ content }))
+    }
   }
 
   function closeStream() {
     activeSocket?.close()
     activeSocket = null
-  }
-
-  function connectStream(
-    sessionId: string,
-    socketFactory: SocketFactory = (url: string) => new WebSocket(url),
-  ) {
-    closeStream()
-    currentSessionId.value = sessionId
-    connectionStatus.value = 'connecting'
-    const socket = socketFactory(buildChatStreamUrl(sessionId))
-    activeSocket = socket
-
-    socket.onopen = () => {
-      connectionStatus.value = 'connected'
-    }
-    socket.onmessage = (message: MessageEvent) => {
-      handleServerEvent(JSON.parse(String(message.data)) as ServerEvent)
-    }
-    socket.onerror = () => {
-      errors.value.push({ type: 'error', message: 'WebSocket connection failed', recoverable: true })
-      connectionStatus.value = 'error'
-    }
-    socket.onclose = () => {
-      if (connectionStatus.value !== 'error') {
-        connectionStatus.value = 'closed'
-      }
-    }
-  }
-
-  async function startPlanning(content: string, userId = 'anonymous') {
-    resetStreamState()
-    const response = await startChat(content, userId)
-    connectStream(response.session_id)
   }
 
   return {
@@ -83,9 +98,8 @@ export const useChatStore = defineStore('chat', () => {
     errors,
     result,
     currentSessionId,
-    connectionStatus,
-    connectStream,
+    isExecuting,
+    sendMessage,
     closeStream,
-    startPlanning,
   }
 })

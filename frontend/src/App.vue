@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import WorkbenchView from './views/WorkbenchView.vue'
+import ChatView from './views/ChatView.vue'
 </script>
 
 <template>
-  <WorkbenchView />
+  <ChatView />
 </template>

@@ -10,6 +10,12 @@ export type ToolCallEvent = {
   args: Record<string, unknown>
 }
 
+export type ToolCallStatus = {
+  tool: string
+  args: Record<string, unknown>
+  status: 'running' | 'done' | 'error'
+}
+
 export type VerificationIssue = {
   code: string
   message: string
@@ -73,10 +79,11 @@ export type Itinerary = {
   budget?: BudgetBreakdown | null
 }
 
-export type ResultEvent = {
+export type AgentResultEvent = {
   type: 'result'
-  itinerary: Itinerary
-  validation: VerificationResult
+  content: string
+  itinerary: Itinerary | null
+  tool_calls: Array<{ tool: string; error: string }>
   metrics: Record<string, unknown>
 }
 
@@ -86,7 +93,12 @@ export type ErrorEvent = {
   recoverable: boolean
 }
 
-export type ServerEvent = ProgressEvent | ToolCallEvent | ResultEvent | ErrorEvent
+export type BusyEvent = {
+  type: 'busy'
+  message: string
+}
+
+export type ServerEvent = ProgressEvent | ToolCallEvent | AgentResultEvent | ErrorEvent | BusyEvent
 
 export type ChatStartResponse = {
   session_id: string
