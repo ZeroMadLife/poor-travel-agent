@@ -15,6 +15,7 @@ const messagesContainer = ref<HTMLElement | null>(null)
 const isAuthenticated = ref(auth.isAuthenticated())
 const passphrase = ref(auth.storedPassphrase ?? '')
 const authError = ref(false)
+const isAtBottom = ref(true)
 
 interface UIMessage {
   role: 'user' | 'assistant'
@@ -35,16 +36,17 @@ function lastAssistantMessage() {
   return [...messages.value].reverse().find((m) => m.role === 'assistant')
 }
 
-// 进度事件 → 显示“正在思考中/正在查询”等状态
+// 进度事件 → 显示”正在思考中/正在查询”等状态
 watch(
   () => chatStore.events,
-  (events) => {
-    const latest = events.at(-1)
+  () => {
+    const latest = chatStore.events.at(-1)
     const last = lastAssistantMessage()
     if (latest && last) {
       last.isThinking = true
       last.statusMessage = latest.message || '正在思考中...'
     }
+    autoScroll()
   },
   { deep: true },
 )
@@ -62,6 +64,7 @@ watch(
         message: c.message,
       }))
     }
+    autoScroll()
   },
   { deep: true },
 )
@@ -79,20 +82,22 @@ watch(
       last.statusMessage = undefined
       void sessionStore.loadSessions(auth.getUserId())
     }
+    autoScroll()
   },
 )
 
 // 错误事件 → 不让 assistant 气泡一直空着
 watch(
   () => chatStore.errors,
-  (errors) => {
-    const latest = errors.at(-1)
+  () => {
+    const latest = chatStore.errors.at(-1)
     const last = lastAssistantMessage()
     if (latest && last) {
       last.content = `请求失败：${latest.message}`
       last.isThinking = false
       last.statusMessage = undefined
     }
+    autoScroll()
   },
   { deep: true },
 )
@@ -103,6 +108,18 @@ function scrollToBottom() {
       messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight
     }
   })
+}
+
+function autoScroll() {
+  if (isAtBottom.value) {
+    scrollToBottom()
+  }
+}
+
+function handleScroll() {
+  if (!messagesContainer.value) return
+  const { scrollTop, scrollHeight, clientHeight } = messagesContainer.value
+  isAtBottom.value = scrollHeight - scrollTop - clientHeight < 80
 }
 
 async function handleSend(content: string) {
@@ -195,15 +212,15 @@ function handleNewSession() {
       <header class="chat-header">
         <h1>🧳 TourSwarm 穷游助手</h1>
       </header>
-      <div class="messages" ref="messagesContainer">
+      <div class="messages" ref="messagesContainer" @scroll="handleScroll">
         <div class="welcome" v-if="messages.length === 0">
           <p>👋 你好！我是你的个人穷游助手。</p>
           <p>试试问我：</p>
-          <ul>
-            <li>"帮我规划杭州2日游500元"</li>
-            <li>"附近有什么好吃的"</li>
-            <li>"杭州明天天气怎么样"</li>
-          </ul>
+          <div class="chips">
+            <button class="chip" @click="handleSend('帮我规划杭州2日游500元')">帮我规划杭州2日游500元</button>
+            <button class="chip" @click="handleSend('附近有什么好吃的')">附近有什么好吃的</button>
+            <button class="chip" @click="handleSend('杭州明天天气怎么样')">杭州明天天气怎么样</button>
+          </div>
         </div>
         <MessageBubble
           v-for="(msg, i) in messages"
@@ -254,12 +271,27 @@ function handleNewSession() {
   padding: 2rem;
   text-align: center;
 }
-.welcome ul {
-  list-style: none;
-  padding: 0;
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: center;
+  margin-top: 1rem;
 }
-.welcome li {
-  padding: 0.25rem 0;
+.chip {
+  padding: 0.5rem 1rem;
+  border: 1px solid #d1d5db;
+  border-radius: 20px;
+  background: white;
+  color: #374151;
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.chip:hover {
+  border-color: #2563eb;
+  color: #2563eb;
+  background: #eff6ff;
 }
 .auth-screen {
   display: flex;
