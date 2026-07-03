@@ -106,3 +106,38 @@ export type ServerEvent = ProgressEvent | ToolCallEvent | AgentResultEvent | Err
 export type ChatStartResponse = {
   session_id: string
 }
+
+export type SessionSummary = {
+  session_id: string
+  title: string
+  created_at: string
+  updated_at: string
+  status: string
+}
+
+export type SessionListResponse = {
+  sessions: SessionSummary[]
+}
+
+export type HistoryMessage = {
+  role: string
+  content: string
+  tool_calls: Array<Record<string, unknown>> | null
+  created_at: string
+}
+
+export type SessionMessagesResponse = {
+  messages: HistoryMessage[]
+}
+
+export type HistoryItinerary = {
+  id: number
+  destination: string
+  total_cost: number
+  created_at: string
+  content: Itinerary
+}
+
+export type ItineraryListResponse = {
+  itineraries: HistoryItinerary[]
+}
