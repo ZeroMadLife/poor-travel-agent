@@ -2,13 +2,19 @@
 import { nextTick, ref, watch } from 'vue'
 import ChatInput from '../components/ChatInput.vue'
 import MessageBubble from '../components/MessageBubble.vue'
+import SessionList from '../components/SessionList.vue'
 import { useChatStore } from '../stores/chat'
-import { useDeviceId } from '../composables/useDeviceId'
+import { useSessionStore } from '../stores/session'
+import { useAuth } from '../composables/useAuth'
 import type { Itinerary, ToolCallStatus } from '../types/api'
 
 const chatStore = useChatStore()
-const deviceId = useDeviceId()
+const sessionStore = useSessionStore()
+const auth = useAuth()
 const messagesContainer = ref<HTMLElement | null>(null)
+const isAuthenticated = ref(auth.isAuthenticated())
+const passphrase = ref(auth.storedPassphrase ?? '')
+const authError = ref(false)
 
 interface UIMessage {
   role: 'user' | 'assistant'
@@ -20,6 +26,10 @@ interface UIMessage {
 }
 
 const messages = ref<UIMessage[]>([])
+
+if (isAuthenticated.value) {
+  void sessionStore.loadSessions(auth.getUserId())
+}
 
 function lastAssistantMessage() {
   return [...messages.value].reverse().find((m) => m.role === 'assistant')
@@ -67,6 +77,7 @@ watch(
       last.itinerary = result.itinerary
       last.isThinking = false
       last.statusMessage = undefined
+      void sessionStore.loadSessions(auth.getUserId())
     }
   },
 )
@@ -95,6 +106,7 @@ function scrollToBottom() {
 }
 
 async function handleSend(content: string) {
+  sessionStore.clearSelection()
   messages.value.push({ role: 'user', content })
   messages.value.push({
     role: 'assistant',
@@ -104,47 +116,105 @@ async function handleSend(content: string) {
   })
   scrollToBottom()
 
-  await chatStore.sendMessage(content, deviceId)
+  await chatStore.sendMessage(content, auth.getUserId() || 'anonymous')
   scrollToBottom()
+}
+
+async function handleAuth() {
+  const valid = await auth.verify(passphrase.value.trim())
+  authError.value = !valid
+  isAuthenticated.value = valid
+  if (valid) {
+    await sessionStore.loadSessions(auth.getUserId())
+  }
+}
+
+function historyRole(role: string): 'user' | 'assistant' {
+  return role === 'user' ? 'user' : 'assistant'
+}
+
+async function handleSelectSession(sessionId: string) {
+  chatStore.closeStream()
+  chatStore.currentSessionId = sessionId
+  await sessionStore.selectSession(sessionId)
+  messages.value = sessionStore.messages.map((message) => ({
+    role: historyRole(message.role),
+    content: message.content,
+  }))
+  scrollToBottom()
+}
+
+function handleNewSession() {
+  chatStore.closeStream()
+  chatStore.currentSessionId = ''
+  sessionStore.clearSelection()
+  messages.value = []
 }
 </script>
 
 <template>
-  <div class="chat-view">
-    <header class="chat-header">
-      <h1>🧳 TourSwarm 穷游助手</h1>
-    </header>
-    <div class="messages" ref="messagesContainer">
-      <div class="welcome" v-if="messages.length === 0">
-        <p>👋 你好！我是你的个人穷游助手。</p>
-        <p>试试问我：</p>
-        <ul>
-          <li>"帮我规划杭州2日游500元"</li>
-          <li>"附近有什么好吃的"</li>
-          <li>"杭州明天天气怎么样"</li>
-        </ul>
+  <div v-if="!isAuthenticated" class="auth-screen">
+    <h1>🧳 TourSwarm 穷游助手</h1>
+    <p>请输入口令进入</p>
+    <input
+      v-model="passphrase"
+      type="password"
+      placeholder="口令"
+      @keyup.enter="handleAuth"
+    />
+    <button @click="handleAuth">进入</button>
+    <p v-if="authError" class="error">口令错误</p>
+  </div>
+  <div v-else class="chat-shell">
+    <SessionList
+      :sessions="sessionStore.sessions"
+      :active-session-id="sessionStore.activeSessionId"
+      @select="handleSelectSession"
+      @new="handleNewSession"
+    />
+    <div class="chat-view">
+      <header class="chat-header">
+        <h1>🧳 TourSwarm 穷游助手</h1>
+      </header>
+      <div class="messages" ref="messagesContainer">
+        <div class="welcome" v-if="messages.length === 0">
+          <p>👋 你好！我是你的个人穷游助手。</p>
+          <p>试试问我：</p>
+          <ul>
+            <li>"帮我规划杭州2日游500元"</li>
+            <li>"附近有什么好吃的"</li>
+            <li>"杭州明天天气怎么样"</li>
+          </ul>
+        </div>
+        <MessageBubble
+          v-for="(msg, i) in messages"
+          :key="i"
+          :role="msg.role"
+          :content="msg.content"
+          :is-thinking="msg.isThinking"
+          :status-message="msg.statusMessage"
+          :tool-calls="msg.toolCalls"
+          :itinerary="msg.itinerary"
+        />
       </div>
-      <MessageBubble
-        v-for="(msg, i) in messages"
-        :key="i"
-        :role="msg.role"
-        :content="msg.content"
-        :is-thinking="msg.isThinking"
-        :status-message="msg.statusMessage"
-        :tool-calls="msg.toolCalls"
-        :itinerary="msg.itinerary"
-      />
+      <ChatInput :disabled="chatStore.isExecuting" @submit="handleSend" />
     </div>
-    <ChatInput :disabled="chatStore.isExecuting" @submit="handleSend" />
   </div>
 </template>
 
 <style scoped>
+.chat-shell {
+  display: flex;
+  height: 100vh;
+  min-width: 0;
+}
 .chat-view {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  max-width: 800px;
+  flex: 1;
+  min-width: 0;
+  max-width: 900px;
   margin: 0 auto;
 }
 .chat-header {
@@ -171,5 +241,40 @@ async function handleSend(content: string) {
 }
 .welcome li {
   padding: 0.25rem 0;
+}
+.auth-screen {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  justify-content: center;
+  max-width: 360px;
+  height: 100vh;
+  margin: 0 auto;
+  padding: 1rem;
+  text-align: center;
+}
+.auth-screen input {
+  padding: 0.65rem 0.8rem;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  font-size: 1rem;
+}
+.auth-screen button {
+  padding: 0.65rem 0.8rem;
+  border: none;
+  border-radius: 8px;
+  color: white;
+  background: #2563eb;
+  cursor: pointer;
+  font-size: 1rem;
+}
+.error {
+  color: #dc2626;
+}
+
+@media (max-width: 760px) {
+  .chat-shell {
+    flex-direction: column;
+  }
 }
 </style>
