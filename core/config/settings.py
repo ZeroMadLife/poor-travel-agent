@@ -112,6 +112,7 @@ class Settings(BaseSettings):
     app_host: str = "0.0.0.0"
     app_port: int = 8000
     app_secret_key: str = "change-me-in-production"
+    app_access_codes: str = ""
 
     langsmith_api_key: str = ""
     langsmith_project: str = "tourswarm"

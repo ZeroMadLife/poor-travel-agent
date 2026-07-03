@@ -3,12 +3,15 @@ import { nextTick, ref, watch } from 'vue'
 import ChatInput from '../components/ChatInput.vue'
 import MessageBubble from '../components/MessageBubble.vue'
 import { useChatStore } from '../stores/chat'
-import { useDeviceId } from '../composables/useDeviceId'
+import { useAuth } from '../composables/useAuth'
 import type { Itinerary, ToolCallStatus } from '../types/api'
 
 const chatStore = useChatStore()
-const deviceId = useDeviceId()
+const auth = useAuth()
 const messagesContainer = ref<HTMLElement | null>(null)
+const isAuthenticated = ref(auth.isAuthenticated())
+const passphrase = ref(auth.storedPassphrase ?? '')
+const authError = ref(false)
 
 interface UIMessage {
   role: 'user' | 'assistant'
@@ -104,13 +107,31 @@ async function handleSend(content: string) {
   })
   scrollToBottom()
 
-  await chatStore.sendMessage(content, deviceId)
+  await chatStore.sendMessage(content, auth.getUserId() || 'anonymous')
   scrollToBottom()
+}
+
+async function handleAuth() {
+  const valid = await auth.verify(passphrase.value.trim())
+  authError.value = !valid
+  isAuthenticated.value = valid
 }
 </script>
 
 <template>
-  <div class="chat-view">
+  <div v-if="!isAuthenticated" class="auth-screen">
+    <h1>🧳 TourSwarm 穷游助手</h1>
+    <p>请输入口令进入</p>
+    <input
+      v-model="passphrase"
+      type="password"
+      placeholder="口令"
+      @keyup.enter="handleAuth"
+    />
+    <button @click="handleAuth">进入</button>
+    <p v-if="authError" class="error">口令错误</p>
+  </div>
+  <div v-else class="chat-view">
     <header class="chat-header">
       <h1>🧳 TourSwarm 穷游助手</h1>
     </header>
@@ -171,5 +192,34 @@ async function handleSend(content: string) {
 }
 .welcome li {
   padding: 0.25rem 0;
+}
+.auth-screen {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  justify-content: center;
+  max-width: 360px;
+  height: 100vh;
+  margin: 0 auto;
+  padding: 1rem;
+  text-align: center;
+}
+.auth-screen input {
+  padding: 0.65rem 0.8rem;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  font-size: 1rem;
+}
+.auth-screen button {
+  padding: 0.65rem 0.8rem;
+  border: none;
+  border-radius: 8px;
+  color: white;
+  background: #2563eb;
+  cursor: pointer;
+  font-size: 1rem;
+}
+.error {
+  color: #dc2626;
 }
 </style>

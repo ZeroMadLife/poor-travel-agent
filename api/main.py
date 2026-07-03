@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from agents.graph import build_graph
 from agents.itinerary_tool import create_itinerary_tool
 from agents.react_agent import TourAgent
+from core.auth import AuthManager
 from core.config.settings import get_settings
 from core.llm import create_llm
 from mcp_servers.amap.client import AmapClient
@@ -96,14 +97,16 @@ def create_runtime_agent() -> Any | None:
         return None
 
 
-def create_app(agent: Any | None = None) -> FastAPI:
+def create_app(agent: Any | None = None, auth: AuthManager | None = None) -> FastAPI:
     """Create the TourSwarm API app.
 
     Args:
         agent: TourAgent 实例, None 时 API 可运行但 WebSocket 会报错
+        auth: 口令验证器, None 时允许匿名访问
     """
     app = FastAPI(title="TourSwarm API")
     app.state.agent = agent
+    app.state.auth = auth
     from api import routes, ws
 
     app.include_router(routes.router)
@@ -111,4 +114,7 @@ def create_app(agent: Any | None = None) -> FastAPI:
     return app
 
 
-app = create_app(agent=create_runtime_agent())
+app = create_app(
+    agent=create_runtime_agent(),
+    auth=AuthManager(get_settings().app_access_codes),
+)

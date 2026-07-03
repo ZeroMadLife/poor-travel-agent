@@ -25,6 +25,15 @@ def test_settings_has_qweather_base_url(monkeypatch) -> None:
     assert settings.qweather_geo_url == DEFAULT_QWEATHER_GEO_URL
 
 
+def test_settings_has_access_codes(monkeypatch) -> None:
+    """APP_ACCESS_CODES configures lightweight passphrase access."""
+    monkeypatch.setenv("APP_ACCESS_CODES", "tour2026,friend01")
+
+    settings = Settings()
+
+    assert settings.app_access_codes == "tour2026,friend01"
+
+
 def test_resolve_llm_doubao(monkeypatch) -> None:
     """resolve_llm 正确解析 doubao provider。"""
     monkeypatch.setenv("DOUBAO_API_KEY", "test-doubao-key")

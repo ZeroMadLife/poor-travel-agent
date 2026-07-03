@@ -42,6 +42,8 @@ pytest==8.3.4
 pytest-asyncio==0.25.0
 pytest-cov==6.0.0
 respx==0.22.0
+fakeredis==2.36.2
+aiosqlite==0.22.1
 
 # ---------- 类型安全与代码质量 ----------
 # 弥补Python动态类型短板：编译期发现类型错误 + lint + format

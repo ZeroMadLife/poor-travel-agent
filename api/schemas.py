@@ -20,6 +20,19 @@ class ChatStartResponse(BaseModel):
     session_id: str
 
 
+class AuthRequest(BaseModel):
+    """Passphrase verification request."""
+
+    passphrase: str = Field(min_length=1, description="访问口令")
+
+
+class AuthResponse(BaseModel):
+    """Passphrase verification response."""
+
+    user_id: str
+    valid: bool = True
+
+
 class UserMessage(BaseModel):
     """用户通过 WebSocket 发送的消息。"""
 
