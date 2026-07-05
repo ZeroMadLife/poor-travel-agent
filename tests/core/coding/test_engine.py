@@ -1,0 +1,104 @@
+"""Coding engine loop tests."""
+
+from pathlib import Path
+
+from core.coding.context_manager import ContextManager
+from core.coding.engine import Engine
+from core.coding.permissions import PermissionChecker
+from core.coding.tool_policy import ToolPolicyChecker
+from core.coding.tools.registry import build_tool_registry
+from core.coding.workspace import WorkspaceContext
+
+
+class FakeModel:
+    """Deterministic async model for engine tests."""
+
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = responses
+        self.prompts: list[str] = []
+
+    async def complete(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        return self.responses.pop(0)
+
+
+def _engine(tmp_path: Path, responses: list[str], max_steps: int = 5) -> Engine:
+    workspace = WorkspaceContext(root=tmp_path)
+    tools = build_tool_registry(workspace)
+    return Engine(
+        model=FakeModel(responses),
+        workspace=workspace,
+        tools=tools,
+        context_manager=ContextManager(),
+        permission_checker=PermissionChecker(approval_policy="auto"),
+        policy_checker=ToolPolicyChecker(workspace),
+        max_steps=max_steps,
+    )
+
+
+async def test_engine_yields_tool_result_then_final(tmp_path: Path) -> None:
+    """Engine runs model -> tool -> final and yields streamable events."""
+    (tmp_path / "README.md").write_text("TourSwarm coding agent\n", encoding="utf-8")
+    engine = _engine(
+        tmp_path,
+        [
+            '<tool>{"name":"read_file","args":{"path":"README.md"}}</tool>',
+            "<final>项目叫 TourSwarm coding agent。</final>",
+        ],
+    )
+
+    events = [event async for event in engine.run_turn("读 README.md 告诉我项目叫什么")]
+
+    assert [event["type"] for event in events] == [
+        "model_requested",
+        "model_parsed",
+        "tool_call",
+        "tool_result",
+        "model_requested",
+        "model_parsed",
+        "final",
+    ]
+    assert events[2]["tool"] == "read_file"
+    assert events[3]["is_error"] is False
+    assert "TourSwarm" in events[3]["content"]
+    assert events[-1]["content"] == "项目叫 TourSwarm coding agent。"
+
+
+async def test_engine_denies_policy_violation_as_tool_result(tmp_path: Path) -> None:
+    """Engine turns policy denials into visible tool_result errors."""
+    (tmp_path / "app.py").write_text("value = 1\n", encoding="utf-8")
+    engine = _engine(
+        tmp_path,
+        [
+            (
+                '<tool>{"name":"patch_file","args":{"path":"app.py",'
+                '"old_text":"value = 1","new_text":"value = 2"}}</tool>'
+            ),
+            "<final>无法盲改。</final>",
+        ],
+    )
+
+    events = [event async for event in engine.run_turn("把 value 改成 2")]
+
+    policy_errors = [
+        event
+        for event in events
+        if event["type"] == "tool_result" and event.get("is_error") is True
+    ]
+    assert policy_errors
+    assert "fresh read_file" in policy_errors[0]["content"]
+
+
+async def test_engine_emits_step_limit_when_model_never_finishes(tmp_path: Path) -> None:
+    """Engine emits a step_limit event when model keeps asking for tools."""
+    (tmp_path / "README.md").write_text("TourSwarm\n", encoding="utf-8")
+    engine = _engine(
+        tmp_path,
+        ['<tool>{"name":"read_file","args":{"path":"README.md"}}</tool>'] * 3,
+        max_steps=2,
+    )
+
+    events = [event async for event in engine.run_turn("循环读文件")]
+
+    assert events[-1]["type"] == "step_limit"
+    assert "已完成" in events[-1]["content"]

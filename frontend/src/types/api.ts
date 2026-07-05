@@ -107,6 +107,49 @@ export type ChatStartResponse = {
   session_id: string
 }
 
+export type CodingSessionResponse = {
+  session_id: string
+  workspace_root: string
+}
+
+export type CodingToolCallEvent = {
+  type: 'tool_call'
+  tool: string
+  args: Record<string, unknown>
+}
+
+export type CodingToolResultEvent = {
+  type: 'tool_result'
+  tool: string
+  args: Record<string, unknown>
+  content: string
+  is_error: boolean
+}
+
+export type CodingFinalEvent = {
+  type: 'final'
+  content: string
+}
+
+export type CodingStepLimitEvent = {
+  type: 'step_limit'
+  content: string
+}
+
+export type CodingTraceEvent = {
+  type: 'model_requested' | 'model_parsed' | 'retry'
+  content?: string
+  kind?: string
+}
+
+export type CodingServerEvent =
+  | CodingToolCallEvent
+  | CodingToolResultEvent
+  | CodingFinalEvent
+  | CodingStepLimitEvent
+  | ErrorEvent
+  | CodingTraceEvent
+
 export type SessionSummary = {
   session_id: string
   title: string

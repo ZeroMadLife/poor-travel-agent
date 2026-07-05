@@ -20,6 +20,19 @@ class ChatStartResponse(BaseModel):
     session_id: str
 
 
+class CodingSessionRequest(BaseModel):
+    """Request body for creating a coding session."""
+
+    workspace_root: str | None = Field(default=None, description="Workspace root override")
+
+
+class CodingSessionResponse(BaseModel):
+    """Response returned when a coding session is created."""
+
+    session_id: str
+    workspace_root: str
+
+
 class AuthRequest(BaseModel):
     """Passphrase verification request."""
 

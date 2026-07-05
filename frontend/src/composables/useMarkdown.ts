@@ -10,8 +10,8 @@ const md = new MarkdownIt({
 // 外部链接加 target=_blank 和 rel=noopener
 const defaultRender =
   md.renderer.rules.link_open ||
-  function (tokens: { length: number }, idx: number, options: object, _env: unknown, self: unknown) {
-    return (self as { renderToken: (t: unknown[], i: number, o: object) => string }).renderToken(tokens, idx, options)
+  function (tokens, idx, options, _env, self) {
+    return self.renderToken(tokens, idx, options)
   }
 
 md.renderer.rules.link_open = function (tokens, idx, options, env, self) {

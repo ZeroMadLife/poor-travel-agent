@@ -127,6 +127,9 @@ def create_app(
     agent: Any | None = None,
     auth: AuthManager | None = None,
     session_store: Any | None = None,
+    coding_model_factory: Any | None = None,
+    coding_workspace_root: str | Path | None = None,
+    coding_storage_root: str | Path | None = None,
 ) -> FastAPI:
     """Create the TourSwarm API app.
 
@@ -139,10 +142,18 @@ def create_app(
     app.state.agent = agent
     app.state.auth = auth
     app.state.session_store = session_store
-    from api import routes, ws
+    repo_root = Path(__file__).resolve().parent.parent
+    app.state.coding_model_factory = coding_model_factory or (
+        lambda: create_llm("deepseek:deepseek-chat")
+    )
+    app.state.coding_workspace_root = Path(coding_workspace_root or repo_root).resolve()
+    app.state.coding_storage_root = Path(coding_storage_root or (repo_root / ".coding")).resolve()
+    app.state.coding_sessions = {}
+    from api import coding, routes, ws
 
     app.include_router(routes.router)
     app.include_router(ws.router)
+    app.include_router(coding.router)
     return app
 
 
