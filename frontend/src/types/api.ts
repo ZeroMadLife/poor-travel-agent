@@ -140,6 +140,13 @@ export type CodingTraceEvent = {
   type: 'model_requested' | 'model_parsed' | 'retry'
   content?: string
   kind?: string
+  prompt_chars?: number
+}
+
+export type CodingSkillInvokedEvent = {
+  type: 'skill_invoked'
+  skill: string
+  arguments: string
 }
 
 export type CodingServerEvent =
@@ -149,6 +156,69 @@ export type CodingServerEvent =
   | CodingStepLimitEvent
   | ErrorEvent
   | CodingTraceEvent
+  | CodingSkillInvokedEvent
+
+export type CodingFileEntry = {
+  name: string
+  is_dir: boolean
+}
+
+export type CodingFilesResponse = {
+  path: string
+  entries: CodingFileEntry[]
+}
+
+export type CodingFileContentResponse = {
+  path: string
+  content: string
+  lines: number
+}
+
+export type CodingGitStatusResponse = {
+  is_git: boolean
+  branch: string
+  dirty_count: number
+  changed_files: string[]
+}
+
+export type CodingModel = {
+  id: string
+  label: string
+  provider: string
+}
+
+export type CodingModelsResponse = {
+  models: CodingModel[]
+  current: string | null
+}
+
+export type CodingSkillSummary = {
+  name: string
+  description: string
+  source: string
+  argument_hint: string
+}
+
+export type CodingSkillsResponse = {
+  skills: CodingSkillSummary[]
+}
+
+export type CodingSkillDetailResponse = {
+  name: string
+  description: string
+  source: string
+  content: string
+}
+
+export type CodingMcpServer = {
+  name: string
+  transport: string
+  status: string
+}
+
+export type CodingMcpServersResponse = {
+  servers: CodingMcpServer[]
+}
 
 export type SessionSummary = {
   session_id: string

@@ -1,0 +1,211 @@
+<script setup lang="ts">
+import { computed, ref } from 'vue'
+import {
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  Circle,
+  Terminal,
+  Wrench,
+  XCircle,
+} from 'lucide-vue-next'
+import type { ToolActivity } from '../stores/coding'
+
+const props = defineProps<{
+  tools: ToolActivity[]
+  isThinking: boolean
+}>()
+
+const expanded = ref(false)
+
+const doneCount = computed(
+  () => props.tools.filter((t) => t.status === 'done').length,
+)
+const errorCount = computed(
+  () => props.tools.filter((t) => t.status === 'error').length,
+)
+const runningCount = computed(
+  () => props.tools.filter((t) => t.status === 'running').length,
+)
+
+const allSettled = computed(
+  () => !props.isThinking && runningCount.value === 0,
+)
+
+function toggle() {
+  expanded.value = !expanded.value
+}
+
+function iconFor(tool: ToolActivity) {
+  if (tool.status === 'running') return Circle
+  if (tool.status === 'error') return XCircle
+  return CheckCircle2
+}
+
+function colorFor(tool: ToolActivity) {
+  if (tool.status === 'running') return '#3b82f6'
+  if (tool.status === 'error') return '#ef4444'
+  return '#10b981'
+}
+</script>
+
+<template>
+  <div class="tool-activity" :class="{ settled: allSettled }">
+    <button class="activity-header" @click="toggle">
+      <component :is="expanded ? ChevronDown : ChevronRight" :size="14" />
+      <Wrench :size="13" />
+      <span class="activity-label">
+        Activity: {{ tools.length }} tool{{ tools.length > 1 ? 's' : '' }}
+      </span>
+      <span v-if="runningCount > 0" class="activity-badge running">
+        {{ runningCount }} running
+      </span>
+      <span v-if="errorCount > 0" class="activity-badge error">
+        {{ errorCount }} error
+      </span>
+      <span v-else-if="allSettled" class="activity-badge done">
+        {{ doneCount }} done
+      </span>
+    </button>
+
+    <div v-if="expanded" class="tool-list">
+      <div v-for="(tool, i) in tools" :key="i" class="tool-item">
+        <div class="tool-row">
+          <component :is="iconFor(tool)" :size="13" :color="colorFor(tool)" />
+          <Terminal v-if="tool.tool === 'run_shell'" :size="12" />
+          <span class="tool-name">{{ tool.tool }}</span>
+          <span class="tool-args">{{ JSON.stringify(tool.args).slice(0, 80) }}</span>
+          <span v-if="tool.status === 'running'" class="tool-spinner"></span>
+        </div>
+        <div v-if="tool.content && expanded" class="tool-result">
+          <pre>{{ tool.content.slice(0, 500) }}{{ tool.content.length > 500 ? '...' : '' }}</pre>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.tool-activity {
+  margin: 4px 0 8px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #f9fafb;
+  overflow: hidden;
+}
+
+.tool-activity.settled {
+  opacity: 0.85;
+}
+
+.activity-header {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 6px 10px;
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
+  color: #4b5563;
+}
+
+.activity-header:hover {
+  background: #f3f4f6;
+}
+
+.activity-label {
+  font-weight: 600;
+}
+
+.activity-badge {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.activity-badge.running {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.activity-badge.done {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+.activity-badge.error {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.tool-list {
+  border-top: 1px solid #e5e7eb;
+  padding: 4px 0;
+}
+
+.tool-item {
+  padding: 4px 10px;
+}
+
+.tool-item:not(:last-child) {
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.tool-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+}
+
+.tool-name {
+  font-weight: 600;
+  color: #374151;
+}
+
+.tool-args {
+  color: #9ca3af;
+  font-family: 'SF Mono', monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-spinner {
+  width: 11px;
+  height: 11px;
+  border: 2px solid #dbeafe;
+  border-top-color: #3b82f6;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.tool-result {
+  margin-top: 3px;
+  padding: 4px 8px;
+  background: #fff;
+  border-radius: 3px;
+  border: 1px solid #f0f1f3;
+}
+
+.tool-result pre {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  font-family: 'SF Mono', monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #4b5563;
+}
+</style>

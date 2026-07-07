@@ -1,4 +1,13 @@
-import type { CodingSessionResponse } from '../types/api'
+import type {
+  CodingFileContentResponse,
+  CodingFilesResponse,
+  CodingGitStatusResponse,
+  CodingMcpServersResponse,
+  CodingModelsResponse,
+  CodingSessionResponse,
+  CodingSkillDetailResponse,
+  CodingSkillsResponse,
+} from '../types/api'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || window.location.origin
 
@@ -22,4 +31,79 @@ export function buildCodingStreamUrl(sessionId: string): string {
   base.pathname = `/api/v1/coding/${sessionId}/stream`
   base.search = ''
   return base.toString()
+}
+
+export async function fetchCodingFiles(
+  sessionId: string,
+  path = '.',
+): Promise<CodingFilesResponse> {
+  const url = new URL(`/api/v1/coding/${sessionId}/files`, API_BASE_URL)
+  url.searchParams.set('path', path)
+  const response = await fetch(url)
+  if (!response.ok) throw new Error(`fetch files failed: ${response.status}`)
+  return (await response.json()) as CodingFilesResponse
+}
+
+export async function fetchCodingFile(
+  sessionId: string,
+  path: string,
+): Promise<CodingFileContentResponse> {
+  const url = new URL(`/api/v1/coding/${sessionId}/file`, API_BASE_URL)
+  url.searchParams.set('path', path)
+  const response = await fetch(url)
+  if (!response.ok) throw new Error(`fetch file failed: ${response.status}`)
+  return (await response.json()) as CodingFileContentResponse
+}
+
+export async function fetchCodingGitStatus(
+  sessionId: string,
+): Promise<CodingGitStatusResponse> {
+  const response = await fetch(
+    new URL(`/api/v1/coding/${sessionId}/git/status`, API_BASE_URL),
+  )
+  if (!response.ok) throw new Error(`fetch git status failed: ${response.status}`)
+  return (await response.json()) as CodingGitStatusResponse
+}
+
+export async function fetchCodingModels(): Promise<CodingModelsResponse> {
+  const response = await fetch(new URL('/api/v1/coding/models', API_BASE_URL))
+  if (!response.ok) throw new Error(`fetch models failed: ${response.status}`)
+  return (await response.json()) as CodingModelsResponse
+}
+
+export async function switchCodingModel(
+  sessionId: string,
+  modelId: string,
+): Promise<void> {
+  const response = await fetch(
+    new URL(`/api/v1/coding/${sessionId}/model`, API_BASE_URL),
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model_id: modelId }),
+    },
+  )
+  if (!response.ok) throw new Error(`switch model failed: ${response.status}`)
+}
+
+export async function fetchCodingSkills(): Promise<CodingSkillsResponse> {
+  const response = await fetch(new URL('/api/v1/coding/skills', API_BASE_URL))
+  if (!response.ok) throw new Error(`fetch skills failed: ${response.status}`)
+  return (await response.json()) as CodingSkillsResponse
+}
+
+export async function fetchCodingSkill(
+  name: string,
+): Promise<CodingSkillDetailResponse> {
+  const response = await fetch(
+    new URL(`/api/v1/coding/skills/${name}`, API_BASE_URL),
+  )
+  if (!response.ok) throw new Error(`fetch skill failed: ${response.status}`)
+  return (await response.json()) as CodingSkillDetailResponse
+}
+
+export async function fetchCodingMcpServers(): Promise<CodingMcpServersResponse> {
+  const response = await fetch(new URL('/api/v1/coding/mcp/servers', API_BASE_URL))
+  if (!response.ok) throw new Error(`fetch mcp servers failed: ${response.status}`)
+  return (await response.json()) as CodingMcpServersResponse
 }

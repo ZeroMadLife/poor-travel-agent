@@ -1,16 +1,16 @@
-# TourSwarm — 旅游 Agent + Web Coding 助手
+# TourSwarm — 旅游 Agent + Sage Web Coding 助手
 
-> 一个本地 Agent 实验仓：旅游侧沉淀“个人旅游助手”产品原型，Coding 侧沉淀“网页端自主编程助手”框架能力。当前阶段不是上线运营，而是把 demo 打磨成能讲清楚架构、能真实联调、能继续量化评测的作品。
+> 一个本地 Agent 实验仓：旅游侧沉淀"个人旅游助手"产品原型，Coding 侧（Sage）沉淀"网页端自主编程助手"框架能力。当前阶段不是上线运营，而是把 demo 打磨成能讲清楚架构、能真实联调、能继续量化评测的作品。
 
 ## 当前定位
 
 | 维度 | 说明 |
 |------|------|
-| 产品方向 | 个人旅游 Agent + 网页端 Coding Agent |
+| 产品方向 | 个人旅游 Agent + Sage 网页端 Coding Agent |
 | 旅游侧差异化 | ReAct 主Agent + `generate_itinerary` 工具包装多Agent图 + 自研 MCP 工具 + 预算约束 + 记忆/验证器 |
-| Coding 侧差异化 | Pico v3 风格 Runtime + XML 工具协议 + 文件/搜索/patch/shell 工具 + 权限治理 + WebSocket 流式事件 |
-| 当前阶段 | Phase 6：旅游 demo 保持可联调，新增 Coding Agent v1，不是生产上线 |
-| 技术栈 | FastAPI + WebSocket + LangChain ReAct + LangGraph + MCP + Mem0/Qdrant + Redis + Vue3 + TypeScript |
+| Sage 差异化 | Pico v3 风格 Runtime + XML 工具协议 + Skills 系统 + 文件/搜索/patch/shell 工具 + 两层权限治理 + 三栏布局 + WebSocket 流式 |
+| 当前阶段 | Sage v2：三栏布局 + Skills + 文件树 + git 状态 + 模型选择 + 工具折叠 |
+| 技术栈 | FastAPI + WebSocket + LangChain ReAct + LangGraph + MCP + Mem0/Qdrant + Redis + Vue3 + TypeScript + Pinia |
 | 语言 | Python 3.11+ / TypeScript |
 
 ## 核心架构

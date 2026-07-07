@@ -1,25 +1,20 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import ToolCallTrace from '../components/ToolCallTrace.vue'
-import { buildCodingStreamUrl, startCodingSession } from '../api/coding'
-import type { CodingServerEvent, ToolCallStatus } from '../types/api'
+import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { ArrowLeft } from 'lucide-vue-next'
+import CodingComposer from '../components/CodingComposer.vue'
+import CodingFileTree from '../components/CodingFileTree.vue'
+import CodingGitBadge from '../components/CodingGitBadge.vue'
+import CodingSidebar from '../components/CodingSidebar.vue'
+import CodingToolActivity from '../components/CodingToolActivity.vue'
+import { useCodingStore } from '../stores/coding'
+import { useMarkdown } from '../composables/useMarkdown'
 
-type Message = {
-  role: 'user' | 'assistant'
-  content: string
-}
+const emit = defineEmits<{ exit: [] }>()
 
-const sessionId = ref('')
-const workspaceRoot = ref('')
-const input = ref('')
-const messages = ref<Message[]>([])
-const toolCalls = ref<ToolCallStatus[]>([])
-const isThinking = ref(false)
-const errorMessage = ref('')
-const socket = ref<WebSocket | null>(null)
+const store = useCodingStore()
 const messagesRef = ref<HTMLElement | null>(null)
-
-const canSend = computed(() => Boolean(input.value.trim()) && Boolean(sessionId.value) && !isThinking.value)
+const composerRef = ref<InstanceType<typeof CodingComposer> | null>(null)
+const { render } = useMarkdown()
 
 function scrollToBottom() {
   nextTick(() => {
@@ -29,182 +24,166 @@ function scrollToBottom() {
   })
 }
 
-async function ensureSession() {
-  if (sessionId.value) return
-  const session = await startCodingSession()
-  sessionId.value = session.session_id
-  workspaceRoot.value = session.workspace_root
+function onUseSkill(command: string) {
+  composerRef.value?.setInput(command)
 }
 
-function connectSocket() {
-  if (!sessionId.value) return
-  socket.value?.close()
-  const ws = new WebSocket(buildCodingStreamUrl(sessionId.value))
-  ws.onmessage = (event) => handleServerEvent(JSON.parse(event.data) as CodingServerEvent)
-  ws.onerror = () => {
-    errorMessage.value = '连接中断'
-    isThinking.value = false
-  }
-  socket.value = ws
-}
-
-async function initialize() {
-  try {
-    await ensureSession()
-    connectSocket()
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error)
-  }
-}
-
-function handleServerEvent(event: CodingServerEvent) {
-  if (event.type === 'tool_call') {
-    toolCalls.value.push({
-      tool: event.tool,
-      args: event.args,
-      status: 'running',
-      message: `正在执行 ${event.tool}`,
-    })
-    return
-  }
-
-  if (event.type === 'tool_result') {
-    const target = [...toolCalls.value].reverse().find((call) => call.tool === event.tool && call.status === 'running')
-    if (target) {
-      target.status = event.is_error ? 'error' : 'done'
-      target.message = event.content.slice(0, 160)
-    } else {
-      toolCalls.value.push({
-        tool: event.tool,
-        args: event.args,
-        status: event.is_error ? 'error' : 'done',
-        message: event.content.slice(0, 160),
-      })
-    }
-    return
-  }
-
-  if (event.type === 'final' || event.type === 'step_limit') {
-    messages.value.push({ role: 'assistant', content: event.content })
-    isThinking.value = false
-    scrollToBottom()
-    return
-  }
-
-  if (event.type === 'error') {
-    errorMessage.value = event.message
-    isThinking.value = false
-  }
-}
-
-function sendMessage() {
-  const content = input.value.trim()
-  if (!content || !socket.value || socket.value.readyState !== WebSocket.OPEN) return
-  messages.value.push({ role: 'user', content })
-  input.value = ''
-  errorMessage.value = ''
-  toolCalls.value = []
-  isThinking.value = true
-  socket.value.send(JSON.stringify({ content }))
+onMounted(async () => {
+  await store.initialize()
   scrollToBottom()
-}
+})
 
-function onKeydown(event: KeyboardEvent) {
-  if (event.key === 'Enter' && !event.shiftKey) {
-    event.preventDefault()
-    sendMessage()
-  }
-}
-
-onMounted(initialize)
-onBeforeUnmount(() => socket.value?.close())
+onBeforeUnmount(() => {
+  store.disconnect()
+})
 </script>
 
 <template>
-  <main class="coding-view">
-    <header class="coding-header">
-      <div>
-        <h1>CodeAssist</h1>
-        <p>{{ workspaceRoot || '...' }}</p>
-      </div>
-      <span class="session-pill">{{ sessionId ? '已连接' : '连接中' }}</span>
+  <div class="sage-view">
+    <header class="sage-header">
+      <button class="exit-btn" @click="emit('exit')">
+        <ArrowLeft :size="16" />
+      </button>
+      <h1 class="sage-brand">Sage</h1>
+      <CodingGitBadge />
+      <span class="session-pill">
+        {{ store.sessionId ? '已连接' : '连接中' }}
+      </span>
     </header>
 
-    <section ref="messagesRef" class="coding-messages">
-      <article v-for="(message, index) in messages" :key="index" :class="['message', message.role]">
-        <pre>{{ message.content }}</pre>
-      </article>
-      <ToolCallTrace :is-thinking="isThinking" :tool-calls="toolCalls" />
-      <p v-if="errorMessage" class="error-text">{{ errorMessage }}</p>
-    </section>
+    <div class="sage-body">
+      <div class="pane-left">
+        <CodingSidebar @use-skill="onUseSkill" />
+      </div>
 
-    <footer class="coding-composer">
-      <textarea
-        v-model="input"
-        rows="2"
-        :disabled="!sessionId || isThinking"
-        placeholder="读 README.md 告诉我项目叫什么"
-        @keydown="onKeydown"
-      />
-      <button :disabled="!canSend" @click="sendMessage">
-        {{ isThinking ? '执行中' : '发送' }}
-      </button>
-    </footer>
-  </main>
+      <main class="pane-center">
+        <section ref="messagesRef" class="message-area">
+          <div v-if="store.messages.length === 0" class="empty-state">
+            <p>Sage 已就绪。输入任务或 /review 调用 skill。</p>
+          </div>
+          <template v-for="(msg, i) in store.messages" :key="i">
+            <div v-if="msg.tools && msg.tools.length > 0" class="activity-row">
+              <CodingToolActivity :tools="msg.tools" :is-thinking="!!msg.isThinking" />
+            </div>
+            <article v-if="msg.content" :class="['message', msg.role]">
+              <div v-html="render(msg.content)" class="message-content"></div>
+            </article>
+          </template>
+          <p v-if="store.errorMessage" class="error-text">{{ store.errorMessage }}</p>
+        </section>
+
+        <CodingComposer ref="composerRef" />
+      </main>
+
+      <div class="pane-right">
+        <CodingFileTree />
+      </div>
+    </div>
+  </div>
 </template>
 
 <style scoped>
-.coding-view {
+.sage-view {
   display: grid;
-  grid-template-rows: auto 1fr auto;
-  min-height: calc(100vh - 56px);
-  background: #f7f8fa;
-  color: #111827;
-}
-
-.coding-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 16px 20px;
-  border-bottom: 1px solid #e5e7eb;
+  grid-template-rows: auto 1fr;
+  height: 100vh;
   background: #ffffff;
 }
 
-.coding-header h1 {
-  margin: 0;
-  font-size: 20px;
+.sage-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border-bottom: 1px solid #e5e7eb;
+  background: #fff;
 }
 
-.coding-header p {
-  margin: 4px 0 0;
+.exit-btn {
+  display: flex;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px;
+  cursor: pointer;
   color: #6b7280;
-  font-size: 13px;
+}
+
+.exit-btn:hover {
+  background: #f3f4f6;
+}
+
+.sage-brand {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 800;
+  color: #111827;
 }
 
 .session-pill {
-  padding: 4px 10px;
+  margin-left: auto;
+  padding: 3px 10px;
   border: 1px solid #d1d5db;
   border-radius: 999px;
   color: #374151;
   background: #f9fafb;
-  font-size: 13px;
+  font-size: 11px;
 }
 
-.coding-messages {
+.sage-body {
+  display: grid;
+  grid-template-columns: 240px 1fr 300px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.pane-left {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.pane-center {
+  display: grid;
+  grid-template-rows: 1fr auto;
+  min-height: 0;
+  border-right: 1px solid #e5e7eb;
+}
+
+.pane-right {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.message-area {
   min-height: 0;
   overflow-y: auto;
-  padding: 20px;
+  padding: 16px 20px;
+}
+
+.empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #9ca3af;
+  font-size: 14px;
+}
+
+.activity-row {
+  max-width: 760px;
+  margin: 0 0 4px;
 }
 
 .message {
-  max-width: 860px;
+  max-width: 760px;
   margin: 0 0 12px;
-  padding: 12px 14px;
+  padding: 10px 14px;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
-  background: #ffffff;
+  background: #fff;
+  font-size: 14px;
+  line-height: 1.6;
 }
 
 .message.user {
@@ -212,51 +191,31 @@ onBeforeUnmount(() => socket.value?.close())
   background: #eef6ff;
 }
 
-pre {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: inherit;
+.message-content :deep(pre) {
+  background: #f3f4f6;
+  padding: 8px 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 13px;
+}
+
+.message-content :deep(code) {
+  font-family: 'SF Mono', 'Fira Code', monospace;
 }
 
 .error-text {
   color: #b91c1c;
+  font-size: 13px;
 }
 
-.coding-composer {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px;
-  padding: 14px 20px;
-  border-top: 1px solid #e5e7eb;
-  background: #ffffff;
-}
-
-.coding-composer textarea {
-  width: 100%;
-  resize: vertical;
-  border: 1px solid #d1d5db;
-  border-radius: 8px;
-  padding: 10px 12px;
-  line-height: 1.5;
-}
-
-.coding-composer button {
-  min-width: 84px;
-  border: 0;
-  border-radius: 8px;
-  background: #111827;
-  color: #ffffff;
-  font-weight: 700;
-}
-
-.coding-composer button:disabled {
-  background: #9ca3af;
-}
-
-@media (max-width: 720px) {
-  .coding-composer {
+@media (max-width: 900px) {
+  .sage-body {
     grid-template-columns: 1fr;
+  }
+
+  .pane-left,
+  .pane-right {
+    display: none;
   }
 }
 </style>

@@ -4,23 +4,23 @@ import { ref } from 'vue'
 import ChatView from './views/ChatView.vue'
 import CodingView from './views/CodingView.vue'
 
-const activeView = ref<'travel' | 'coding'>('travel')
+const activeView = ref<'travel' | 'coding'>('coding')
 </script>
 
 <template>
   <div class="app-shell">
-    <nav class="app-nav">
+    <nav v-if="activeView === 'travel'" class="app-nav">
       <button :class="{ active: activeView === 'travel' }" @click="activeView = 'travel'">
         <Map :size="17" />
         <span>旅行</span>
       </button>
-      <button :class="{ active: activeView === 'coding' }" @click="activeView = 'coding'">
+      <button @click="activeView = 'coding'">
         <Code2 :size="17" />
-        <span>代码</span>
+        <span>Sage</span>
       </button>
     </nav>
     <ChatView v-if="activeView === 'travel'" />
-    <CodingView v-else />
+    <CodingView v-else @exit="activeView = 'travel'" />
   </div>
 </template>
 
