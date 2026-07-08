@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 DEFAULT_SYSTEM_PROMPT = """You are Sage, a personal coding agent running in the user's repository.
@@ -31,13 +33,52 @@ class SectionRender:
 
 
 class ContextManager:
-    """Build prompt text from stable prefix, tools, history, and current request."""
+    """Build prompt text from a cached system prompt, history, and current request."""
 
     def __init__(
-        self, total_budget: int = 60000, system_prompt: str = DEFAULT_SYSTEM_PROMPT
+        self,
+        total_budget: int = 60000,
+        system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+        today: Callable[[], date] | None = None,
     ) -> None:
         self.total_budget = total_budget
         self.system_prompt = system_prompt
+        self._today = today or date.today
+        self._cached_system_prompt: str | None = None
+        self._cached_tools_key: tuple[str, ...] = ()
+        self._system_prompt_dirty = True
+        self.system_prompt_build_count = 0
+
+    def invalidate_system_prompt(self) -> None:
+        """Mark the cached system prompt as stale for the next build."""
+        self._system_prompt_dirty = True
+
+    def build_system_prompt_once(self, tools: list[str] | None = None) -> str:
+        """Return a byte-stable system prompt until invalidated.
+
+        The prompt follows the Hermes-style split:
+        stable identity/tool guidance, session-level context, and a low-churn
+        volatile line.  The volatile tier deliberately uses date precision so
+        turns within the same day keep the same cache prefix.
+        """
+        tools = [normalize_text(tool) for tool in tools or []]
+        tools_key = tuple(tools)
+        if (
+            self._cached_system_prompt is not None
+            and not self._system_prompt_dirty
+            and self._cached_tools_key == tools_key
+        ):
+            return self._cached_system_prompt
+
+        stable = self._stable_prompt(tools)
+        context = self._context_prompt()
+        volatile = self._volatile_prompt()
+        prompt = "\n\n".join(part for part in (stable, context, volatile) if part).strip()
+        self._cached_system_prompt = prompt
+        self._cached_tools_key = tools_key
+        self._system_prompt_dirty = False
+        self.system_prompt_build_count += 1
+        return prompt
 
     def build(
         self,
@@ -48,11 +89,11 @@ class ContextManager:
         """Return a budgeted prompt and metadata."""
         history = history or []
         tools = tools or []
+        system_prompt = self.build_system_prompt_once(tools)
         raw_sections = {
-            "prefix": self.system_prompt,
-            "tools": "Available tools:\n" + ("\n".join(f"- {tool}" for tool in tools) or "- none"),
+            "prefix": system_prompt,
             "history": self._render_history(history),
-            "current_request": f"Current user request:\n{user_message}",
+            "current_request": f"Current user request:\n{normalize_text(user_message)}",
         }
         rendered = self._render_to_budget(raw_sections)
         prompt = self._assemble(rendered)
@@ -74,15 +115,11 @@ class ContextManager:
         current = raw_sections["current_request"]
         separators = 6
         remaining = max(0, self.total_budget - len(current) - separators)
-        prefix_budget = max(0, remaining // 4)
-        tools_budget = max(0, remaining // 4)
-        history_budget = max(0, remaining - prefix_budget - tools_budget)
+        prefix_budget = max(0, remaining // 3)
+        history_budget = max(0, remaining - prefix_budget)
         sections = {
             "prefix": SectionRender(
                 raw_sections["prefix"], tail_clip(raw_sections["prefix"], prefix_budget)
-            ),
-            "tools": SectionRender(
-                raw_sections["tools"], tail_clip(raw_sections["tools"], tools_budget)
             ),
             "history": SectionRender(
                 raw_sections["history"], tail_clip(raw_sections["history"], history_budget)
@@ -104,12 +141,29 @@ class ContextManager:
             return sections
 
         overflow = len(prompt) - self.total_budget
-        tools = sections["tools"]
-        sections["tools"] = SectionRender(
-            tools.raw,
-            tail_clip(tools.rendered, max(0, len(tools.rendered) - overflow)),
+        prefix = sections["prefix"]
+        sections["prefix"] = SectionRender(
+            prefix.raw,
+            tail_clip(prefix.rendered, max(0, len(prefix.rendered) - overflow)),
         )
         return sections
+
+    def _stable_prompt(self, tools: list[str]) -> str:
+        tool_block = "\n".join(f"- {tool}" for tool in tools) or "- none"
+        return "\n".join(
+            [
+                normalize_text(self.system_prompt),
+                "Available tools:",
+                tool_block,
+            ]
+        )
+
+    @staticmethod
+    def _context_prompt() -> str:
+        return "Project context: current workspace repository."
+
+    def _volatile_prompt(self) -> str:
+        return f"Session date: {self._today().isoformat()}"
 
     @staticmethod
     def _render_history(history: list[dict[str, Any]]) -> str:
@@ -118,7 +172,7 @@ class ContextManager:
         lines = ["Transcript:"]
         for item in history:
             role = str(item.get("role", "unknown"))
-            content = str(item.get("content", ""))
+            content = normalize_text(item.get("content", ""))
             if item.get("name"):
                 role = f"{role}:{item['name']}"
             lines.append(f"{role}: {content}")
@@ -127,7 +181,7 @@ class ContextManager:
     @staticmethod
     def _assemble(sections: dict[str, SectionRender]) -> str:
         return "\n\n".join(
-            sections[name].rendered for name in ("prefix", "tools", "history", "current_request")
+            sections[name].rendered for name in ("prefix", "history", "current_request")
         ).strip()
 
 
@@ -141,3 +195,8 @@ def tail_clip(text: str, limit: int) -> str:
     if limit <= len(marker):
         return text[-limit:]
     return marker + text[-(limit - len(marker)) :]
+
+
+def normalize_text(value: Any) -> str:
+    """Normalize string content for bit-stable prompt prefixes."""
+    return str(value or "").strip()

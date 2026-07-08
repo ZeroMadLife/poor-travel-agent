@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from core.coding.context_manager import ContextManager
 from core.coding.workspace import now
 
 
@@ -15,6 +16,7 @@ class CompactManager:
         history: list[dict[str, Any]],
         keep_recent_turns: int = 2,
         trigger: str = "manual",
+        context_manager: ContextManager | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Return compacted history and a summary record."""
         groups = self._group_turns(history)
@@ -33,6 +35,8 @@ class CompactManager:
             "created_at": now(),
         }
         new_history = [summary_item, *kept_items]
+        if context_manager is not None:
+            context_manager.invalidate_system_prompt()
         return new_history, self._summary(trigger, history, new_history, summary_text)
 
     @staticmethod

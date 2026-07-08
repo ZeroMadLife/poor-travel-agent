@@ -58,6 +58,7 @@ class CodingRuntime:
         self.todo_ledger = TodoLedger(self.session["todos"])
         self.plan_mode = PlanModeManager(self.workspace.root)
         self.worker_manager = WorkerManager(self.workspace, self.model_factory)
+        self.context_manager = ContextManager()
         self.approval_policy = approval_policy
         self.runtime_mode = "default"
         self.permission_checker = self._permission_checker()
@@ -198,7 +199,7 @@ class CodingRuntime:
             model=self.model,
             workspace=self.workspace,
             tools=self.tools,
-            context_manager=ContextManager(),
+            context_manager=self.context_manager,
             permission_checker=self.permission_checker,
             policy_checker=self.policy_checker,
             history=self.session["history"],
