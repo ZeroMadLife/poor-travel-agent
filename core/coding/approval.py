@@ -118,6 +118,16 @@ class ApprovalManager:
             queue = self._queues.get(session_id, [])
             return queue[0].to_dict() if queue else None
 
+    def cancel_session(self, session_id: str) -> None:
+        """Wake and deny every pending approval for a stopped session."""
+        with self._lock:
+            entries = list(self._queues.get(session_id, []))
+            self._queues[session_id] = []
+            for entry in entries:
+                entry.result = "deny"
+        for entry in entries:
+            entry.event.set()
+
     def is_session_approved(self, session_id: str, pattern_key: str) -> bool:
         """Return whether this risky pattern is approved for the current session."""
         with self._lock:

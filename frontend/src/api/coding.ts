@@ -134,3 +134,11 @@ export async function respondCodingApproval(
   )
   if (!response.ok) throw new Error(`respond approval failed: ${response.status}`)
 }
+
+export async function stopCodingRun(sessionId: string): Promise<void> {
+  const response = await fetch(
+    new URL(`/api/v1/coding/${sessionId}/run/stop`, API_BASE_URL),
+    { method: 'POST' },
+  )
+  if (!response.ok) throw new Error(`stop run failed: ${response.status}`)
+}

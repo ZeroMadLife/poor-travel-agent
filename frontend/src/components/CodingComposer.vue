@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { Send } from 'lucide-vue-next'
+import { Send, Square } from 'lucide-vue-next'
 import { useCodingStore } from '../stores/coding'
 
 const store = useCodingStore()
@@ -31,6 +31,10 @@ function send() {
   if (!content) return
   store.sendMessage(content)
   input.value = ''
+}
+
+function stop() {
+  void store.stopCurrentRun()
 }
 
 function onKeydown(event: KeyboardEvent) {
@@ -97,7 +101,16 @@ defineExpose({
         placeholder="输入任务，或 /review 调用 skill"
         @keydown="onKeydown"
       />
-      <button :disabled="!canSend" class="send-btn" @click="send">
+      <button
+        v-if="store.isThinking"
+        class="stop-btn"
+        type="button"
+        title="Stop current run"
+        @click="stop"
+      >
+        <Square :size="13" />
+      </button>
+      <button v-else :disabled="!canSend" class="send-btn" @click="send">
         <Send :size="15" />
       </button>
     </div>
@@ -190,6 +203,19 @@ defineExpose({
   border-radius: 8px;
   background: #111827;
   color: #fff;
+  cursor: pointer;
+}
+
+.stop-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid #ef4444;
+  border-radius: 8px;
+  background: #fff;
+  color: #dc2626;
   cursor: pointer;
 }
 

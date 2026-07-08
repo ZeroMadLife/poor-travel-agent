@@ -102,3 +102,24 @@ async def test_engine_emits_step_limit_when_model_never_finishes(tmp_path: Path)
 
     assert events[-1]["type"] == "step_limit"
     assert "已完成" in events[-1]["content"]
+
+
+async def test_engine_cancels_before_model_request(tmp_path: Path) -> None:
+    """A stop request cancels the turn before another model call is started."""
+    workspace = WorkspaceContext(root=tmp_path)
+    tools = build_tool_registry(workspace)
+    model = FakeModel(["<final>should not be called</final>"])
+    engine = Engine(
+        model=model,
+        workspace=workspace,
+        tools=tools,
+        context_manager=ContextManager(),
+        permission_checker=PermissionChecker(approval_policy="auto"),
+        policy_checker=ToolPolicyChecker(workspace),
+        should_stop=lambda: True,
+    )
+
+    events = [event async for event in engine.run_turn("读 README")]
+
+    assert events == [{"type": "cancelled", "content": "已停止当前运行。"}]
+    assert model.prompts == []

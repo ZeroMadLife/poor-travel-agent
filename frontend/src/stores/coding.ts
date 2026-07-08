@@ -11,6 +11,7 @@ import {
   fetchCodingSkills,
   respondCodingApproval,
   startCodingSession,
+  stopCodingRun,
   switchCodingModel,
 } from '../api/coding'
 import type {
@@ -125,7 +126,7 @@ export const useCodingStore = defineStore('coding', () => {
       void refreshWorkspaceAfterTool(event as CodingToolResultEvent)
       return
     }
-    if (event.type === 'final' || event.type === 'step_limit') {
+    if (event.type === 'final' || event.type === 'step_limit' || event.type === 'cancelled') {
       finalizeCurrentMessage(event.content)
       isThinking.value = false
       stopApprovalPolling()
@@ -229,6 +230,12 @@ export const useCodingStore = defineStore('coding', () => {
     if (!sessionId.value || !pendingApproval.value) return
     const approvalId = pendingApproval.value.approval_id
     await respondCodingApproval(sessionId.value, approvalId, choice)
+    pendingApproval.value = null
+  }
+
+  async function stopCurrentRun() {
+    if (!sessionId.value || !isThinking.value) return
+    await stopCodingRun(sessionId.value)
     pendingApproval.value = null
   }
 
@@ -352,6 +359,7 @@ export const useCodingStore = defineStore('coding', () => {
     sendMessage,
     handleServerEvent,
     respondApproval,
+    stopCurrentRun,
     loadSkills,
     loadMcpServers,
     loadModels,

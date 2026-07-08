@@ -147,6 +147,11 @@ export type CodingStepLimitEvent = {
   content: string
 }
 
+export type CodingCancelledEvent = {
+  type: 'cancelled'
+  content: string
+}
+
 export type CodingTraceEvent = {
   type: 'model_requested' | 'model_parsed' | 'retry'
   content?: string
@@ -174,6 +179,7 @@ export type CodingServerEvent =
   | CodingToolResultEvent
   | CodingFinalEvent
   | CodingStepLimitEvent
+  | CodingCancelledEvent
   | ErrorEvent
   | CodingTraceEvent
   | CodingSkillInvokedEvent

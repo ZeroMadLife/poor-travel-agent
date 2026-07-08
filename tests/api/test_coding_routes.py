@@ -178,6 +178,23 @@ def test_coding_websocket_waits_for_approval_then_continues(tmp_path: Path) -> N
     assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "approved"
 
 
+def test_stop_coding_run_marks_runtime_stop_requested(tmp_path: Path) -> None:
+    """POST /run/stop requests cancellation for the active coding run."""
+    app = create_app(
+        coding_model_factory=FakeModel,
+        coding_workspace_root=tmp_path,
+        coding_storage_root=tmp_path / ".coding",
+    )
+    client = TestClient(app)
+    session_id = client.post("/api/v1/coding/session", json={}).json()["session_id"]
+
+    response = client.post(f"/api/v1/coding/{session_id}/run/stop")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert app.state.coding_sessions[session_id].stop_requested is True
+
+
 def _make_client(tmp_path: Path) -> TestClient:
     """Create a coding-enabled app with a README in the workspace."""
     (tmp_path / "README.md").write_text("# Sage\n", encoding="utf-8")

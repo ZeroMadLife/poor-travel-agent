@@ -172,4 +172,28 @@ describe('coding store', () => {
     expect(store.messages[0].isThinking).toBe(false)
     expect(store.isThinking).toBe(false)
   })
+
+  it('handles cancelled event as a stopped assistant message', () => {
+    const store = useCodingStore()
+    store.messages = [{ role: 'assistant', content: '', tools: [], isThinking: true }]
+    store.isThinking = true
+
+    store.handleServerEvent({ type: 'cancelled', content: '已停止当前运行。' } as never)
+
+    expect(store.messages[0].content).toBe('已停止当前运行。')
+    expect(store.messages[0].isThinking).toBe(false)
+    expect(store.isThinking).toBe(false)
+  })
+
+  it('requests stop for current run', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true })
+    vi.stubGlobal('fetch', fetchMock)
+    const store = useCodingStore()
+    store.sessionId = 'c1'
+    store.isThinking = true
+
+    await store.stopCurrentRun()
+
+    expect(fetchMock).toHaveBeenCalledWith(expect.any(URL), { method: 'POST' })
+  })
 })

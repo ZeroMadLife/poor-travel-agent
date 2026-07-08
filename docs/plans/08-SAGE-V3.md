@@ -1,7 +1,7 @@
 # Sage v3 落地记录
 
 > 日期：2026-07-08
-> 当前阶段：方向一完成；方向三完成；方向二完成；方向四完成（Hermes Web UI 交互增强）
+> 当前阶段：方向一完成；方向三完成；方向二完成；方向四完成；v3.x stop/cancel run 完成
 > 参考：`docs/superpowers/prompts/2026-07-08-codex-goal-sage-v3.md`
 
 ## 目标
@@ -98,6 +98,17 @@ Composer / Skills：
 - context 使用率超过 75% 显示“压缩”提示按钮。
 - Skills 面板支持搜索，并按 `builtin` / `user` / `project` 分类折叠。
 
+### Stop / Cancel Run
+
+补上 Hermes Web UI 里非常基础的运行控制能力：
+
+- `CodingRuntime` 新增 session 级 `stop_requested` flag 和 `request_stop()`。
+- `Engine` 支持 `should_stop` token，在模型调用前后、工具执行前后、tool loop 之间、approval 等待中检查 stop。
+- stop 后 WebSocket 产生 `cancelled` 事件，内容为 `已停止当前运行。`。
+- 如果 run 正卡在 approval pending，`ApprovalManager.cancel_session()` 会唤醒并 deny 当前 session 的 pending approval，避免后端挂住。
+- 新增 REST：`POST /api/v1/coding/{session_id}/run/stop`。
+- 前端 composer 在 thinking 时将 Send 切换为 Stop 按钮，调用 stop API；store 收到 `cancelled` 后把当前 assistant thinking message 收束为停止消息。
+
 ## 测试覆盖
 
 `tests/core/coding/test_context_compact.py` 新增：
@@ -125,6 +136,13 @@ Approval 相关新增：
 
 - `frontend/src/components/CodingToolActivity.test.ts`：长工具结果截断、Show more、diff 行高亮。
 - `frontend/src/stores/coding.test.ts`：目录缓存、工具写入后刷新文件树和 git 状态。
+
+Stop / cancel 新增：
+
+- `tests/core/coding/test_engine.py`：stop token 在模型调用前取消，并断言不会再调用模型。
+- `tests/api/test_coding_routes.py`：`/run/stop` endpoint 会设置 runtime stop flag。
+- `tests/core/coding/test_approval.py`：stop session 会唤醒 pending approval。
+- `frontend/src/api/coding.test.ts` / `frontend/src/stores/coding.test.ts`：stop API、cancelled 事件和 stopCurrentRun 状态流。
 
 ## 已验证
 
@@ -174,7 +192,14 @@ cd frontend && npm run build
 
 结果：前端 `14 files / 31 tests passed`；build 通过。
 
+```bash
+pytest tests/core/coding/test_engine.py tests/api/test_coding_routes.py tests/core/coding/test_approval.py -q
+cd frontend && npm run test -- --run src/api/coding.test.ts src/stores/coding.test.ts
+```
+
+结果：后端 stop 定向 `24 passed`；前端 stop 定向 `2 files / 17 tests passed`
+
 ## 后续方向
 
 1. Graphify 更新：完成 v3 主要方向后重新生成架构图谱。
-2. 后续 v3.x：approval 的 session/always 前端按钮、diff preview、stop/cancel run、run history。
+2. 后续 v3.x：approval 的 session/always 前端按钮、diff preview、run history。

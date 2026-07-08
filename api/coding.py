@@ -169,6 +169,14 @@ async def coding_approval_respond(
     return {"ok": True}
 
 
+@router.post("/api/v1/coding/{session_id}/run/stop")
+async def stop_coding_run(session_id: str, request: Request) -> dict[str, bool]:
+    """Request cancellation for the active coding run."""
+    runtime = _require_runtime(request, session_id)
+    runtime.request_stop()
+    return {"ok": True}
+
+
 @router.get("/api/v1/coding/models", response_model=CodingModelsResponse)
 async def list_coding_models(request: Request) -> CodingModelsResponse:
     """Return available models from the provider registry."""

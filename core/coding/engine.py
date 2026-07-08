@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any, Protocol
 
 from core.coding.approval import ApprovalManager, check_dangerous_command
@@ -42,6 +42,7 @@ class Engine:
         policy_checker: ToolPolicyChecker,
         session_id: str = "",
         approval_manager: ApprovalManager | None = None,
+        should_stop: Callable[[], bool] | None = None,
         history: list[dict[str, Any]] | None = None,
         max_steps: int = 50,
     ) -> None:
@@ -53,6 +54,7 @@ class Engine:
         self.policy_checker = policy_checker
         self.session_id = session_id
         self.approval_manager = approval_manager
+        self.should_stop = should_stop or (lambda: False)
         self.history = history if history is not None else []
         self.max_steps = max_steps
 
@@ -63,6 +65,9 @@ class Engine:
         attempts = 0
 
         while tool_steps < self.max_steps and attempts < self.max_steps + 2:
+            if self.should_stop():
+                yield self._cancelled_event()
+                return
             attempts += 1
             prompt, metadata = self.context_manager.build(
                 user_message=user_message,
@@ -77,6 +82,9 @@ class Engine:
             }
 
             raw = await self._call_model(prompt)
+            if self.should_stop():
+                yield self._cancelled_event()
+                return
             kind, payload = parse(raw)
             yield {"type": "model_parsed", "kind": kind}
 
@@ -85,8 +93,13 @@ class Engine:
                 for tool_payload in tool_payloads:
                     if tool_steps >= self.max_steps:
                         break
+                    if self.should_stop():
+                        yield self._cancelled_event()
+                        return
                     async for event in self._execute_tool_payload(tool_payload):
                         yield event
+                        if event["type"] == "cancelled":
+                            return
                     tool_steps += 1
                 continue
 
@@ -106,6 +119,9 @@ class Engine:
         yield {"type": "step_limit", "content": content}
 
     async def _execute_tool_payload(self, payload: Any) -> AsyncIterator[dict[str, Any]]:
+        if self.should_stop():
+            yield self._cancelled_event()
+            return
         name, args = normalize_tool_payload(payload)
         tool = self.tools.get(name)
         if tool is None:
@@ -143,6 +159,9 @@ class Engine:
 
         yield {"type": "tool_call", "tool": name, "args": args}
         result = tool.execute(args)
+        if self.should_stop():
+            yield self._cancelled_event()
+            return
         yield self._tool_result_event(name, args, result)
 
     async def _approval_events(
@@ -187,6 +206,11 @@ class Engine:
 
         waited_seconds = 0
         while waited_seconds < 300:
+            if self.should_stop():
+                result = ToolResult(content="approval cancelled", is_error=True)
+                yield self._tool_result_event(tool.name, args, result)
+                yield self._cancelled_event()
+                return
             if await asyncio.to_thread(entry.event.wait, 1.0):
                 break
             waited_seconds += 1
@@ -199,6 +223,11 @@ class Engine:
             yield self._tool_result_event(tool.name, args, result)
             return
         yield {"type": "approval_granted", "tool": tool.name}
+
+    def _cancelled_event(self) -> dict[str, Any]:
+        content = "已停止当前运行。"
+        self.history.append({"role": "assistant", "content": content, "created_at": now()})
+        return {"type": "cancelled", "content": content}
 
     def _tool_result_event(
         self,

@@ -4,6 +4,7 @@ import {
   fetchCodingApprovalPending,
   respondCodingApproval,
   startCodingSession,
+  stopCodingRun,
 } from './coding'
 
 describe('coding API client', () => {
@@ -66,5 +67,14 @@ describe('coding API client', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ approval_id: 'appr_1', choice: 'once' }),
     })
+  })
+
+  it('requests coding run stop', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await stopCodingRun('c1')
+
+    expect(fetchMock).toHaveBeenCalledWith(expect.any(URL), { method: 'POST' })
   })
 })

@@ -63,6 +63,7 @@ class CodingRuntime:
         self.context_manager = ContextManager()
         self.approval_policy = approval_policy
         self.approval_manager = ApprovalManager()
+        self.stop_requested = False
         self.runtime_mode = "default"
         self.permission_checker = self._permission_checker()
         self.policy_checker = ToolPolicyChecker(self.workspace)
@@ -195,6 +196,7 @@ class CodingRuntime:
 
     async def run_turn(self, user_message: str) -> AsyncIterator[dict[str, Any]]:
         """Run one coding turn, persist events, and stream them to caller."""
+        self.stop_requested = False
         run_id = f"run_{uuid.uuid4().hex[:12]}"
         self.run_store.start_run(run_id)
         self.session_event_bus.emit("turn_started", {"run_id": run_id})
@@ -207,6 +209,7 @@ class CodingRuntime:
             policy_checker=self.policy_checker,
             session_id=self.session_id,
             approval_manager=self.approval_manager,
+            should_stop=lambda: self.stop_requested,
             history=self.session["history"],
             max_steps=50,
         )
@@ -217,7 +220,14 @@ class CodingRuntime:
             self._sync_session_state()
             yield event
         self.session_event_bus.emit("turn_finished", {"run_id": run_id})
+        self.stop_requested = False
         self._save_session()
+
+    def request_stop(self) -> None:
+        """Request cancellation for the current or next engine checkpoint."""
+        self.stop_requested = True
+        self.approval_manager.cancel_session(self.session_id)
+        self.session_event_bus.emit("stop_requested", {"session_id": self.session_id})
 
     def _permission_checker(self) -> PermissionChecker:
         return PermissionChecker(
