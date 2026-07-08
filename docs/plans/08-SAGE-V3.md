@@ -87,6 +87,8 @@ Sage v3 开始向 Hermes / Hermes Web UI 的设计演进。本阶段先做三块
 - 工具结果超过 800 字符时智能截断，优先在句号、换行、分号处断开。
 - 提供 Show more / Show less。
 - diff 风格结果中 `+` / `-` 行做轻量高亮。
+- 工具调用行不再展示裸 `JSON.stringify(args)`，而是转成人可扫读的动作摘要，例如 `Read README.md`、`Run pytest -q`、`Patch src/app.py`。
+- 裸参数仍保留在内部事件和 run trace 中，UI 主层只呈现“正在做什么”，贴近 Hermes / Codex 的 worklog 体验。
 
 文件树和 git 状态：
 
@@ -190,6 +192,7 @@ Approval 相关新增：
 方向四新增：
 
 - `frontend/src/components/CodingToolActivity.test.ts`：长工具结果截断、Show more、diff 行高亮。
+- `frontend/src/components/CodingToolActivity.test.ts`：常见工具调用渲染为人类可读动作摘要，不把 `old_text/new_text` 等原始参数直接铺到工具行。
 - `frontend/src/stores/coding.test.ts`：目录缓存、工具写入后刷新文件树和 git 状态。
 
 Stop / cancel 新增：

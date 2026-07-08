@@ -28,3 +28,36 @@ it('truncates long tool results and can expand them', async () => {
   expect(wrapper.find('.diff-add').exists()).toBe(true)
   expect(wrapper.find('.diff-remove').exists()).toBe(true)
 })
+
+it('renders human readable tool action summaries instead of raw JSON args', () => {
+  const wrapper = mount(CodingToolActivity, {
+    props: {
+      isThinking: true,
+      tools: [
+        {
+          tool: 'read_file',
+          args: { path: 'README.md' },
+          status: 'done',
+          content: '',
+        },
+        {
+          tool: 'run_shell',
+          args: { command: 'pytest -q' },
+          status: 'running',
+          content: '',
+        },
+        {
+          tool: 'patch_file',
+          args: { path: 'src/app.py', old_text: 'a', new_text: 'b' },
+          status: 'done',
+          content: '',
+        },
+      ],
+    },
+  })
+
+  expect(wrapper.text()).toContain('Read README.md')
+  expect(wrapper.text()).toContain('Run pytest -q')
+  expect(wrapper.text()).toContain('Patch src/app.py')
+  expect(wrapper.text()).not.toContain('"old_text"')
+})

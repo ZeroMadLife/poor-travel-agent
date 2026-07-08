@@ -86,6 +86,34 @@ function lineClass(line: string) {
   if (line.startsWith('-') && !line.startsWith('---')) return 'diff-remove'
   return ''
 }
+
+function stringArg(args: Record<string, unknown>, key: string) {
+  const value = args[key]
+  return typeof value === 'string' && value.trim() ? value.trim() : ''
+}
+
+function toolSummary(tool: ToolActivity) {
+  const path = stringArg(tool.args, 'path')
+  if (tool.tool === 'read_file') return `Read ${path || 'file'}`
+  if (tool.tool === 'list_files') return `List ${path || '.'}`
+  if (tool.tool === 'search') {
+    const pattern = stringArg(tool.args, 'pattern')
+    return `Search ${pattern || 'workspace'}${path ? ` in ${path}` : ''}`
+  }
+  if (tool.tool === 'write_file') return `Write ${path || 'file'}`
+  if (tool.tool === 'patch_file') return `Patch ${path || 'file'}`
+  if (tool.tool === 'run_shell') {
+    const command = stringArg(tool.args, 'command')
+    return `Run ${command || 'shell command'}`
+  }
+  if (tool.tool === 'todo_add') return `Add todo ${stringArg(tool.args, 'content')}`
+  if (tool.tool === 'todo_update') return `Update todo ${stringArg(tool.args, 'id')}`
+  if (tool.tool === 'todo_list') return 'List todos'
+  if (tool.tool === 'enter_plan_mode') return `Enter plan mode ${stringArg(tool.args, 'topic')}`
+  if (tool.tool === 'exit_plan_mode') return 'Exit plan mode'
+  if (tool.tool === 'agent') return `Start agent ${stringArg(tool.args, 'task')}`
+  return tool.tool.replaceAll('_', ' ')
+}
 </script>
 
 <template>
@@ -112,8 +140,7 @@ function lineClass(line: string) {
         <div class="tool-row">
           <component :is="iconFor(tool)" :size="13" :color="colorFor(tool)" />
           <Terminal v-if="tool.tool === 'run_shell'" :size="12" />
-          <span class="tool-name">{{ tool.tool }}</span>
-          <span class="tool-args">{{ JSON.stringify(tool.args).slice(0, 80) }}</span>
+          <span class="tool-name">{{ toolSummary(tool) }}</span>
           <span v-if="tool.status === 'running'" class="tool-spinner"></span>
         </div>
         <div v-if="tool.content" class="tool-result">
