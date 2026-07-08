@@ -21,6 +21,10 @@ const circumference = 2 * Math.PI * 14
 const dashOffset = computed(
   () => circumference - (store.contextPercent / 100) * circumference,
 )
+const contextTooltip = computed(
+  () =>
+    `${store.contextChars} chars used / ${store.contextBudget} budget (${store.contextPercent}%)`,
+)
 
 function send() {
   const content = input.value.trim()
@@ -56,7 +60,16 @@ defineExpose({
         </option>
       </select>
 
-      <div class="context-ring" :title="`${store.contextChars} / ${store.contextBudget} chars`">
+      <button
+        v-if="store.contextPercent > 75"
+        class="compact-hint"
+        type="button"
+        :title="contextTooltip"
+      >
+        压缩
+      </button>
+
+      <div class="context-ring" :title="contextTooltip">
         <svg width="32" height="32" viewBox="0 0 32 32">
           <circle cx="16" cy="16" r="14" fill="none" stroke="#e5e7eb" stroke-width="3" />
           <circle
@@ -121,6 +134,21 @@ defineExpose({
   align-items: center;
   justify-content: center;
   margin-left: auto;
+}
+
+.compact-hint {
+  margin-left: auto;
+  border: 1px solid #f59e0b;
+  border-radius: 6px;
+  background: #fffbeb;
+  color: #92400e;
+  padding: 3px 7px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.compact-hint + .context-ring {
+  margin-left: 0;
 }
 
 .context-pct {

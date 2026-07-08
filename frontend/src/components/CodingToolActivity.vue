@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import {
   CheckCircle2,
   ChevronDown,
@@ -17,6 +17,8 @@ const props = defineProps<{
 }>()
 
 const expanded = ref(false)
+const keepOpen = ref(false)
+const expandedResults = ref<Set<number>>(new Set())
 
 const doneCount = computed(
   () => props.tools.filter((t) => t.status === 'done').length,
@@ -31,9 +33,25 @@ const runningCount = computed(
 const allSettled = computed(
   () => !props.isThinking && runningCount.value === 0,
 )
+const isOpen = computed(() => expanded.value || keepOpen.value || props.isThinking)
+
+watch(allSettled, async (settled) => {
+  if (!settled) return
+  keepOpen.value = true
+  await nextTick()
+  keepOpen.value = false
+  expanded.value = false
+})
 
 function toggle() {
   expanded.value = !expanded.value
+}
+
+function toggleResult(index: number) {
+  const next = new Set(expandedResults.value)
+  if (next.has(index)) next.delete(index)
+  else next.add(index)
+  expandedResults.value = next
 }
 
 function iconFor(tool: ToolActivity) {
@@ -47,12 +65,33 @@ function colorFor(tool: ToolActivity) {
   if (tool.status === 'error') return '#ef4444'
   return '#10b981'
 }
+
+function resultPreview(content: string, expandedResult: boolean) {
+  if (expandedResult || content.length <= 800) return content
+  return `${smartTruncate(content, 800)}...`
+}
+
+function smartTruncate(content: string, limit: number) {
+  const slice = content.slice(0, limit)
+  const breakpoints = ['. ', '\n', '; ']
+  const candidates = breakpoints
+    .map((marker) => slice.lastIndexOf(marker))
+    .filter((index) => index > limit * 0.55)
+  const cut = candidates.length > 0 ? Math.max(...candidates) + 1 : limit
+  return slice.slice(0, cut).trimEnd()
+}
+
+function lineClass(line: string) {
+  if (line.startsWith('+') && !line.startsWith('+++')) return 'diff-add'
+  if (line.startsWith('-') && !line.startsWith('---')) return 'diff-remove'
+  return ''
+}
 </script>
 
 <template>
   <div class="tool-activity" :class="{ settled: allSettled }">
     <button class="activity-header" @click="toggle">
-      <component :is="expanded ? ChevronDown : ChevronRight" :size="14" />
+      <component :is="isOpen ? ChevronDown : ChevronRight" :size="14" />
       <Wrench :size="13" />
       <span class="activity-label">
         Activity: {{ tools.length }} tool{{ tools.length > 1 ? 's' : '' }}
@@ -68,7 +107,7 @@ function colorFor(tool: ToolActivity) {
       </span>
     </button>
 
-    <div v-if="expanded" class="tool-list">
+    <div v-if="isOpen" class="tool-list">
       <div v-for="(tool, i) in tools" :key="i" class="tool-item">
         <div class="tool-row">
           <component :is="iconFor(tool)" :size="13" :color="colorFor(tool)" />
@@ -77,8 +116,19 @@ function colorFor(tool: ToolActivity) {
           <span class="tool-args">{{ JSON.stringify(tool.args).slice(0, 80) }}</span>
           <span v-if="tool.status === 'running'" class="tool-spinner"></span>
         </div>
-        <div v-if="tool.content && expanded" class="tool-result">
-          <pre>{{ tool.content.slice(0, 500) }}{{ tool.content.length > 500 ? '...' : '' }}</pre>
+        <div v-if="tool.content" class="tool-result">
+          <pre><span
+            v-for="(line, lineIndex) in resultPreview(tool.content, expandedResults.has(i)).split('\n')"
+            :key="lineIndex"
+            :class="lineClass(line)"
+          >{{ line }}{{ lineIndex < resultPreview(tool.content, expandedResults.has(i)).split('\n').length - 1 ? '\n' : '' }}</span></pre>
+          <button
+            v-if="tool.content.length > 800"
+            class="show-more"
+            @click="toggleResult(i)"
+          >
+            {{ expandedResults.has(i) ? 'Show less' : 'Show more' }}
+          </button>
         </div>
       </div>
     </div>
@@ -207,5 +257,25 @@ function colorFor(tool: ToolActivity) {
   white-space: pre-wrap;
   word-break: break-word;
   color: #4b5563;
+}
+
+.diff-add {
+  color: #047857;
+  background: #ecfdf5;
+}
+
+.diff-remove {
+  color: #b91c1c;
+  background: #fef2f2;
+}
+
+.show-more {
+  margin-top: 4px;
+  border: 0;
+  background: transparent;
+  color: #2563eb;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
 }
 </style>

@@ -103,6 +103,66 @@ describe('coding store', () => {
     expect(store.pendingApproval).toBeNull()
   })
 
+  it('caches file tree directories', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ path: '.', entries: [{ name: 'src', is_dir: true }] }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const store = useCodingStore()
+    store.sessionId = 'c1'
+
+    await store.loadFiles('.')
+    await store.loadFiles('.')
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(store.fileTreeEntries).toEqual([{ name: 'src', is_dir: true }])
+    expect(store.expandedDirs.has('.')).toBe(true)
+  })
+
+  it('refreshes workspace view after successful write tools', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: URL) => {
+      if (url.pathname.endsWith('/git/status')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            is_git: true,
+            branch: 'main',
+            dirty_count: 1,
+            changed_files: ['note.txt'],
+          }),
+        })
+      }
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({ path: '.', entries: [{ name: 'note.txt', is_dir: false }] }),
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const store = useCodingStore()
+    store.sessionId = 'c1'
+    store.messages = [
+      {
+        role: 'assistant',
+        content: '',
+        tools: [{ tool: 'write_file', args: {}, status: 'running', content: '' }],
+        isThinking: true,
+      },
+    ]
+
+    store.handleServerEvent({
+      type: 'tool_result',
+      tool: 'write_file',
+      args: {},
+      content: 'wrote note.txt',
+      is_error: false,
+    } as never)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(store.gitStatus.dirty_count).toBe(1)
+    expect(store.fileTreeEntries).toEqual([{ name: 'note.txt', is_dir: false }])
+  })
+
   it('finalizes message on final event', () => {
     const store = useCodingStore()
     store.messages = [{ role: 'assistant', content: '', tools: [], isThinking: true }]

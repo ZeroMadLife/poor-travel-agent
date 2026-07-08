@@ -64,12 +64,15 @@ export const useCodingStore = defineStore('coding', () => {
 
   const fileTreePath = ref('.')
   const fileTreeEntries = ref<CodingFileEntry[]>([])
+  const expandedDirs = ref<Set<string>>(new Set())
   const previewPath = ref('')
   const previewContent = ref('')
   const breadcrumb = computed(() => fileTreePath.value.split('/').filter(Boolean))
 
   let socket: WebSocket | null = null
   let approvalPollTimer: number | null = null
+  let fileTreeGeneration = 0
+  const dirCache = new Map<string, CodingFileEntry[]>()
 
   const contextPercent = computed(() =>
     Math.min(100, Math.round((contextChars.value / contextBudget) * 100)),
@@ -119,6 +122,7 @@ export const useCodingStore = defineStore('coding', () => {
     }
     if (event.type === 'tool_result') {
       updateToolActivity(event as CodingToolResultEvent)
+      void refreshWorkspaceAfterTool(event as CodingToolResultEvent)
       return
     }
     if (event.type === 'final' || event.type === 'step_limit') {
@@ -266,15 +270,37 @@ export const useCodingStore = defineStore('coding', () => {
     }
   }
 
-  async function loadFiles(path: string) {
+  async function loadFiles(path: string, force = false) {
     if (!sessionId.value) return
+    const generation = ++fileTreeGeneration
+    if (!force && dirCache.has(path)) {
+      fileTreePath.value = path
+      fileTreeEntries.value = [...(dirCache.get(path) || [])]
+      expandedDirs.value = new Set([...expandedDirs.value, path])
+      return
+    }
     try {
       const res = await fetchCodingFiles(sessionId.value, path)
+      if (generation !== fileTreeGeneration) return
+      dirCache.set(path, res.entries)
       fileTreePath.value = path
       fileTreeEntries.value = res.entries
+      expandedDirs.value = new Set([...expandedDirs.value, path])
     } catch {
+      if (generation !== fileTreeGeneration) return
       fileTreeEntries.value = []
     }
+  }
+
+  async function refreshWorkspaceView() {
+    dirCache.clear()
+    await Promise.all([loadFiles(fileTreePath.value, true), loadGitStatus()])
+  }
+
+  async function refreshWorkspaceAfterTool(event: CodingToolResultEvent) {
+    if (event.is_error) return
+    if (!['write_file', 'patch_file', 'run_shell'].includes(event.tool)) return
+    await refreshWorkspaceView()
   }
 
   async function loadFilePreview(path: string) {
@@ -318,6 +344,7 @@ export const useCodingStore = defineStore('coding', () => {
     gitStatus,
     fileTreePath,
     fileTreeEntries,
+    expandedDirs,
     previewPath,
     previewContent,
     breadcrumb,
@@ -330,6 +357,7 @@ export const useCodingStore = defineStore('coding', () => {
     loadModels,
     loadGitStatus,
     loadFiles,
+    refreshWorkspaceView,
     loadFilePreview,
     changeModel,
     disconnect,

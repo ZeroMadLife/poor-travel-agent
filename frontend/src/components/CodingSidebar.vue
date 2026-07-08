@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ChevronDown, ChevronRight, FileCode, Server, Zap } from 'lucide-vue-next'
-import { ref } from 'vue'
+import { ChevronDown, ChevronRight, FileCode, Search, Server, Zap } from 'lucide-vue-next'
+import { computed, ref } from 'vue'
 import { useCodingStore } from '../stores/coding'
 import type { CodingSkillSummary } from '../types/api'
 
@@ -8,6 +8,23 @@ const store = useCodingStore()
 const emit = defineEmits<{ useSkill: [name: string] }>()
 
 const expandedSkill = ref<string | null>(null)
+const skillQuery = ref('')
+const collapsedSources = ref<Set<string>>(new Set())
+
+const sourceOrder = ['builtin', 'user', 'project']
+const groupedSkills = computed(() => {
+  const query = skillQuery.value.trim().toLowerCase()
+  return sourceOrder
+    .map((source) => ({
+      source,
+      skills: store.skills.filter((skill) => {
+        if (skill.source !== source) return false
+        if (!query) return true
+        return `${skill.name} ${skill.description}`.toLowerCase().includes(query)
+      }),
+    }))
+    .filter((group) => group.skills.length > 0)
+})
 
 function toggleSkill(name: string) {
   expandedSkill.value = expandedSkill.value === name ? null : name
@@ -17,27 +34,53 @@ function useSkill(skill: CodingSkillSummary) {
   emit('useSkill', `/${skill.name}`)
   expandedSkill.value = null
 }
+
+function toggleSource(source: string) {
+  const next = new Set(collapsedSources.value)
+  if (next.has(source)) next.delete(source)
+  else next.add(source)
+  collapsedSources.value = next
+}
 </script>
 
 <template>
   <aside class="sidebar">
     <section class="sidebar-section">
       <h3>Skills</h3>
-      <div v-if="store.skills.length === 0" class="empty">暂无 skill</div>
-      <div v-for="skill in store.skills" :key="skill.name" class="skill-item">
-        <button class="skill-header" @click="toggleSkill(skill.name)">
+
+      <label class="skill-search">
+        <Search :size="12" />
+        <input v-model="skillQuery" type="search" placeholder="Search skills" />
+      </label>
+
+      <div v-if="groupedSkills.length === 0" class="empty">暂无 skill</div>
+      <div v-for="group in groupedSkills" :key="group.source" class="skill-group">
+        <button class="source-header" @click="toggleSource(group.source)">
           <component
-            :is="expandedSkill === skill.name ? ChevronDown : ChevronRight"
+            :is="collapsedSources.has(group.source) ? ChevronRight : ChevronDown"
             :size="13"
           />
-          <span class="skill-name">/{{ skill.name }}</span>
-          <span class="skill-source" :class="skill.source">{{ skill.source }}</span>
+          <span>{{ group.source }}</span>
+          <span>{{ group.skills.length }}</span>
         </button>
-        <div v-if="expandedSkill === skill.name" class="skill-detail">
-          <p class="skill-desc">{{ skill.description }}</p>
-          <button class="skill-use" @click="useSkill(skill)">
-            <Zap :size="12" /> 使用
-          </button>
+
+        <div v-if="!collapsedSources.has(group.source)">
+          <div v-for="skill in group.skills" :key="skill.name" class="skill-item">
+            <button class="skill-header" @click="toggleSkill(skill.name)">
+              <component
+                :is="expandedSkill === skill.name ? ChevronDown : ChevronRight"
+                :size="13"
+              />
+              <span class="skill-name">/{{ skill.name }}</span>
+              <span class="skill-source" :class="skill.source">{{ skill.source }}</span>
+            </button>
+            <div v-if="expandedSkill === skill.name" class="skill-detail">
+              <p class="skill-desc">{{ skill.description }}</p>
+              <button class="skill-use" @click="useSkill(skill)">
+                <Zap :size="12" /> 使用
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </section>
@@ -100,6 +143,47 @@ function useSkill(skill: CodingSkillSummary) {
 .empty {
   color: #9ca3af;
   font-size: 12px;
+}
+
+.skill-search {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 8px;
+  padding: 4px 6px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #fff;
+  color: #6b7280;
+}
+
+.skill-search input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  font-size: 12px;
+}
+
+.source-header {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  margin: 4px 0 2px;
+  border: 0;
+  background: transparent;
+  padding: 3px 0;
+  color: #6b7280;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.source-header span:nth-child(2) {
+  flex: 1;
+  text-align: left;
 }
 
 .skill-item {

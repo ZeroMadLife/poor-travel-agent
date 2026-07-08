@@ -1,12 +1,12 @@
 # Sage v3 落地记录
 
 > 日期：2026-07-08
-> 当前阶段：方向一完成；方向三完成；方向二完成（Approval MVP）
+> 当前阶段：方向一完成；方向三完成；方向二完成；方向四完成（Hermes Web UI 交互增强）
 > 参考：`docs/superpowers/prompts/2026-07-08-codex-goal-sage-v3.md`
 
 ## 目标
 
-Sage v3 开始向 Hermes / Hermes Web UI 的设计演进。本阶段先做三块地基：让 coding runtime 的 system prompt 在 session 生命周期内保持 byte-stable；再把工具系统从单文件表驱动改成装饰器注册 + 分模块实现；最后补上 ask 模式下的工具审批闭环。
+Sage v3 开始向 Hermes / Hermes Web UI 的设计演进。本阶段先做三块后端地基：让 coding runtime 的 system prompt 在 session 生命周期内保持 byte-stable；再把工具系统从单文件表驱动改成装饰器注册 + 分模块实现；补上 ask 模式下的工具审批闭环。最后补齐一轮 Hermes Web UI 风格的工作台交互细节。
 
 ## 本阶段改动
 
@@ -78,6 +78,26 @@ Sage v3 开始向 Hermes / Hermes Web UI 的设计演进。本阶段先做三块
 - `stores/coding.ts`：监听 `approval_required` 事件；thinking 时轮询 pending；支持 Allow once / Deny。
 - `api/coding.ts` / `types/api.ts`：补齐 approval 类型和请求函数。
 
+### Hermes Web UI 交互增强
+
+工具活动卡：
+
+- 工具运行中默认展开；settled 时保持一帧再折叠，降低布局跳变。
+- 工具结果超过 800 字符时智能截断，优先在句号、换行、分号处断开。
+- 提供 Show more / Show less。
+- diff 风格结果中 `+` / `-` 行做轻量高亮。
+
+文件树和 git 状态：
+
+- `stores/coding.ts` 增加目录缓存 `dirCache`、展开目录集合 `expandedDirs` 和代际号 `fileTreeGeneration`，避免重复请求和异步竞态覆盖。
+- `tool_result` 事件中，`write_file` / `patch_file` / `run_shell` 成功后自动刷新文件树和 git badge。
+
+Composer / Skills：
+
+- context ring tooltip 展示 usage / budget / percent。
+- context 使用率超过 75% 显示“压缩”提示按钮。
+- Skills 面板支持搜索，并按 `builtin` / `user` / `project` 分类折叠。
+
 ## 测试覆盖
 
 `tests/core/coding/test_context_compact.py` 新增：
@@ -100,6 +120,11 @@ Approval 相关新增：
 - `tests/api/test_coding_routes.py`：pending/respond 端点；WebSocket 在 ask 模式下发 approval 并在 respond 后继续执行。
 - `frontend/src/components/CodingApprovalCard.test.ts`：审批卡片渲染和按钮事件。
 - `frontend/src/api/coding.test.ts` / `frontend/src/stores/coding.test.ts`：approval API 和状态流。
+
+方向四新增：
+
+- `frontend/src/components/CodingToolActivity.test.ts`：长工具结果截断、Show more、diff 行高亮。
+- `frontend/src/stores/coding.test.ts`：目录缓存、工具写入后刷新文件树和 git 状态。
 
 ## 已验证
 
@@ -142,7 +167,14 @@ cd frontend && npm run test -- --run
 
 结果：后端 approval 定向 `28 passed`；前端 `13 files / 28 tests passed`
 
+```bash
+cd frontend && npm run test -- --run
+cd frontend && npm run build
+```
+
+结果：前端 `14 files / 31 tests passed`；build 通过。
+
 ## 后续方向
 
-1. Hermes Web UI 交互增强：工具结果截断、两阶段折叠防跳、文件树缓存、context ring tooltip、Skills 搜索分类。
-2. Graphify 更新：完成 v3 主要方向后重新生成架构图谱。
+1. Graphify 更新：完成 v3 主要方向后重新生成架构图谱。
+2. 后续 v3.x：approval 的 session/always 前端按钮、diff preview、stop/cancel run、run history。
