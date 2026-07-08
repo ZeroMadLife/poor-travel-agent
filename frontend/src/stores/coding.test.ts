@@ -66,6 +66,43 @@ describe('coding store', () => {
     expect(store.messages[0].tools![0].content).toBe('# Sage')
   })
 
+  it('stores pending approval from approval_required event', () => {
+    const store = useCodingStore()
+    store.sessionId = 'c1'
+    store.handleServerEvent({
+      type: 'approval_required',
+      approval_id: 'appr_1',
+      tool: 'write_file',
+      args: { path: 'README.md' },
+      description: 'write_file requires approval.',
+      pattern_key: 'tool:write_file',
+    } as never)
+
+    expect(store.pendingApproval?.approval_id).toBe('appr_1')
+    expect(store.pendingApproval?.tool).toBe('write_file')
+    store.disconnect()
+  })
+
+  it('responds to pending approval and clears it', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true })
+    vi.stubGlobal('fetch', fetchMock)
+    const store = useCodingStore()
+    store.sessionId = 'c1'
+    store.pendingApproval = {
+      approval_id: 'appr_1',
+      session_id: 'c1',
+      tool: 'write_file',
+      args: {},
+      description: 'write_file requires approval.',
+      pattern_key: 'tool:write_file',
+    }
+
+    await store.respondApproval('once')
+
+    expect(fetchMock).toHaveBeenCalled()
+    expect(store.pendingApproval).toBeNull()
+  })
+
   it('finalizes message on final event', () => {
     const store = useCodingStore()
     store.messages = [{ role: 'assistant', content: '', tools: [], isThinking: true }]

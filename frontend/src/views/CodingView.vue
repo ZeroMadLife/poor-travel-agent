@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import CodingApprovalCard from '../components/CodingApprovalCard.vue'
 import CodingComposer from '../components/CodingComposer.vue'
 import CodingFileTree from '../components/CodingFileTree.vue'
 import CodingGitBadge from '../components/CodingGitBadge.vue'
@@ -66,6 +67,12 @@ onBeforeUnmount(() => {
           <p v-if="store.errorMessage" class="error-text">{{ store.errorMessage }}</p>
         </section>
 
+        <CodingApprovalCard
+          v-if="store.pendingApproval"
+          :approval="store.pendingApproval"
+          :busy="false"
+          @respond="store.respondApproval"
+        />
         <CodingComposer ref="composerRef" />
       </main>
 
@@ -123,6 +130,7 @@ onBeforeUnmount(() => {
 }
 
 .pane-center {
+  position: relative;
   display: grid;
   grid-template-rows: 1fr auto;
   min-height: 0;

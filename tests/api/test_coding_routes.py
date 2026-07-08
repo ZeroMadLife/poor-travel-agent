@@ -21,6 +21,20 @@ class FakeModel:
         return self.responses.pop(0)
 
 
+class FakeWriteModel:
+    """Model that requests one risky write and then returns a final answer."""
+
+    def __init__(self) -> None:
+        self.responses = [
+            '<tool>{"name":"write_file","args":{"path":"note.txt","content":"approved"}}' "</tool>",
+            "<final>写入完成。</final>",
+        ]
+
+    async def complete(self, prompt: str) -> str:
+        _ = prompt
+        return self.responses.pop(0)
+
+
 def test_create_coding_session(tmp_path: Path) -> None:
     """POST /api/v1/coding/session creates a coding runtime session."""
     client = TestClient(
@@ -90,6 +104,78 @@ def test_coding_websocket_streams_engine_events(tmp_path: Path) -> None:
     assert events[2]["tool"] == "read_file"
     assert "TourSwarm API coding" in events[3]["content"]
     assert events[-1]["content"] == "README 里能看到项目内容。"
+
+
+def test_coding_approval_pending_and_respond_endpoints(tmp_path: Path) -> None:
+    """Approval pending/respond endpoints expose the runtime queue."""
+    app = create_app(
+        coding_model_factory=FakeModel,
+        coding_workspace_root=tmp_path,
+        coding_storage_root=tmp_path / ".coding",
+    )
+    client = TestClient(app)
+    session_id = client.post("/api/v1/coding/session", json={}).json()["session_id"]
+    runtime = app.state.coding_sessions[session_id]
+    entry = runtime.approval_manager.submit(
+        session_id,
+        "write_file",
+        {"path": "note.txt"},
+        "write_file requires approval.",
+        "tool:write_file",
+    )
+
+    pending = client.get(f"/api/v1/coding/{session_id}/approval/pending")
+    response = client.post(
+        f"/api/v1/coding/{session_id}/approval/respond",
+        json={"approval_id": entry.approval_id, "choice": "once"},
+    )
+
+    assert pending.status_code == 200
+    assert pending.json()["approval_id"] == entry.approval_id
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert entry.event.is_set()
+
+
+def test_coding_websocket_waits_for_approval_then_continues(tmp_path: Path) -> None:
+    """ask policy emits approval_required and resumes after approval response."""
+    client = TestClient(
+        create_app(
+            coding_model_factory=FakeWriteModel,
+            coding_workspace_root=tmp_path,
+            coding_storage_root=tmp_path / ".coding",
+        )
+    )
+    session_id = client.post(
+        "/api/v1/coding/session",
+        json={"approval_policy": "ask"},
+    ).json()["session_id"]
+
+    with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
+        websocket.send_json({"content": "写一个 note"})
+        first_events = [websocket.receive_json() for _ in range(3)]
+        approval = first_events[-1]
+        response = client.post(
+            f"/api/v1/coding/{session_id}/approval/respond",
+            json={"approval_id": approval["approval_id"], "choice": "once"},
+        )
+        remaining_events = [websocket.receive_json() for _ in range(5)]
+
+    assert [event["type"] for event in first_events] == [
+        "model_requested",
+        "model_parsed",
+        "approval_required",
+    ]
+    assert approval["tool"] == "write_file"
+    assert response.status_code == 200
+    assert [event["type"] for event in remaining_events] == [
+        "tool_call",
+        "tool_result",
+        "model_requested",
+        "model_parsed",
+        "final",
+    ]
+    assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "approved"
 
 
 def _make_client(tmp_path: Path) -> TestClient:

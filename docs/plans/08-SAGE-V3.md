@@ -1,12 +1,12 @@
 # Sage v3 落地记录
 
 > 日期：2026-07-08
-> 当前阶段：方向一完成；方向三完成（工具系统装饰器化）
+> 当前阶段：方向一完成；方向三完成；方向二完成（Approval MVP）
 > 参考：`docs/superpowers/prompts/2026-07-08-codex-goal-sage-v3.md`
 
 ## 目标
 
-Sage v3 开始向 Hermes / Hermes Web UI 的设计演进。本阶段先做两块后端地基：让 coding runtime 的 system prompt 在 session 生命周期内保持 byte-stable；再把工具系统从单文件表驱动改成装饰器注册 + 分模块实现，为后续 approval / tool policy / toolset 扩展打基础。
+Sage v3 开始向 Hermes / Hermes Web UI 的设计演进。本阶段先做三块地基：让 coding runtime 的 system prompt 在 session 生命周期内保持 byte-stable；再把工具系统从单文件表驱动改成装饰器注册 + 分模块实现；最后补上 ask 模式下的工具审批闭环。
 
 ## 本阶段改动
 
@@ -55,6 +55,29 @@ Sage v3 开始向 Hermes / Hermes Web UI 的设计演进。本阶段先做两块
 - `requires_approval`：默认跟随 `risky`
 - `timeout`：同步 runner 的通用超时保护，避免非 shell 工具长期卡住执行链路
 
+### Approval MVP
+
+新增 `core/coding/approval.py`：
+
+- `ApprovalEntry`：保存 approval id、session、工具、参数、风险描述、危险模式 key 和阻塞事件。
+- `ApprovalManager`：维护 session 队列，支持 `submit()` / `pending()` / `resolve()` / `is_session_approved()`。
+- `check_dangerous_command()`：识别常见高风险 shell 模式，如 `rm -rf`、`git reset --hard`、`git push --force`、`sudo`、`curl | sh`、`docker compose down` 等。
+
+后端运行链路：
+
+- `CodingSessionRequest.approval_policy` 支持 `auto` / `ask` / `never`。
+- `PermissionChecker` 在 `ask` 模式下对 risky 工具返回 `approval_required`。
+- `Engine` 收到后发出 `approval_required` WebSocket 事件，并用 `asyncio.to_thread(entry.event.wait, 1.0)` 等待用户选择，避免阻塞 event loop。
+- 新增 REST：
+  - `GET /api/v1/coding/{session_id}/approval/pending`
+  - `POST /api/v1/coding/{session_id}/approval/respond`
+
+前端闭环：
+
+- `CodingApprovalCard.vue`：在 composer 上方显示工具名、参数和风险说明。
+- `stores/coding.ts`：监听 `approval_required` 事件；thinking 时轮询 pending；支持 Allow once / Deny。
+- `api/coding.ts` / `types/api.ts`：补齐 approval 类型和请求函数。
+
 ## 测试覆盖
 
 `tests/core/coding/test_context_compact.py` 新增：
@@ -70,6 +93,13 @@ Sage v3 开始向 Hermes / Hermes Web UI 的设计演进。本阶段先做两块
 - 装饰器注册暴露 `ToolDefinition` 和 schema model。
 - `category` / `requires_approval` 元数据正确。
 - 同步 runner 有通用 timeout 保护。
+
+Approval 相关新增：
+
+- `tests/core/coding/test_approval.py`：submit/resolve/pending/session approval/危险命令检测。
+- `tests/api/test_coding_routes.py`：pending/respond 端点；WebSocket 在 ask 模式下发 approval 并在 respond 后继续执行。
+- `frontend/src/components/CodingApprovalCard.test.ts`：审批卡片渲染和按钮事件。
+- `frontend/src/api/coding.test.ts` / `frontend/src/stores/coding.test.ts`：approval API 和状态流。
 
 ## 已验证
 
@@ -105,8 +135,14 @@ pytest tests/core/coding tests/api/test_coding_routes.py -q
 
 结果：mypy 通过；coding/API 回归 `65 passed`
 
+```bash
+pytest tests/core/coding/test_approval.py tests/api/test_coding_routes.py tests/core/coding/test_permissions.py tests/core/coding/test_engine.py -q
+cd frontend && npm run test -- --run
+```
+
+结果：后端 approval 定向 `28 passed`；前端 `13 files / 28 tests passed`
+
 ## 后续方向
 
-1. Approval 系统：危险命令检测、pending approval 事件、前端 approval card。
-2. Hermes Web UI 交互增强：工具结果截断、两阶段折叠防跳、文件树缓存、context ring tooltip、Skills 搜索分类。
-3. Graphify 更新：完成 v3 主要方向后重新生成架构图谱。
+1. Hermes Web UI 交互增强：工具结果截断、两阶段折叠防跳、文件树缓存、context ring tooltip、Skills 搜索分类。
+2. Graphify 更新：完成 v3 主要方向后重新生成架构图谱。

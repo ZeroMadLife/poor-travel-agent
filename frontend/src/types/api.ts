@@ -112,6 +112,17 @@ export type CodingSessionResponse = {
   workspace_root: string
 }
 
+export type CodingApproval = {
+  approval_id: string
+  session_id: string
+  tool: string
+  args: Record<string, unknown>
+  description: string
+  pattern_key: string
+}
+
+export type CodingApprovalResponse = CodingApproval | null
+
 export type CodingToolCallEvent = {
   type: 'tool_call'
   tool: string
@@ -149,6 +160,15 @@ export type CodingSkillInvokedEvent = {
   arguments: string
 }
 
+export type CodingApprovalRequiredEvent = {
+  type: 'approval_required'
+  approval_id: string
+  tool: string
+  args: Record<string, unknown>
+  description: string
+  pattern_key: string
+}
+
 export type CodingServerEvent =
   | CodingToolCallEvent
   | CodingToolResultEvent
@@ -157,6 +177,7 @@ export type CodingServerEvent =
   | ErrorEvent
   | CodingTraceEvent
   | CodingSkillInvokedEvent
+  | CodingApprovalRequiredEvent
 
 export type CodingFileEntry = {
   name: string

@@ -4,14 +4,18 @@ import {
   buildCodingStreamUrl,
   fetchCodingFile,
   fetchCodingFiles,
+  fetchCodingApprovalPending,
   fetchCodingGitStatus,
   fetchCodingMcpServers,
   fetchCodingModels,
   fetchCodingSkills,
+  respondCodingApproval,
   startCodingSession,
   switchCodingModel,
 } from '../api/coding'
 import type {
+  CodingApproval,
+  CodingApprovalRequiredEvent,
   CodingFileEntry,
   CodingGitStatusResponse,
   CodingMcpServer,
@@ -46,6 +50,7 @@ export const useCodingStore = defineStore('coding', () => {
   const currentModelId = ref('')
   const contextChars = ref(0)
   const contextBudget = 60000
+  const pendingApproval = ref<CodingApproval | null>(null)
 
   const skills = ref<CodingSkillSummary[]>([])
   const mcpServers = ref<CodingMcpServer[]>([])
@@ -64,6 +69,7 @@ export const useCodingStore = defineStore('coding', () => {
   const breadcrumb = computed(() => fileTreePath.value.split('/').filter(Boolean))
 
   let socket: WebSocket | null = null
+  let approvalPollTimer: number | null = null
 
   const contextPercent = computed(() =>
     Math.min(100, Math.round((contextChars.value / contextBudget) * 100)),
@@ -106,6 +112,11 @@ export const useCodingStore = defineStore('coding', () => {
       appendToolActivity(event as CodingToolCallEvent)
       return
     }
+    if (event.type === 'approval_required') {
+      setApprovalFromEvent(event as CodingApprovalRequiredEvent)
+      startApprovalPolling()
+      return
+    }
     if (event.type === 'tool_result') {
       updateToolActivity(event as CodingToolResultEvent)
       return
@@ -113,11 +124,24 @@ export const useCodingStore = defineStore('coding', () => {
     if (event.type === 'final' || event.type === 'step_limit') {
       finalizeCurrentMessage(event.content)
       isThinking.value = false
+      stopApprovalPolling()
       return
     }
     if (event.type === 'error') {
       errorMessage.value = event.message
       isThinking.value = false
+      stopApprovalPolling()
+    }
+  }
+
+  function setApprovalFromEvent(event: CodingApprovalRequiredEvent) {
+    pendingApproval.value = {
+      approval_id: event.approval_id,
+      session_id: sessionId.value,
+      tool: event.tool,
+      args: event.args,
+      description: event.description,
+      pattern_key: event.pattern_key,
     }
   }
 
@@ -170,7 +194,38 @@ export const useCodingStore = defineStore('coding', () => {
     messages.value.push({ role: 'user', content })
     isThinking.value = true
     errorMessage.value = ''
+    pendingApproval.value = null
+    startApprovalPolling()
     socket.send(JSON.stringify({ content }))
+  }
+
+  async function pollApproval() {
+    if (!sessionId.value || !isThinking.value) return
+    try {
+      pendingApproval.value = await fetchCodingApprovalPending(sessionId.value)
+    } catch {
+      // WebSocket approval_required is primary; polling is a resilience layer.
+    }
+  }
+
+  function startApprovalPolling() {
+    if (approvalPollTimer !== null) return
+    approvalPollTimer = window.setInterval(() => {
+      void pollApproval()
+    }, 1500)
+  }
+
+  function stopApprovalPolling() {
+    if (approvalPollTimer === null) return
+    window.clearInterval(approvalPollTimer)
+    approvalPollTimer = null
+  }
+
+  async function respondApproval(choice: 'once' | 'deny') {
+    if (!sessionId.value || !pendingApproval.value) return
+    const approvalId = pendingApproval.value.approval_id
+    await respondCodingApproval(sessionId.value, approvalId, choice)
+    pendingApproval.value = null
   }
 
   async function loadSkills() {
@@ -243,6 +298,7 @@ export const useCodingStore = defineStore('coding', () => {
   function disconnect() {
     socket?.close()
     socket = null
+    stopApprovalPolling()
   }
 
   return {
@@ -255,6 +311,7 @@ export const useCodingStore = defineStore('coding', () => {
     contextChars,
     contextBudget,
     contextPercent,
+    pendingApproval,
     skills,
     mcpServers,
     models,
@@ -267,6 +324,7 @@ export const useCodingStore = defineStore('coding', () => {
     initialize,
     sendMessage,
     handleServerEvent,
+    respondApproval,
     loadSkills,
     loadMcpServers,
     loadModels,

@@ -11,7 +11,7 @@ from typing import Any
 from core.coding.approval import ApprovalManager
 from core.coding.context_manager import ContextManager
 from core.coding.engine import Engine
-from core.coding.permissions import PermissionChecker
+from core.coding.permissions import ApprovalPolicy, PermissionChecker
 from core.coding.plan_mode import PlanModeManager
 from core.coding.run_store import RunStore
 from core.coding.session_events import SessionEventBus
@@ -19,7 +19,8 @@ from core.coding.session_store import CodingSessionStore
 from core.coding.skills import SkillRegistry
 from core.coding.todo_ledger import TodoLedger
 from core.coding.tool_policy import ToolPolicyChecker
-from core.coding.tools.registry import ToolContext, build_tool_registry
+from core.coding.tools.base import ToolContext
+from core.coding.tools.registry import build_tool_registry
 from core.coding.worker_manager import WorkerManager
 from core.coding.workspace import IGNORED_PATH_NAMES, WorkspaceContext, now
 
@@ -34,7 +35,7 @@ class CodingRuntime:
         model: Any,
         storage_root: Path | str,
         model_factory: Callable[[], Any] | None = None,
-        approval_policy: str = "auto",
+        approval_policy: ApprovalPolicy = "auto",
     ) -> None:
         self.session_id = session_id
         self.workspace = WorkspaceContext(root=Path(workspace_root))
@@ -220,7 +221,7 @@ class CodingRuntime:
 
     def _permission_checker(self) -> PermissionChecker:
         return PermissionChecker(
-            approval_policy=self.approval_policy if self.approval_policy in {"auto", "ask"} else "never",
+            approval_policy=self.approval_policy,
             plan_mode=self.runtime_mode == "plan",
         )
 

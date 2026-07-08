@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { buildCodingStreamUrl, startCodingSession } from './coding'
+import {
+  buildCodingStreamUrl,
+  fetchCodingApprovalPending,
+  respondCodingApproval,
+  startCodingSession,
+} from './coding'
 
 describe('coding API client', () => {
   afterEach(() => {
@@ -28,5 +33,38 @@ describe('coding API client', () => {
 
     expect(url).toContain('/api/v1/coding/c1/stream')
     expect(url.startsWith('ws')).toBe(true)
+  })
+
+  it('fetches pending approval', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        approval_id: 'appr_1',
+        session_id: 'c1',
+        tool: 'write_file',
+        args: { path: 'README.md' },
+        description: 'write_file requires approval.',
+        pattern_key: 'tool:write_file',
+      }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const response = await fetchCodingApprovalPending('c1')
+
+    expect(response?.approval_id).toBe('appr_1')
+    expect(fetchMock).toHaveBeenCalledWith(expect.any(URL))
+  })
+
+  it('responds to approval', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await respondCodingApproval('c1', 'appr_1', 'once')
+
+    expect(fetchMock).toHaveBeenCalledWith(expect.any(URL), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ approval_id: 'appr_1', choice: 'once' }),
+    })
   })
 })

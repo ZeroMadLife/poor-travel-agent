@@ -1,4 +1,5 @@
 import type {
+  CodingApprovalResponse,
   CodingFileContentResponse,
   CodingFilesResponse,
   CodingGitStatusResponse,
@@ -106,4 +107,30 @@ export async function fetchCodingMcpServers(): Promise<CodingMcpServersResponse>
   const response = await fetch(new URL('/api/v1/coding/mcp/servers', API_BASE_URL))
   if (!response.ok) throw new Error(`fetch mcp servers failed: ${response.status}`)
   return (await response.json()) as CodingMcpServersResponse
+}
+
+export async function fetchCodingApprovalPending(
+  sessionId: string,
+): Promise<CodingApprovalResponse> {
+  const response = await fetch(
+    new URL(`/api/v1/coding/${sessionId}/approval/pending`, API_BASE_URL),
+  )
+  if (!response.ok) throw new Error(`fetch approval failed: ${response.status}`)
+  return (await response.json()) as CodingApprovalResponse
+}
+
+export async function respondCodingApproval(
+  sessionId: string,
+  approvalId: string,
+  choice: 'once' | 'session' | 'always' | 'deny',
+): Promise<void> {
+  const response = await fetch(
+    new URL(`/api/v1/coding/${sessionId}/approval/respond`, API_BASE_URL),
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ approval_id: approvalId, choice }),
+    },
+  )
+  if (!response.ok) throw new Error(`respond approval failed: ${response.status}`)
 }
