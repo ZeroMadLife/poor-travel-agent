@@ -270,9 +270,19 @@ export type CodingRunsResponse = {
   runs: CodingRunSummary[]
 }
 
+export type CodingRunTimelineEntry = {
+  kind: string
+  title: string
+  detail: string
+  status: string
+  tool: string
+  timestamp: string
+}
+
 export type CodingRunDetailResponse = {
   run_id: string
   events: Array<Record<string, unknown>>
+  timeline: CodingRunTimelineEntry[]
 }
 
 export type SessionSummary = {

@@ -240,6 +240,15 @@ def test_coding_run_history_lists_and_reads_traces(tmp_path: Path) -> None:
     assert detail_response.status_code == 200
     assert detail_response.json()["run_id"] == run["run_id"]
     assert [event["type"] for event in detail_response.json()["events"]][-1] == "final"
+    assert [entry["title"] for entry in detail_response.json()["timeline"]] == [
+        "Model request",
+        "Parsed tool",
+        "Run read_file",
+        "read_file succeeded",
+        "Model request",
+        "Parsed final",
+        "Final answer",
+    ]
 
 
 def _make_client(tmp_path: Path) -> TestClient:

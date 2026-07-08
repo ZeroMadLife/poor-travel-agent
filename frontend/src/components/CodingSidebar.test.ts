@@ -1,0 +1,63 @@
+import { mount } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
+import { beforeEach, expect, it } from 'vitest'
+import { useCodingStore } from '../stores/coding'
+import CodingSidebar from './CodingSidebar.vue'
+
+beforeEach(() => {
+  setActivePinia(createPinia())
+})
+
+it('renders run detail as a readable worklog timeline', () => {
+  const store = useCodingStore()
+  store.runs = [
+    {
+      run_id: 'run_abc123',
+      status: 'completed',
+      event_count: 5,
+      tool_count: 1,
+      error_count: 0,
+      last_event_type: 'final',
+      started_at: '2026-07-08T10:00:00',
+      updated_at: '2026-07-08T10:00:01',
+    },
+  ]
+  store.selectedRun = {
+    run_id: 'run_abc123',
+    events: [{ type: 'tool_call' }],
+    timeline: [
+      {
+        kind: 'tool',
+        title: 'Run read_file',
+        detail: 'path=README.md',
+        status: 'running',
+        tool: 'read_file',
+        timestamp: '2026-07-08T10:00:00',
+      },
+      {
+        kind: 'result',
+        title: 'read_file succeeded',
+        detail: '# Sage',
+        status: 'done',
+        tool: 'read_file',
+        timestamp: '2026-07-08T10:00:01',
+      },
+      {
+        kind: 'final',
+        title: 'Final answer',
+        detail: 'README 总结完成。',
+        status: 'done',
+        tool: '',
+        timestamp: '2026-07-08T10:00:02',
+      },
+    ],
+  }
+
+  const wrapper = mount(CodingSidebar)
+
+  expect(wrapper.text()).toContain('Run read_file')
+  expect(wrapper.text()).toContain('path=README.md')
+  expect(wrapper.text()).toContain('read_file succeeded')
+  expect(wrapper.text()).toContain('Final answer')
+  expect(wrapper.findAll('.run-timeline-entry')).toHaveLength(3)
+})

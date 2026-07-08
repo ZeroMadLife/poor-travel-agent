@@ -102,7 +102,20 @@ describe('coding API client', () => {
       })
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ run_id: 'run_1', events: [{ type: 'final' }] }),
+        json: async () => ({
+          run_id: 'run_1',
+          events: [{ type: 'final' }],
+          timeline: [
+            {
+              kind: 'final',
+              title: 'Final answer',
+              detail: 'done',
+              status: 'done',
+              tool: '',
+              timestamp: '',
+            },
+          ],
+        }),
       })
     vi.stubGlobal('fetch', fetchMock)
 

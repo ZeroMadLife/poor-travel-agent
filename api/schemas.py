@@ -161,11 +161,23 @@ class CodingRunsResponse(BaseModel):
     runs: list[CodingRunSummary]
 
 
+class CodingRunTimelineEntry(BaseModel):
+    """One UI-ready worklog entry derived from raw run trace."""
+
+    kind: str
+    title: str
+    detail: str = ""
+    status: str
+    tool: str = ""
+    timestamp: str = ""
+
+
 class CodingRunDetailResponse(BaseModel):
     """Full persisted trace for one coding run."""
 
     run_id: str
     events: list[dict[str, Any]]
+    timeline: list[CodingRunTimelineEntry] = Field(default_factory=list)
 
 
 class AuthRequest(BaseModel):

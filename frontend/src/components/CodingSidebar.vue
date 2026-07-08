@@ -115,10 +115,26 @@ function runIcon(status: string) {
         </div>
       </div>
       <div v-if="store.selectedRun" class="run-detail">
-        <div class="run-detail-title">{{ store.selectedRun.run_id }}</div>
+        <div class="run-detail-title">
+          {{ store.selectedRun.run_id }}
+          <span>{{ store.selectedRun.timeline?.length || store.selectedRun.events.length }} steps</span>
+        </div>
         <div
-          v-for="(event, index) in store.selectedRun.events.slice(-8)"
+          v-for="(entry, index) in store.selectedRun.timeline?.slice(-8) || []"
           :key="index"
+          class="run-timeline-entry"
+          :class="entry.status"
+        >
+          <span class="run-timeline-dot"></span>
+          <span class="run-timeline-body">
+            <span class="run-timeline-title">{{ entry.title }}</span>
+            <span v-if="entry.detail" class="run-timeline-detail">{{ entry.detail }}</span>
+          </span>
+        </div>
+        <div
+          v-if="!store.selectedRun.timeline?.length"
+          v-for="(event, index) in store.selectedRun.events.slice(-8)"
+          :key="`event-${index}`"
           class="run-event"
         >
           {{ event.type }}
@@ -360,10 +376,73 @@ function runIcon(status: string) {
 }
 
 .run-detail-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   margin-bottom: 4px;
   color: #374151;
   font-size: 11px;
   font-weight: 700;
+}
+
+.run-detail-title span {
+  color: #9ca3af;
+  font-weight: 600;
+}
+
+.run-timeline-entry {
+  display: grid;
+  grid-template-columns: 8px 1fr;
+  gap: 6px;
+  padding: 5px 0;
+}
+
+.run-timeline-dot {
+  width: 7px;
+  height: 7px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: #9ca3af;
+}
+
+.run-timeline-entry.done .run-timeline-dot {
+  background: #10b981;
+}
+
+.run-timeline-entry.running .run-timeline-dot {
+  background: #3b82f6;
+}
+
+.run-timeline-entry.blocked .run-timeline-dot {
+  background: #f59e0b;
+}
+
+.run-timeline-entry.error .run-timeline-dot {
+  background: #ef4444;
+}
+
+.run-timeline-body {
+  min-width: 0;
+}
+
+.run-timeline-title {
+  display: block;
+  overflow: hidden;
+  color: #374151;
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-timeline-detail {
+  display: -webkit-box;
+  overflow: hidden;
+  color: #6b7280;
+  font-size: 11px;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .run-event {

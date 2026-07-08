@@ -120,6 +120,7 @@ Composer / Skills：
   - `GET /api/v1/coding/{session_id}/runs/{run_id}`
 - 前端 store 增加 `runs` / `selectedRun`，初始化和 run 结束后刷新 run history。
 - `CodingSidebar.vue` 增加 Runs 区块，显示状态、工具数、事件数、最后事件，并可展开最近 trace 事件。
+- run detail 进一步增加 `timeline` 派生视图：后端把 `model_requested`、`tool_call`、`approval_required`、`tool_result`、`final` 等原始事件转成 `kind/title/detail/status/tool/timestamp`，前端侧栏优先渲染这份 worklog，避免把裸 JSON / 裸 event type 暴露给用户。
 
 ## 测试覆盖
 
@@ -172,6 +173,7 @@ Run history 新增：
 - `tests/api/test_coding_routes.py`：run history list/detail API。
 - `frontend/src/api/coding.test.ts`：run history API client。
 - `frontend/src/stores/coding.test.ts`：run list/detail 加载，以及 run finished 后刷新。
+- `frontend/src/components/CodingSidebar.test.ts`：run detail 以可读 worklog timeline 渲染。
 
 ## 已验证
 
@@ -241,6 +243,16 @@ cd frontend && npm run test -- --run src/api/coding.test.ts src/stores/coding.te
 ```
 
 结果：后端 run history 定向 `20 passed`；前端 run history 定向 `2 files / 21 tests passed`
+
+```bash
+pytest tests/core/coding/test_run_store.py tests/api/test_coding_routes.py::test_coding_run_history_lists_and_reads_traces -q
+cd frontend && npm run test -- --run src/components/CodingSidebar.test.ts src/api/coding.test.ts src/stores/coding.test.ts
+ruff check core/coding/run_store.py api/schemas.py tests/core/coding/test_run_store.py tests/api/test_coding_routes.py
+mypy core/coding/run_store.py api/schemas.py tests/core/coding/test_run_store.py tests/api/test_coding_routes.py
+cd frontend && npm run build
+```
+
+结果：后端 run timeline 定向 `4 passed`；前端 `3 files / 22 tests passed`；ruff/mypy/build 通过。
 
 ## 后续方向
 

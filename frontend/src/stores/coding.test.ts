@@ -245,7 +245,20 @@ describe('coding store', () => {
       })
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ run_id: 'run_1', events: [{ type: 'final', content: 'done' }] }),
+        json: async () => ({
+          run_id: 'run_1',
+          events: [{ type: 'final', content: 'done' }],
+          timeline: [
+            {
+              kind: 'final',
+              title: 'Final answer',
+              detail: 'done',
+              status: 'done',
+              tool: '',
+              timestamp: '',
+            },
+          ],
+        }),
       })
     vi.stubGlobal('fetch', fetchMock)
     const store = useCodingStore()
@@ -256,6 +269,7 @@ describe('coding store', () => {
 
     expect(store.runs[0].run_id).toBe('run_1')
     expect(store.selectedRun?.events[0].content).toBe('done')
+    expect(store.selectedRun?.timeline[0].title).toBe('Final answer')
   })
 
   it('refreshes run history when a run finishes', async () => {
