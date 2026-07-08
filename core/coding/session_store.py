@@ -40,9 +40,49 @@ class CodingSessionStore:
             raise ValueError("session file must contain a JSON object")
         return cast(dict[str, Any], data)
 
+    def list_sessions(self, limit: int = 30) -> list[dict[str, Any]]:
+        """Return session summaries ordered by most recently updated."""
+        summaries: list[dict[str, Any]] = []
+        for path in self.root.glob("*.json"):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(data, dict):
+                summaries.append(_summarize_session(data))
+        return sorted(summaries, key=lambda item: item["updated_at"], reverse=True)[:limit]
+
 
 def _safe_session_id(session_id: str) -> str:
     value = session_id.strip()
     if not value or value in {".", ".."} or "/" in value or "\\" in value:
         raise ValueError("invalid session id")
     return value
+
+
+def _summarize_session(data: dict[str, Any]) -> dict[str, Any]:
+    workspace_root = str(data.get("workspace_root", ""))
+    history = data.get("history", [])
+    runtime_mode = data.get("runtime_mode", {})
+    mode = runtime_mode.get("mode", "default") if isinstance(runtime_mode, dict) else "default"
+    return {
+        "session_id": str(data.get("id", "")),
+        "title": _session_title(history, workspace_root),
+        "workspace_root": workspace_root,
+        "created_at": str(data.get("created_at", "")),
+        "updated_at": str(data.get("updated_at", "")),
+        "runtime_mode": str(mode),
+        "message_count": len(history) if isinstance(history, list) else 0,
+    }
+
+
+def _session_title(history: Any, workspace_root: str) -> str:
+    if isinstance(history, list):
+        for item in history:
+            if not isinstance(item, dict) or item.get("role") != "user":
+                continue
+            content = str(item.get("content", "")).strip()
+            if content:
+                return content[:60]
+    name = Path(workspace_root).name
+    return name or "Sage session"

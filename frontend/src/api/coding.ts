@@ -9,6 +9,7 @@ import type {
   CodingRunDetailResponse,
   CodingRunsResponse,
   CodingSessionResponse,
+  CodingSessionsResponse,
   CodingSkillDetailResponse,
   CodingSkillsResponse,
 } from '../types/api'
@@ -38,6 +39,12 @@ export function buildCodingStreamUrl(sessionId: string): string {
   base.pathname = `/api/v1/coding/${sessionId}/stream`
   base.search = ''
   return base.toString()
+}
+
+export async function fetchCodingSessions(): Promise<CodingSessionsResponse> {
+  const response = await fetch(new URL('/api/v1/coding/sessions', API_BASE_URL))
+  if (!response.ok) throw new Error(`fetch sessions failed: ${response.status}`)
+  return (await response.json()) as CodingSessionsResponse
 }
 
 export async function fetchCodingFiles(

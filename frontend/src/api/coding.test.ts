@@ -4,6 +4,7 @@ import {
   fetchCodingApprovalPending,
   fetchCodingRun,
   fetchCodingRuns,
+  fetchCodingSessions,
   respondCodingApproval,
   startCodingSession,
   stopCodingRun,
@@ -125,5 +126,30 @@ describe('coding API client', () => {
     expect(runs.runs[0].run_id).toBe('run_1')
     expect(detail.events[0].type).toBe('final')
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('fetches coding session history', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        sessions: [
+          {
+            session_id: 's1',
+            title: '读 README',
+            workspace_root: '/tmp/repo',
+            created_at: '2026-07-08T10:00:00',
+            updated_at: '2026-07-08T10:00:01',
+            runtime_mode: 'default',
+            message_count: 2,
+          },
+        ],
+      }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const response = await fetchCodingSessions()
+
+    expect(response.sessions[0].title).toBe('读 README')
+    expect(fetchMock).toHaveBeenCalledWith(expect.any(URL))
   })
 })

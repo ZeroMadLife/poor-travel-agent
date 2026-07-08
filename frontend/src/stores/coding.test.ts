@@ -272,6 +272,31 @@ describe('coding store', () => {
     expect(store.selectedRun?.timeline[0].title).toBe('Final answer')
   })
 
+  it('loads coding session history', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        sessions: [
+          {
+            session_id: 's1',
+            title: '读 README',
+            workspace_root: '/tmp/repo',
+            created_at: '2026-07-08T10:00:00',
+            updated_at: '2026-07-08T10:00:01',
+            runtime_mode: 'default',
+            message_count: 2,
+          },
+        ],
+      }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const store = useCodingStore()
+
+    await store.loadSessions()
+
+    expect(store.codingSessions[0].title).toBe('读 README')
+  })
+
   it('refreshes run history when a run finishes', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

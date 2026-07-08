@@ -25,6 +25,8 @@ from api.schemas import (
     CodingRunSummary,
     CodingSessionRequest,
     CodingSessionResponse,
+    CodingSessionsResponse,
+    CodingSessionSummary,
     CodingSkillDetailResponse,
     CodingSkillsResponse,
     CodingSkillSummary,
@@ -32,6 +34,7 @@ from api.schemas import (
     UserMessage,
 )
 from core.coding.runtime import CodingRuntime
+from core.coding.session_store import CodingSessionStore
 from core.llm import _PROVIDERS, create_llm
 
 router = APIRouter()
@@ -63,6 +66,16 @@ async def create_coding_session(
     sessions[session_id] = runtime
     return CodingSessionResponse(
         session_id=session_id, workspace_root=str(workspace_root.resolve())
+    )
+
+
+@router.get("/api/v1/coding/sessions", response_model=CodingSessionsResponse)
+async def list_coding_sessions(request: Request) -> CodingSessionsResponse:
+    """Return local coding-agent session history."""
+    storage_root = Path(request.app.state.coding_storage_root)
+    store = CodingSessionStore(storage_root / "sessions")
+    return CodingSessionsResponse(
+        sessions=[CodingSessionSummary(**item) for item in store.list_sessions()]
     )
 
 

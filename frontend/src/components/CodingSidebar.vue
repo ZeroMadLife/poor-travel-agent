@@ -5,6 +5,7 @@ import {
   ChevronRight,
   Clock3,
   FileCode,
+  MessagesSquare,
   Search,
   Server,
   XCircle,
@@ -61,6 +62,22 @@ function runIcon(status: string) {
 
 <template>
   <aside class="sidebar">
+    <section class="sidebar-section">
+      <h3><MessagesSquare :size="13" /> Sessions</h3>
+      <div v-if="store.codingSessions.length === 0" class="empty">暂无 session</div>
+      <div
+        v-for="session in store.codingSessions"
+        :key="session.session_id"
+        class="session-item"
+        :class="{ active: session.session_id === store.sessionId }"
+      >
+        <div class="session-title">{{ session.title }}</div>
+        <div class="session-meta">
+          {{ session.message_count }} messages · {{ session.runtime_mode }}
+        </div>
+      </div>
+    </section>
+
     <section class="sidebar-section">
       <h3>Skills</h3>
 
@@ -200,6 +217,31 @@ function runIcon(status: string) {
 .empty {
   color: #9ca3af;
   font-size: 12px;
+}
+
+.session-item {
+  padding: 5px 7px;
+  border-radius: 6px;
+  margin-bottom: 4px;
+}
+
+.session-item.active {
+  background: #eef6ff;
+}
+
+.session-title {
+  overflow: hidden;
+  color: #111827;
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-meta {
+  margin-top: 2px;
+  color: #6b7280;
+  font-size: 11px;
 }
 
 .skill-search {

@@ -112,6 +112,20 @@ export type CodingSessionResponse = {
   workspace_root: string
 }
 
+export type CodingSessionSummary = {
+  session_id: string
+  title: string
+  workspace_root: string
+  created_at: string
+  updated_at: string
+  runtime_mode: string
+  message_count: number
+}
+
+export type CodingSessionsResponse = {
+  sessions: CodingSessionSummary[]
+}
+
 export type CodingApproval = {
   approval_id: string
   session_id: string

@@ -69,6 +69,26 @@ def test_create_coding_session_accepts_approval_policy(tmp_path: Path) -> None:
     assert app.state.coding_sessions[session_id].approval_policy == "ask"
 
 
+def test_list_coding_sessions_returns_persisted_sessions(tmp_path: Path) -> None:
+    """GET /coding/sessions exposes local Sage coding session history."""
+    client = TestClient(
+        create_app(
+            coding_model_factory=FakeModel,
+            coding_workspace_root=tmp_path,
+            coding_storage_root=tmp_path / ".coding",
+        )
+    )
+    created = client.post("/api/v1/coding/session", json={}).json()
+
+    response = client.get("/api/v1/coding/sessions")
+
+    assert response.status_code == 200
+    sessions = response.json()["sessions"]
+    assert sessions[0]["session_id"] == created["session_id"]
+    assert sessions[0]["workspace_root"] == str(tmp_path.resolve())
+    assert sessions[0]["runtime_mode"] == "default"
+
+
 def test_create_coding_session_rejects_workspace_outside_configured_root(
     tmp_path: Path,
 ) -> None:

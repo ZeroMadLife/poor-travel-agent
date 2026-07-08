@@ -34,6 +34,24 @@ class CodingSessionResponse(BaseModel):
     workspace_root: str
 
 
+class CodingSessionSummary(BaseModel):
+    """One local coding-agent session shown in the Sage workbench."""
+
+    session_id: str
+    title: str
+    workspace_root: str
+    created_at: str = ""
+    updated_at: str = ""
+    runtime_mode: str = "default"
+    message_count: int = 0
+
+
+class CodingSessionsResponse(BaseModel):
+    """Local coding-agent session history."""
+
+    sessions: list[CodingSessionSummary]
+
+
 class CodingFileEntry(BaseModel):
     """One entry in a coding file tree listing."""
 

@@ -75,6 +75,7 @@ class CodingRuntime:
         self.tools = build_tool_registry(self.workspace, tool_context=self.tool_context)
         self.skill_registry = SkillRegistry(root=self.workspace.root)
         self.model_spec: str = ""
+        self._save_session()
 
     def list_files(self, path: str = ".") -> list[dict[str, Any]]:
         """Return directory entries (dirs first, then files), workspace-safe."""

@@ -123,6 +123,18 @@ Composer / Skills：
 - `CodingSidebar.vue` 增加 Runs 区块，显示状态、工具数、事件数、最后事件，并可展开最近 trace 事件。
 - run detail 进一步增加 `timeline` 派生视图：后端把 `model_requested`、`tool_call`、`approval_required`、`tool_result`、`final` 等原始事件转成 `kind/title/detail/status/tool/timestamp`，前端侧栏优先渲染这份 worklog，避免把裸 JSON / 裸 event type 暴露给用户。
 
+### Session History
+
+补上 Hermes 工作台里最基础的会话可见性：
+
+- `CodingRuntime` 创建时立即持久化初始 session，不再等到首轮 run 结束后才落盘。
+- `CodingSessionStore` 增加 `list_sessions()`，从本地 `.coding/sessions/*.json` 生成 session summary。
+- session summary 包含 `session_id`、`title`、`workspace_root`、`created_at`、`updated_at`、`runtime_mode`、`message_count`。
+- 新增 REST：`GET /api/v1/coding/sessions`。
+- 前端 store 增加 `codingSessions` / `loadSessions()`，初始化和 run 结束后刷新 session history。
+- `CodingSidebar.vue` 增加 Sessions 区块，显示当前 session、标题、消息数和 runtime mode。
+- 本轮只做“历史可见性”，还不做旧 session 的 runtime rehydrate / resume。
+
 ## 测试覆盖
 
 `tests/core/coding/test_context_compact.py` 新增：
@@ -180,6 +192,14 @@ Run history 新增：
 - `frontend/src/api/coding.test.ts`：run history API client。
 - `frontend/src/stores/coding.test.ts`：run list/detail 加载，以及 run finished 后刷新。
 - `frontend/src/components/CodingSidebar.test.ts`：run detail 以可读 worklog timeline 渲染。
+
+Session history 新增：
+
+- `tests/core/coding/test_session_store.py`：session summary 派生与更新时间排序。
+- `tests/api/test_coding_routes.py`：coding sessions API。
+- `frontend/src/api/coding.test.ts`：session history API client。
+- `frontend/src/stores/coding.test.ts`：session list 加载。
+- `frontend/src/components/CodingSidebar.test.ts`：Sessions 区块渲染与 active 状态。
 
 ## 已验证
 
@@ -274,6 +294,15 @@ mypy core/coding/permissions.py tests/core/coding/test_permissions.py
 ```
 
 结果：tool permission metadata 定向 `34 passed`；ruff/mypy 通过。
+
+```bash
+pytest tests/core/coding/test_session_store.py tests/core/coding/test_todo_plan_worker_runtime.py tests/api/test_coding_routes.py -q
+ruff check core/coding/session_store.py core/coding/runtime.py api/schemas.py api/coding.py tests/core/coding/test_session_store.py tests/api/test_coding_routes.py
+mypy core/coding/session_store.py core/coding/runtime.py api/schemas.py api/coding.py tests/core/coding/test_session_store.py tests/api/test_coding_routes.py
+cd frontend && npm run test -- --run src/api/coding.test.ts src/stores/coding.test.ts src/components/CodingSidebar.test.ts
+```
+
+结果：后端 session history 定向 `24 passed`；ruff/mypy 通过；前端定向 `3 files / 25 tests passed`。
 
 ## 后续方向
 

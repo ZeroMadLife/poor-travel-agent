@@ -8,6 +8,29 @@ beforeEach(() => {
   setActivePinia(createPinia())
 })
 
+it('renders coding session history', () => {
+  const store = useCodingStore()
+  store.codingSessions = [
+    {
+      session_id: 's1',
+      title: '读 README',
+      workspace_root: '/tmp/repo',
+      created_at: '2026-07-08T10:00:00',
+      updated_at: '2026-07-08T10:00:01',
+      runtime_mode: 'default',
+      message_count: 2,
+    },
+  ]
+  store.sessionId = 's1'
+
+  const wrapper = mount(CodingSidebar)
+
+  expect(wrapper.text()).toContain('Sessions')
+  expect(wrapper.text()).toContain('读 README')
+  expect(wrapper.text()).toContain('2 messages')
+  expect(wrapper.find('.session-item.active').exists()).toBe(true)
+})
+
 it('renders run detail as a readable worklog timeline', () => {
   const store = useCodingStore()
   store.runs = [

@@ -10,6 +10,7 @@ import {
   fetchCodingModels,
   fetchCodingRun,
   fetchCodingRuns,
+  fetchCodingSessions,
   fetchCodingSkills,
   respondCodingApproval,
   startCodingSession,
@@ -28,6 +29,7 @@ import type {
   CodingRunDetailResponse,
   CodingRunSummary,
   CodingServerEvent,
+  CodingSessionSummary,
   CodingSkillSummary,
   CodingToolCallEvent,
   CodingToolResultEvent,
@@ -58,6 +60,7 @@ export const useCodingStore = defineStore('coding', () => {
   const contextChars = ref(0)
   const contextBudget = 60000
   const pendingApproval = ref<CodingApproval | null>(null)
+  const codingSessions = ref<CodingSessionSummary[]>([])
   const runs = ref<CodingRunSummary[]>([])
   const selectedRun = ref<CodingRunDetailResponse | null>(null)
 
@@ -98,6 +101,7 @@ export const useCodingStore = defineStore('coding', () => {
       loadModels(),
       loadGitStatus(),
       loadFiles('.'),
+      loadSessions(),
       loadRuns(),
     ])
     connectSocket()
@@ -140,6 +144,7 @@ export const useCodingStore = defineStore('coding', () => {
       finalizeCurrentMessage(event.content)
       isThinking.value = false
       stopApprovalPolling()
+      void loadSessions()
       void loadRuns()
       return
     }
@@ -334,6 +339,15 @@ export const useCodingStore = defineStore('coding', () => {
     }
   }
 
+  async function loadSessions() {
+    try {
+      const res = await fetchCodingSessions()
+      codingSessions.value = res.sessions
+    } catch {
+      codingSessions.value = []
+    }
+  }
+
   async function loadRunDetail(runId: string) {
     if (!sessionId.value) return
     try {
@@ -420,6 +434,7 @@ export const useCodingStore = defineStore('coding', () => {
     contextBudget,
     contextPercent,
     pendingApproval,
+    codingSessions,
     runs,
     selectedRun,
     skills,
@@ -440,6 +455,7 @@ export const useCodingStore = defineStore('coding', () => {
     loadSkills,
     loadMcpServers,
     loadModels,
+    loadSessions,
     loadRuns,
     loadRunDetail,
     loadGitStatus,
