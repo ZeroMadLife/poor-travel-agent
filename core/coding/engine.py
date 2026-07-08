@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import AsyncIterator
 from typing import Any, Protocol
 
+from core.coding.approval import ApprovalManager, check_dangerous_command
 from core.coding.context_manager import ContextManager
 from core.coding.engine_helpers import (
     build_tool_descriptions,
@@ -38,6 +40,8 @@ class Engine:
         context_manager: ContextManager,
         permission_checker: PermissionChecker,
         policy_checker: ToolPolicyChecker,
+        session_id: str = "",
+        approval_manager: ApprovalManager | None = None,
         history: list[dict[str, Any]] | None = None,
         max_steps: int = 50,
     ) -> None:
@@ -47,6 +51,8 @@ class Engine:
         self.context_manager = context_manager
         self.permission_checker = permission_checker
         self.policy_checker = policy_checker
+        self.session_id = session_id
+        self.approval_manager = approval_manager
         self.history = history if history is not None else []
         self.max_steps = max_steps
 
@@ -123,9 +129,76 @@ class Engine:
             yield event
             return
 
+        if permission.reason == "approval_required":
+            approved = False
+            async for event in self._approval_events(tool, args):
+                if event["type"] == "approval_granted":
+                    approved = True
+                    continue
+                yield event
+                if event["type"] == "tool_result":
+                    return
+            if not approved:
+                return
+
         yield {"type": "tool_call", "tool": name, "args": args}
         result = tool.execute(args)
         yield self._tool_result_event(name, args, result)
+
+    async def _approval_events(
+        self,
+        tool: RegisteredTool,
+        args: dict[str, Any],
+    ) -> AsyncIterator[dict[str, Any]]:
+        if self.approval_manager is None or not self.session_id:
+            result = ToolResult(content="approval manager is not configured", is_error=True)
+            yield self._tool_result_event(tool.name, args, result)
+            return
+
+        description = f"{tool.name} requires approval."
+        pattern_key = f"tool:{tool.name}"
+        if tool.name == "run_shell":
+            dangerous, command_description, command_pattern = check_dangerous_command(
+                str(args.get("command", ""))
+            )
+            if dangerous:
+                description = command_description
+                pattern_key = f"shell:{command_pattern}"
+
+        if self.approval_manager.is_session_approved(self.session_id, pattern_key):
+            yield {"type": "approval_granted", "tool": tool.name}
+            return
+
+        entry = self.approval_manager.submit(
+            self.session_id,
+            tool.name,
+            args,
+            description,
+            pattern_key,
+        )
+        yield {
+            "type": "approval_required",
+            "approval_id": entry.approval_id,
+            "tool": tool.name,
+            "args": args,
+            "description": description,
+            "pattern_key": pattern_key,
+        }
+
+        waited_seconds = 0
+        while waited_seconds < 300:
+            if await asyncio.to_thread(entry.event.wait, 1.0):
+                break
+            waited_seconds += 1
+        if not entry.event.is_set():
+            result = ToolResult(content="approval timed out", is_error=True)
+            yield self._tool_result_event(tool.name, args, result)
+            return
+        if entry.result == "deny":
+            result = ToolResult(content="approval denied", is_error=True)
+            yield self._tool_result_event(tool.name, args, result)
+            return
+        yield {"type": "approval_granted", "tool": tool.name}
 
     def _tool_result_event(
         self,

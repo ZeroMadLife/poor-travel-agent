@@ -24,6 +24,7 @@ class CodingSessionRequest(BaseModel):
     """Request body for creating a coding session."""
 
     workspace_root: str | None = Field(default=None, description="Workspace root override")
+    approval_policy: Literal["auto", "ask", "never"] = "auto"
 
 
 class CodingSessionResponse(BaseModel):
@@ -121,6 +122,24 @@ class CodingMcpServersResponse(BaseModel):
     """MCP server config listing."""
 
     servers: list[CodingMcpServer]
+
+
+class CodingApprovalResponse(BaseModel):
+    """Pending approval returned to the coding UI."""
+
+    approval_id: str
+    session_id: str
+    tool: str
+    args: dict[str, Any] = Field(default_factory=dict)
+    description: str
+    pattern_key: str
+
+
+class CodingApprovalRespondRequest(BaseModel):
+    """Request body for resolving one approval."""
+
+    approval_id: str = Field(min_length=1)
+    choice: Literal["once", "session", "always", "deny"]
 
 
 class AuthRequest(BaseModel):

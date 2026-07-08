@@ -81,6 +81,8 @@ class PermissionChecker:
             return PermissionDecision.deny("approval_denied", "approval_denied")
         if self.approval_callback is not None and self.approval_callback(tool.name, args):
             return PermissionDecision.allow("approval_prompt")
+        if self.approval_callback is None:
+            return PermissionDecision.allow("approval_required")
         return PermissionDecision.deny("approval_denied", "approval_denied")
 
     def _check_write_scope(

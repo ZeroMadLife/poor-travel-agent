@@ -9,6 +9,8 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Request, WebSocket
 
 from api.schemas import (
+    CodingApprovalRespondRequest,
+    CodingApprovalResponse,
     CodingFileContentResponse,
     CodingFileEntry,
     CodingFilesResponse,
@@ -52,6 +54,7 @@ async def create_coding_session(
         model=model_factory(),
         storage_root=storage_root,
         model_factory=model_factory,
+        approval_policy=payload.approval_policy,
     )
     sessions: dict[str, CodingRuntime] = request.app.state.coding_sessions
     sessions[session_id] = runtime
@@ -136,6 +139,34 @@ async def coding_git_status(session_id: str, request: Request) -> CodingGitStatu
     """Return git branch and dirty file count for the workspace."""
     runtime = _require_runtime(request, session_id)
     return CodingGitStatusResponse(**runtime.git_status())
+
+
+@router.get(
+    "/api/v1/coding/{session_id}/approval/pending",
+    response_model=CodingApprovalResponse | None,
+)
+async def coding_pending_approval(
+    session_id: str,
+    request: Request,
+) -> CodingApprovalResponse | None:
+    """Return the oldest pending approval for a coding session."""
+    runtime = _require_runtime(request, session_id)
+    pending = runtime.approval_manager.pending(session_id)
+    return CodingApprovalResponse(**pending) if pending else None
+
+
+@router.post("/api/v1/coding/{session_id}/approval/respond")
+async def coding_approval_respond(
+    session_id: str,
+    payload: CodingApprovalRespondRequest,
+    request: Request,
+) -> dict[str, bool]:
+    """Resolve a pending tool approval."""
+    runtime = _require_runtime(request, session_id)
+    ok = runtime.approval_manager.resolve(session_id, payload.approval_id, payload.choice)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Unknown approval: {payload.approval_id}")
+    return {"ok": True}
 
 
 @router.get("/api/v1/coding/models", response_model=CodingModelsResponse)

@@ -182,17 +182,33 @@ WebSocket 事件流里新增 `approval_required` 事件类型。
 
 ---
 
-## 方向三：工具系统重构
+## 方向三：工具系统重构 + Tool Search 延迟加载
 
 ### 问题
 
-当前 `core/coding/tools/registry.py` 用手写 `TOOL_SPECS` dict，6 个核心工具还够用，但加上 todo/plan/worker 共 15 个工具时维护成本上升。工具执行是同步的，没有超时控制。
+当前 `core/coding/tools/registry.py` 用手写 `TOOL_SPECS` dict，6 个核心工具还够用，但加上 todo/plan/worker 共 15 个工具时维护成本上升。工具执行是同步的，没有超时控制。更关键的是：**所有工具 schema 每轮全量注入 API 的 tools 参数，工具多了浪费大量 token**。
 
-### 参考（Hermes 源码）
+### 参考
 
-- `/Users/zeromadlife/Desktop/hermes-study/hermes-agent/tools/registry.py` - AST 扫描自动发现 + `check_fn` TTL 缓存
-- `/Users/zeromadlife/Desktop/hermes-study/hermes-agent/toolsets.py` - toolset 分组
-- `/Users/zeromadlife/Desktop/hermes-study/hermes-agent/tools/base.py` - 工具基类
+- Hermes 源码：`/Users/zeromadlife/Desktop/hermes-study/hermes-agent/tools/registry.py` - AST 扫描自动发现 + `check_fn` TTL 缓存
+- Hermes 源码：`/Users/zeromadlife/Desktop/hermes-study/hermes-agent/toolsets.py` - toolset 分组
+- Hermes 源码：`/Users/zeromadlife/Desktop/hermes-study/hermes-agent/tools/base.py` - 工具基类
+- Claude Code 的 tool search 延迟加载机制（参照 https://diwang.info/claude-code-from-scratch/#/docs/02-tools 的设计）
+
+### Claude Code Tool Search 机制说明
+
+Claude Code 不是把所有工具 schema 一股脑注入 tools 参数，而是按需加载：
+
+```text
+常驻工具（6 核心 + tool_search）-> 每轮都发完整 schema
+deferred 工具（plan/todo/agent 等）-> 激活前不进 tools 参数，只在 system prompt 里放名字
+模型需要某工具 -> 调 tool_search("plan") -> 匹配->激活->返回 schema
+下一轮 -> 该工具自动进入 tools 参数（永久常驻）
+```
+
+三步：匹配（name/description 子串匹配）-> 激活（加入 `activatedTools: Set`）-> 返回 schema（以 tool_result 返回给模型）
+
+省 token：未激活的 deferred 工具不进 tools 参数（每个 schema 几百 token vs 名字几 token）
 
 ### 要做的事
 
@@ -200,40 +216,97 @@ WebSocket 事件流里新增 `approval_required` 事件类型。
 
 改造 `core/coding/tools/registry.py`：
 - 保留 `RegisteredTool` 和 `ToolResult`（不动）
-- 新增 `@register_tool(name, description, risky, schema)` 装饰器
+- 新增 `@register_tool(name, description, risky, schema, deferred=False)` 装饰器
 - 每个工具函数文件模块级调 `@register_tool`，不再集中写 dict
-- `build_tool_registry()` 扫描 `core/coding/tools/` 下所有模块，收集注册的工0具
+- `build_tool_registry()` 扫描 `core/coding/tools/` 下所有模块，收集注册的工具
 
 拆分工具到独立文件（当前全在 `registry.py`）：
 ```
 core/coding/tools/
 ├── base.py           # RegisteredTool / ToolResult（不动）
 ├── schemas.py        # pydantic Args（不动）
-├── registry.py       # 装饰器 + build_tool_registry（改）
+├── registry.py       # 装饰器 + build_tool_registry + get_active_tools（改）
 ├── file_tools.py     # list_files / read_file / search / write_file / patch_file
 ├── shell_tool.py     # run_shell
-├── todo_tools.py     # todo_add / todo_update / todo_list
-├── plan_tools.py     # enter_plan_mode / exit_plan_mode
-├── agent_tools.py    # agent / send_message / task_stop
+├── todo_tools.py     # todo_add / todo_update / todo_list（deferred=True）
+├── plan_tools.py     # enter_plan_mode / exit_plan_mode（deferred=True）
+├── agent_tools.py    # agent / send_message / task_stop（deferred=True）
+├── tool_search.py    # tool_search 工具（常驻，特殊）
 └── __init__.py
 ```
 
-#### 3.2 工具执行超时
+#### 3.2 Tool Search 延迟加载（核心新增）
+
+**RegisteredTool 加字段**：
+- `deferred: bool = False` - 是否延迟加载（常驻工具 False，不常用工具 True）
+- `category: str = ""` - 工具分类（"file" / "shell" / "todo" / "plan" / "agent"）
+- `requires_approval: bool = False` - 是否需要审批（risky=True 默认 requires_approval=True）
+
+**新增 `tool_search` 工具**（常驻，模型永远可见）：
+
+```python
+@register_tool(
+    name="tool_search",
+    description="Search for available tools by name or keyword. Returns full schemas for matching deferred tools.",
+    risky=False,
+    schema={"query": "str"},
+    deferred=False,  # 常驻
+)
+def tool_search(args, ctx):
+    query = args.get("query", "").lower()
+    deferred_tools = [t for t in all_tools() if t.deferred and t.name not in ctx.activated]
+    matches = [
+        t for t in deferred_tools
+        if query in t.name.lower() or query in t.description.lower()
+    ]
+    if not matches:
+        return "No matching deferred tools found."
+    for m in matches:
+        ctx.activated.add(m.name)  # 激活
+    return json.dumps([
+        {"name": t.name, "description": t.description, "schema": t.schema}
+        for t in matches
+    ], indent=2)
+```
+
+**新增 `get_active_tools()` 过滤器**：
+
+```python
+def get_active_tools(all_tools: dict, activated: set[str]) -> dict:
+    """返回常驻工具 + 已激活的 deferred 工具（剥掉 deferred 字段）。"""
+    return {
+        name: tool for name, tool in all_tools.items()
+        if not tool.deferred or name in activated
+    }
+```
+
+**engine 接入**：
+- `Engine.__init__` 加 `activated_tools: set[str]` 参数
+- 每轮 `context_manager.build()` 时，tools 描述只包含 `get_active_tools()` 的结果
+- system prompt 里注入 deferred 工具名清单：`"Deferred tools (use tool_search to activate): todo_add, todo_update, plan_mode, ..."`
+- tool_search 工具执行时，把匹配到的工具加入 `activated_tools`，后续轮次自动可见
+
+**会话级隔离**：`activated_tools` 绑定在 `CodingRuntime` 上（per-session），不是全局，避免多会话串扰。
+
+**deferred 标记策略**：
+- 常驻（deferred=False）：list_files / read_file / search / run_shell / write_file / patch_file / tool_search
+- 延迟（deferred=True）：todo_add / todo_update / todo_list / enter_plan_mode / exit_plan_mode / agent / send_message / task_stop
+
+#### 3.3 工具执行超时
 
 `run_shell` 已有 timeout 参数。其他工具加默认超时：
 - `RegisteredTool.execute()` 加 `timeout` 参数（默认 30s）
 - 用 `asyncio.wait_for` 或 `concurrent.futures` 包裹同步工具执行
 
-#### 3.3 工具元数据增强
-
-`RegisteredTool` 加字段：
-- `category: str` - 工具分类（"file" / "shell" / "todo" / "plan" / "agent"）
-- `requires_approval: bool` - 是否需要审批（risky=True 的默认 requires_approval=True）
-
 ### 验收
 - 所有现有工具测试全过
-- 新增测试：装饰器注册、工具发现、超时
-- 工具拆分后 `build_tool_registry()` 返回相同工具集
+- 新增测试：装饰器注册、工具发现、超时、deferred 标记
+- 新增测试：tool_search 匹配/激活/返回 schema
+- 新增测试：get_active_tools 过滤（常驻+已激活 vs 未激活的 deferred）
+- 新增测试：engine 每轮只发 active tools 的描述
+- 新增测试：tool_search 激活后下一轮该工具自动可见
+- 工具拆分后 `build_tool_registry()` 返回相同工具集（15 个 + tool_search = 16 个）
+- system prompt 里包含 deferred 工具名清单
 
 ---
 
@@ -351,6 +424,7 @@ Codex 执行时遇到不确定的设计决策，优先读 Hermes 源码对应的
 | approval 怎么阻塞 | `hermes-agent/tools/approval.py` 的 `_await_gateway_decision` |
 | 危险命令怎么检测 | `hermes-agent/tools/approval.py` 的 `DANGEROUS_PATTERNS` |
 | 工具怎么自注册 | `hermes-agent/tools/registry.py` 的 `discover_builtin_tools` |
+| tool search 延迟加载 | Claude Code 设计：匹配->激活->返回 schema，参照 prompt 方向三 3.2 节 |
 | 前端工具卡怎么折 | `hermes-webui/static/ui.js` 的 `buildToolCard` |
 | 前端 approval 卡 | `hermes-webui/static/messages.js:6577-6735` |
 | 前端文件树缓存 | `hermes-webui/static/workspace.js` 的 `loadDir` |

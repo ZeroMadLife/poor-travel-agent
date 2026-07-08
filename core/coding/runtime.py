@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
+from core.coding.approval import ApprovalManager
 from core.coding.context_manager import ContextManager
 from core.coding.engine import Engine
 from core.coding.permissions import PermissionChecker
@@ -60,6 +61,7 @@ class CodingRuntime:
         self.worker_manager = WorkerManager(self.workspace, self.model_factory)
         self.context_manager = ContextManager()
         self.approval_policy = approval_policy
+        self.approval_manager = ApprovalManager()
         self.runtime_mode = "default"
         self.permission_checker = self._permission_checker()
         self.policy_checker = ToolPolicyChecker(self.workspace)
@@ -202,6 +204,8 @@ class CodingRuntime:
             context_manager=self.context_manager,
             permission_checker=self.permission_checker,
             policy_checker=self.policy_checker,
+            session_id=self.session_id,
+            approval_manager=self.approval_manager,
             history=self.session["history"],
             max_steps=50,
         )
@@ -216,7 +220,7 @@ class CodingRuntime:
 
     def _permission_checker(self) -> PermissionChecker:
         return PermissionChecker(
-            approval_policy="auto" if self.approval_policy == "auto" else "never",
+            approval_policy=self.approval_policy if self.approval_policy in {"auto", "ask"} else "never",
             plan_mode=self.runtime_mode == "plan",
         )
 
