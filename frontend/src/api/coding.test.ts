@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   buildCodingStreamUrl,
   fetchCodingApprovalPending,
+  fetchCodingRun,
+  fetchCodingRuns,
   respondCodingApproval,
   startCodingSession,
   stopCodingRun,
@@ -76,5 +78,39 @@ describe('coding API client', () => {
     await stopCodingRun('c1')
 
     expect(fetchMock).toHaveBeenCalledWith(expect.any(URL), { method: 'POST' })
+  })
+
+  it('fetches coding run history and detail', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          runs: [
+            {
+              run_id: 'run_1',
+              status: 'completed',
+              event_count: 4,
+              tool_count: 1,
+              error_count: 0,
+              last_event_type: 'final',
+              started_at: '2026-07-08T10:00:00',
+              updated_at: '2026-07-08T10:00:01',
+            },
+          ],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ run_id: 'run_1', events: [{ type: 'final' }] }),
+      })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const runs = await fetchCodingRuns('c1')
+    const detail = await fetchCodingRun('c1', 'run_1')
+
+    expect(runs.runs[0].run_id).toBe('run_1')
+    expect(detail.events[0].type).toBe('final')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 })

@@ -8,6 +8,8 @@ import {
   fetchCodingGitStatus,
   fetchCodingMcpServers,
   fetchCodingModels,
+  fetchCodingRun,
+  fetchCodingRuns,
   fetchCodingSkills,
   respondCodingApproval,
   startCodingSession,
@@ -23,6 +25,8 @@ import type {
   CodingGitStatusResponse,
   CodingMcpServer,
   CodingModel,
+  CodingRunDetailResponse,
+  CodingRunSummary,
   CodingServerEvent,
   CodingSkillSummary,
   CodingToolCallEvent,
@@ -54,6 +58,8 @@ export const useCodingStore = defineStore('coding', () => {
   const contextChars = ref(0)
   const contextBudget = 60000
   const pendingApproval = ref<CodingApproval | null>(null)
+  const runs = ref<CodingRunSummary[]>([])
+  const selectedRun = ref<CodingRunDetailResponse | null>(null)
 
   const skills = ref<CodingSkillSummary[]>([])
   const mcpServers = ref<CodingMcpServer[]>([])
@@ -92,6 +98,7 @@ export const useCodingStore = defineStore('coding', () => {
       loadModels(),
       loadGitStatus(),
       loadFiles('.'),
+      loadRuns(),
     ])
     connectSocket()
   }
@@ -133,6 +140,7 @@ export const useCodingStore = defineStore('coding', () => {
       finalizeCurrentMessage(event.content)
       isThinking.value = false
       stopApprovalPolling()
+      void loadRuns()
       return
     }
     if (event.type === 'error') {
@@ -316,6 +324,25 @@ export const useCodingStore = defineStore('coding', () => {
     }
   }
 
+  async function loadRuns() {
+    if (!sessionId.value) return
+    try {
+      const res = await fetchCodingRuns(sessionId.value)
+      runs.value = res.runs
+    } catch {
+      runs.value = []
+    }
+  }
+
+  async function loadRunDetail(runId: string) {
+    if (!sessionId.value) return
+    try {
+      selectedRun.value = await fetchCodingRun(sessionId.value, runId)
+    } catch {
+      selectedRun.value = null
+    }
+  }
+
   async function loadGitStatus() {
     if (!sessionId.value) return
     try {
@@ -393,6 +420,8 @@ export const useCodingStore = defineStore('coding', () => {
     contextBudget,
     contextPercent,
     pendingApproval,
+    runs,
+    selectedRun,
     skills,
     mcpServers,
     models,
@@ -411,6 +440,8 @@ export const useCodingStore = defineStore('coding', () => {
     loadSkills,
     loadMcpServers,
     loadModels,
+    loadRuns,
+    loadRunDetail,
     loadGitStatus,
     loadFiles,
     refreshWorkspaceView,

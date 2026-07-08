@@ -142,6 +142,32 @@ class CodingApprovalRespondRequest(BaseModel):
     choice: Literal["once", "session", "always", "deny"]
 
 
+class CodingRunSummary(BaseModel):
+    """One coding run summary for the workbench run history."""
+
+    run_id: str
+    status: str
+    event_count: int
+    tool_count: int
+    error_count: int
+    last_event_type: str
+    started_at: str = ""
+    updated_at: str = ""
+
+
+class CodingRunsResponse(BaseModel):
+    """Run history for one coding session."""
+
+    runs: list[CodingRunSummary]
+
+
+class CodingRunDetailResponse(BaseModel):
+    """Full persisted trace for one coding run."""
+
+    run_id: str
+    events: list[dict[str, Any]]
+
+
 class AuthRequest(BaseModel):
     """Passphrase verification request."""
 

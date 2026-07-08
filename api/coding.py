@@ -20,6 +20,9 @@ from api.schemas import (
     CodingModel,
     CodingModelsResponse,
     CodingModelSwitchRequest,
+    CodingRunDetailResponse,
+    CodingRunsResponse,
+    CodingRunSummary,
     CodingSessionRequest,
     CodingSessionResponse,
     CodingSkillDetailResponse,
@@ -175,6 +178,32 @@ async def stop_coding_run(session_id: str, request: Request) -> dict[str, bool]:
     runtime = _require_runtime(request, session_id)
     runtime.request_stop()
     return {"ok": True}
+
+
+@router.get("/api/v1/coding/{session_id}/runs", response_model=CodingRunsResponse)
+async def list_coding_runs(session_id: str, request: Request) -> CodingRunsResponse:
+    """Return persisted run summaries for a coding session."""
+    runtime = _require_runtime(request, session_id)
+    return CodingRunsResponse(
+        runs=[CodingRunSummary(**item) for item in runtime.run_store.list_runs()]
+    )
+
+
+@router.get(
+    "/api/v1/coding/{session_id}/runs/{run_id}",
+    response_model=CodingRunDetailResponse,
+)
+async def get_coding_run(
+    session_id: str,
+    run_id: str,
+    request: Request,
+) -> CodingRunDetailResponse:
+    """Return one persisted run trace."""
+    runtime = _require_runtime(request, session_id)
+    try:
+        return CodingRunDetailResponse(**runtime.run_store.get_run(run_id))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown run: {run_id}") from exc
 
 
 @router.get("/api/v1/coding/models", response_model=CodingModelsResponse)

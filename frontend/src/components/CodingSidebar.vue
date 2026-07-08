@@ -1,5 +1,15 @@
 <script setup lang="ts">
-import { ChevronDown, ChevronRight, FileCode, Search, Server, Zap } from 'lucide-vue-next'
+import {
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  Clock3,
+  FileCode,
+  Search,
+  Server,
+  XCircle,
+  Zap,
+} from 'lucide-vue-next'
 import { computed, ref } from 'vue'
 import { useCodingStore } from '../stores/coding'
 import type { CodingSkillSummary } from '../types/api'
@@ -41,6 +51,12 @@ function toggleSource(source: string) {
   else next.add(source)
   collapsedSources.value = next
 }
+
+function runIcon(status: string) {
+  if (status === 'completed') return CheckCircle2
+  if (status === 'error' || status === 'cancelled') return XCircle
+  return Clock3
+}
 </script>
 
 <template>
@@ -81,6 +97,31 @@ function toggleSource(source: string) {
               </button>
             </div>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="sidebar-section">
+      <h3><Clock3 :size="13" /> Runs</h3>
+      <div v-if="store.runs.length === 0" class="empty">暂无 run</div>
+      <div v-for="run in store.runs" :key="run.run_id" class="run-item">
+        <button class="run-header" @click="store.loadRunDetail(run.run_id)">
+          <component :is="runIcon(run.status)" :size="13" />
+          <span class="run-id">{{ run.run_id.replace('run_', '') }}</span>
+          <span class="run-status" :class="run.status">{{ run.status }}</span>
+        </button>
+        <div class="run-meta">
+          {{ run.tool_count }} tools · {{ run.event_count }} events · {{ run.last_event_type }}
+        </div>
+      </div>
+      <div v-if="store.selectedRun" class="run-detail">
+        <div class="run-detail-title">{{ store.selectedRun.run_id }}</div>
+        <div
+          v-for="(event, index) in store.selectedRun.events.slice(-8)"
+          :key="index"
+          class="run-event"
+        >
+          {{ event.type }}
         </div>
       </div>
     </section>
@@ -256,6 +297,79 @@ function toggleSource(source: string) {
 
 .skill-use:hover {
   background: #f3f4f6;
+}
+
+.run-item {
+  margin-bottom: 6px;
+}
+
+.run-header {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 3px 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.run-id {
+  flex: 1;
+  overflow: hidden;
+  color: #111827;
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-status {
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: #e5e7eb;
+  color: #4b5563;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.run-status.completed {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+.run-status.cancelled,
+.run-status.error {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.run-meta {
+  padding-left: 18px;
+  color: #6b7280;
+  font-size: 11px;
+}
+
+.run-detail {
+  margin-top: 8px;
+  padding: 6px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.run-detail-title {
+  margin-bottom: 4px;
+  color: #374151;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.run-event {
+  color: #6b7280;
+  font-family: 'SF Mono', monospace;
+  font-size: 11px;
 }
 
 .mcp-item {

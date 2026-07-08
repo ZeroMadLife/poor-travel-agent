@@ -255,6 +255,26 @@ export type CodingMcpServersResponse = {
   servers: CodingMcpServer[]
 }
 
+export type CodingRunSummary = {
+  run_id: string
+  status: string
+  event_count: number
+  tool_count: number
+  error_count: number
+  last_event_type: string
+  started_at: string
+  updated_at: string
+}
+
+export type CodingRunsResponse = {
+  runs: CodingRunSummary[]
+}
+
+export type CodingRunDetailResponse = {
+  run_id: string
+  events: Array<Record<string, unknown>>
+}
+
 export type SessionSummary = {
   session_id: string
   title: string

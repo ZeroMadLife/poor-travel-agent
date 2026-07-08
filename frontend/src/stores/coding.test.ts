@@ -222,4 +222,56 @@ describe('coding store', () => {
 
     expect(fetchMock).toHaveBeenCalledWith(expect.any(URL), { method: 'POST' })
   })
+
+  it('loads run history and run detail', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          runs: [
+            {
+              run_id: 'run_1',
+              status: 'completed',
+              event_count: 4,
+              tool_count: 1,
+              error_count: 0,
+              last_event_type: 'final',
+              started_at: '2026-07-08T10:00:00',
+              updated_at: '2026-07-08T10:00:01',
+            },
+          ],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ run_id: 'run_1', events: [{ type: 'final', content: 'done' }] }),
+      })
+    vi.stubGlobal('fetch', fetchMock)
+    const store = useCodingStore()
+    store.sessionId = 'c1'
+
+    await store.loadRuns()
+    await store.loadRunDetail('run_1')
+
+    expect(store.runs[0].run_id).toBe('run_1')
+    expect(store.selectedRun?.events[0].content).toBe('done')
+  })
+
+  it('refreshes run history when a run finishes', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ runs: [] }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const store = useCodingStore()
+    store.sessionId = 'c1'
+    store.messages = [{ role: 'assistant', content: '', tools: [], isThinking: true }]
+    store.isThinking = true
+
+    store.handleServerEvent({ type: 'final', content: '完成' } as never)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(fetchMock).toHaveBeenCalledWith(expect.any(URL))
+  })
 })

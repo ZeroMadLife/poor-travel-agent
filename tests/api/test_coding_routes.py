@@ -211,6 +211,37 @@ def test_stop_coding_run_marks_runtime_stop_requested(tmp_path: Path) -> None:
     assert app.state.coding_sessions[session_id].stop_requested is True
 
 
+def test_coding_run_history_lists_and_reads_traces(tmp_path: Path) -> None:
+    """Run history endpoints expose persisted coding run traces."""
+    (tmp_path / "README.md").write_text("Sage run history\n", encoding="utf-8")
+    client = TestClient(
+        create_app(
+            coding_model_factory=FakeModel,
+            coding_workspace_root=tmp_path,
+            coding_storage_root=tmp_path / ".coding",
+        )
+    )
+    session_id = client.post("/api/v1/coding/session", json={}).json()["session_id"]
+    with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
+        websocket.send_json({"content": "读 README.md"})
+        while True:
+            event = websocket.receive_json()
+            if event["type"] == "final":
+                break
+
+    list_response = client.get(f"/api/v1/coding/{session_id}/runs")
+    run = list_response.json()["runs"][0]
+    detail_response = client.get(f"/api/v1/coding/{session_id}/runs/{run['run_id']}")
+
+    assert list_response.status_code == 200
+    assert run["status"] == "completed"
+    assert run["tool_count"] == 1
+    assert run["last_event_type"] == "final"
+    assert detail_response.status_code == 200
+    assert detail_response.json()["run_id"] == run["run_id"]
+    assert [event["type"] for event in detail_response.json()["events"]][-1] == "final"
+
+
 def _make_client(tmp_path: Path) -> TestClient:
     """Create a coding-enabled app with a README in the workspace."""
     (tmp_path / "README.md").write_text("# Sage\n", encoding="utf-8")

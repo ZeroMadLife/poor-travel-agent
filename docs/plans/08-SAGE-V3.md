@@ -1,7 +1,7 @@
 # Sage v3 落地记录
 
 > 日期：2026-07-08
-> 当前阶段：方向一完成；方向三完成；方向二完成；方向四完成；v3.x stop/cancel run 完成；v3.x approval UX 完成
+> 当前阶段：方向一完成；方向三完成；方向二完成；方向四完成；v3.x stop/cancel run 完成；v3.x approval UX 完成；v3.x run history 完成
 > 参考：`docs/superpowers/prompts/2026-07-08-codex-goal-sage-v3.md`
 
 ## 目标
@@ -109,6 +109,18 @@ Composer / Skills：
 - 新增 REST：`POST /api/v1/coding/{session_id}/run/stop`。
 - 前端 composer 在 thinking 时将 Send 切换为 Stop 按钮，调用 stop API；store 收到 `cancelled` 后把当前 assistant thinking message 收束为停止消息。
 
+### Run History
+
+把原本只落盘的 trace 提升成工作台可见能力：
+
+- `RunStore` 增加 `list_runs()` 和 `get_run()`，从 `trace.jsonl` 生成 run summary 和 detail。
+- run summary 包含 `status`、`event_count`、`tool_count`、`error_count`、`last_event_type`、`started_at`、`updated_at`。
+- 新增 REST：
+  - `GET /api/v1/coding/{session_id}/runs`
+  - `GET /api/v1/coding/{session_id}/runs/{run_id}`
+- 前端 store 增加 `runs` / `selectedRun`，初始化和 run 结束后刷新 run history。
+- `CodingSidebar.vue` 增加 Runs 区块，显示状态、工具数、事件数、最后事件，并可展开最近 trace 事件。
+
 ## 测试覆盖
 
 `tests/core/coding/test_context_compact.py` 新增：
@@ -153,6 +165,13 @@ Approval UX 新增：
   - `write_file` 先读取当前文件内容，再和待写入 content 生成预览；新文件或读取失败时按空文件处理。
 - `frontend/src/components/CodingApprovalCard.test.ts` 覆盖四种 choice 和 diff 行高亮。
 - `frontend/src/stores/coding.test.ts` 覆盖 write approval diff preview 生成。
+
+Run history 新增：
+
+- `tests/core/coding/test_run_store.py`：run summary 和 trace detail。
+- `tests/api/test_coding_routes.py`：run history list/detail API。
+- `frontend/src/api/coding.test.ts`：run history API client。
+- `frontend/src/stores/coding.test.ts`：run list/detail 加载，以及 run finished 后刷新。
 
 ## 已验证
 
@@ -216,7 +235,14 @@ cd frontend && npm run test -- --run src/api/coding.test.ts src/components/Codin
 
 结果：后端 approval UX 定向 `22 passed`；前端 approval UX 定向 `3 files / 20 tests passed`
 
+```bash
+pytest tests/core/coding/test_run_store.py tests/api/test_coding_routes.py -q
+cd frontend && npm run test -- --run src/api/coding.test.ts src/stores/coding.test.ts
+```
+
+结果：后端 run history 定向 `20 passed`；前端 run history 定向 `2 files / 21 tests passed`
+
 ## 后续方向
 
 1. Graphify 更新：完成 v3 主要方向后重新生成架构图谱。
-2. 后续 v3.x：run history、diff preview modal、更细粒度 tool permission policy。
+2. 后续 v3.x：diff preview modal、更细粒度 tool permission policy、run detail 面板增强。

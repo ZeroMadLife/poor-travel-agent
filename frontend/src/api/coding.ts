@@ -6,6 +6,8 @@ import type {
   CodingGitStatusResponse,
   CodingMcpServersResponse,
   CodingModelsResponse,
+  CodingRunDetailResponse,
+  CodingRunsResponse,
   CodingSessionResponse,
   CodingSkillDetailResponse,
   CodingSkillsResponse,
@@ -145,4 +147,21 @@ export async function stopCodingRun(sessionId: string): Promise<void> {
     { method: 'POST' },
   )
   if (!response.ok) throw new Error(`stop run failed: ${response.status}`)
+}
+
+export async function fetchCodingRuns(sessionId: string): Promise<CodingRunsResponse> {
+  const response = await fetch(new URL(`/api/v1/coding/${sessionId}/runs`, API_BASE_URL))
+  if (!response.ok) throw new Error(`fetch runs failed: ${response.status}`)
+  return (await response.json()) as CodingRunsResponse
+}
+
+export async function fetchCodingRun(
+  sessionId: string,
+  runId: string,
+): Promise<CodingRunDetailResponse> {
+  const response = await fetch(
+    new URL(`/api/v1/coding/${sessionId}/runs/${runId}`, API_BASE_URL),
+  )
+  if (!response.ok) throw new Error(`fetch run failed: ${response.status}`)
+  return (await response.json()) as CodingRunDetailResponse
 }
