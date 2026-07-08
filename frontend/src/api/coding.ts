@@ -1,4 +1,5 @@
 import type {
+  CodingApprovalChoice,
   CodingApprovalResponse,
   CodingFileContentResponse,
   CodingFilesResponse,
@@ -12,11 +13,14 @@ import type {
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || window.location.origin
 
-export async function startCodingSession(workspaceRoot?: string): Promise<CodingSessionResponse> {
+export async function startCodingSession(
+  workspaceRoot?: string,
+  approvalPolicy: 'auto' | 'ask' | 'never' = 'ask',
+): Promise<CodingSessionResponse> {
   const response = await fetch(new URL('/api/v1/coding/session', API_BASE_URL), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ workspace_root: workspaceRoot || null }),
+    body: JSON.stringify({ workspace_root: workspaceRoot || null, approval_policy: approvalPolicy }),
   })
 
   if (!response.ok) {
@@ -122,7 +126,7 @@ export async function fetchCodingApprovalPending(
 export async function respondCodingApproval(
   sessionId: string,
   approvalId: string,
-  choice: 'once' | 'session' | 'always' | 'deny',
+  choice: CodingApprovalChoice,
 ): Promise<void> {
   const response = await fetch(
     new URL(`/api/v1/coding/${sessionId}/approval/respond`, API_BASE_URL),

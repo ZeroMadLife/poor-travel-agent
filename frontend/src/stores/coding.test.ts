@@ -83,6 +83,32 @@ describe('coding store', () => {
     store.disconnect()
   })
 
+  it('builds write approval diff preview from current file content', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ path: 'README.md', content: 'old title\n', lines: 1 }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const store = useCodingStore()
+    store.sessionId = 'c1'
+
+    store.handleServerEvent({
+      type: 'approval_required',
+      approval_id: 'appr_1',
+      tool: 'write_file',
+      args: { path: 'README.md', content: 'new title\n' },
+      description: 'write_file requires approval.',
+      pattern_key: 'tool:write_file',
+    } as never)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(store.pendingApproval?.diff_preview).toEqual([
+      { type: 'remove', text: 'old title' },
+      { type: 'add', text: 'new title' },
+    ])
+    store.disconnect()
+  })
+
   it('responds to pending approval and clears it', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true })
     vi.stubGlobal('fetch', fetchMock)
@@ -97,7 +123,7 @@ describe('coding store', () => {
       pattern_key: 'tool:write_file',
     }
 
-    await store.respondApproval('once')
+    await store.respondApproval('session')
 
     expect(fetchMock).toHaveBeenCalled()
     expect(store.pendingApproval).toBeNull()

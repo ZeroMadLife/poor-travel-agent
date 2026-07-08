@@ -53,6 +53,22 @@ def test_create_coding_session(tmp_path: Path) -> None:
     assert data["workspace_root"] == str(tmp_path.resolve())
 
 
+def test_create_coding_session_accepts_approval_policy(tmp_path: Path) -> None:
+    """POST /coding/session can opt into ask-mode approvals for the workbench."""
+    app = create_app(
+        coding_model_factory=FakeModel,
+        coding_workspace_root=tmp_path,
+        coding_storage_root=tmp_path / ".coding",
+    )
+    client = TestClient(app)
+
+    response = client.post("/api/v1/coding/session", json={"approval_policy": "ask"})
+
+    assert response.status_code == 200
+    session_id = response.json()["session_id"]
+    assert app.state.coding_sessions[session_id].approval_policy == "ask"
+
+
 def test_create_coding_session_rejects_workspace_outside_configured_root(
     tmp_path: Path,
 ) -> None:

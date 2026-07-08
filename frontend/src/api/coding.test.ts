@@ -25,7 +25,7 @@ describe('coding API client', () => {
     expect(fetchMock).toHaveBeenCalledWith(expect.any(URL), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workspace_root: '/tmp/repo' }),
+      body: JSON.stringify({ workspace_root: '/tmp/repo', approval_policy: 'ask' }),
     })
   })
 

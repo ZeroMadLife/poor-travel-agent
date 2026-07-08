@@ -1,7 +1,7 @@
 # Sage v3 落地记录
 
 > 日期：2026-07-08
-> 当前阶段：方向一完成；方向三完成；方向二完成；方向四完成；v3.x stop/cancel run 完成
+> 当前阶段：方向一完成；方向三完成；方向二完成；方向四完成；v3.x stop/cancel run 完成；v3.x approval UX 完成
 > 参考：`docs/superpowers/prompts/2026-07-08-codex-goal-sage-v3.md`
 
 ## 目标
@@ -144,6 +144,16 @@ Stop / cancel 新增：
 - `tests/core/coding/test_approval.py`：stop session 会唤醒 pending approval。
 - `frontend/src/api/coding.test.ts` / `frontend/src/stores/coding.test.ts`：stop API、cancelled 事件和 stopCurrentRun 状态流。
 
+Approval UX 新增：
+
+- 前端 workbench 创建 coding session 时显式使用 `approval_policy=ask`，让审批能力成为真实工作台路径，而不是隐藏测试能力。
+- `CodingApprovalCard.vue` 支持四种决策：Deny、Allow once、Allow session、Always。
+- `write_file` / `patch_file` approval 增加 diff preview：
+  - `patch_file` 直接用 `old_text` / `new_text` 生成预览。
+  - `write_file` 先读取当前文件内容，再和待写入 content 生成预览；新文件或读取失败时按空文件处理。
+- `frontend/src/components/CodingApprovalCard.test.ts` 覆盖四种 choice 和 diff 行高亮。
+- `frontend/src/stores/coding.test.ts` 覆盖 write approval diff preview 生成。
+
 ## 已验证
 
 ```bash
@@ -199,7 +209,14 @@ cd frontend && npm run test -- --run src/api/coding.test.ts src/stores/coding.te
 
 结果：后端 stop 定向 `24 passed`；前端 stop 定向 `2 files / 17 tests passed`
 
+```bash
+pytest tests/api/test_coding_routes.py tests/core/coding/test_approval.py -q
+cd frontend && npm run test -- --run src/api/coding.test.ts src/components/CodingApprovalCard.test.ts src/stores/coding.test.ts
+```
+
+结果：后端 approval UX 定向 `22 passed`；前端 approval UX 定向 `3 files / 20 tests passed`
+
 ## 后续方向
 
 1. Graphify 更新：完成 v3 主要方向后重新生成架构图谱。
-2. 后续 v3.x：approval 的 session/always 前端按钮、diff preview、run history。
+2. 后续 v3.x：run history、diff preview modal、更细粒度 tool permission policy。

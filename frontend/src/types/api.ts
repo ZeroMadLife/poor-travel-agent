@@ -119,9 +119,17 @@ export type CodingApproval = {
   args: Record<string, unknown>
   description: string
   pattern_key: string
+  diff_preview?: CodingDiffLine[]
 }
 
 export type CodingApprovalResponse = CodingApproval | null
+
+export type CodingApprovalChoice = 'once' | 'session' | 'always' | 'deny'
+
+export type CodingDiffLine = {
+  type: 'context' | 'add' | 'remove'
+  text: string
+}
 
 export type CodingToolCallEvent = {
   type: 'tool_call'

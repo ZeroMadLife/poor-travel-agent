@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { CodingApproval } from '../types/api'
+import type { CodingApproval, CodingApprovalChoice } from '../types/api'
 
 defineProps<{
   approval: CodingApproval
@@ -7,7 +7,7 @@ defineProps<{
 }>()
 
 const emit = defineEmits<{
-  respond: ['once' | 'deny']
+  respond: [CodingApprovalChoice]
 }>()
 </script>
 
@@ -17,10 +17,28 @@ const emit = defineEmits<{
       <p class="eyebrow">需要确认</p>
       <h2>{{ approval.tool }}</h2>
       <p class="description">{{ approval.description }}</p>
-      <pre>{{ JSON.stringify(approval.args, null, 2) }}</pre>
+      <div v-if="approval.diff_preview?.length" class="diff-preview">
+        <div
+          v-for="(line, index) in approval.diff_preview"
+          :key="index"
+          :class="['diff-line', `diff-${line.type}`]"
+        >
+          <span class="diff-prefix">
+            {{ line.type === 'add' ? '+' : line.type === 'remove' ? '-' : ' ' }}
+          </span>
+          <span>{{ line.text || ' ' }}</span>
+        </div>
+      </div>
+      <pre v-else>{{ JSON.stringify(approval.args, null, 2) }}</pre>
     </div>
     <div class="actions">
       <button class="deny" :disabled="busy" @click="emit('respond', 'deny')">Deny</button>
+      <button class="session" :disabled="busy" @click="emit('respond', 'session')">
+        Allow session
+      </button>
+      <button class="always" :disabled="busy" @click="emit('respond', 'always')">
+        Always
+      </button>
       <button class="allow" :disabled="busy" @click="emit('respond', 'once')">Allow once</button>
     </div>
   </section>
@@ -78,6 +96,8 @@ pre {
 
 .actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
 }
 
@@ -105,5 +125,48 @@ button:disabled {
   border: 1px solid #111827;
   color: #fff;
   background: #111827;
+}
+
+.session,
+.always {
+  border: 1px solid #d1d5db;
+  color: #111827;
+  background: #fff;
+}
+
+.diff-preview {
+  max-height: 150px;
+  overflow: auto;
+  border: 1px solid #f0d9a4;
+  border-radius: 6px;
+  background: #fff;
+  font-family: 'SF Mono', monospace;
+  font-size: 12px;
+}
+
+.diff-line {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  padding: 1px 6px;
+  white-space: pre-wrap;
+}
+
+.diff-prefix {
+  color: #6b7280;
+  user-select: none;
+}
+
+.diff-add {
+  color: #047857;
+  background: #ecfdf5;
+}
+
+.diff-remove {
+  color: #b91c1c;
+  background: #fef2f2;
+}
+
+.diff-context {
+  color: #4b5563;
 }
 </style>

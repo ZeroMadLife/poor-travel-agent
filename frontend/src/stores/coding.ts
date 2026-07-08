@@ -16,7 +16,9 @@ import {
 } from '../api/coding'
 import type {
   CodingApproval,
+  CodingApprovalChoice,
   CodingApprovalRequiredEvent,
+  CodingDiffLine,
   CodingFileEntry,
   CodingGitStatusResponse,
   CodingMcpServer,
@@ -118,6 +120,7 @@ export const useCodingStore = defineStore('coding', () => {
     }
     if (event.type === 'approval_required') {
       setApprovalFromEvent(event as CodingApprovalRequiredEvent)
+      void enrichApprovalPreview()
       startApprovalPolling()
       return
     }
@@ -226,7 +229,52 @@ export const useCodingStore = defineStore('coding', () => {
     approvalPollTimer = null
   }
 
-  async function respondApproval(choice: 'once' | 'deny') {
+  async function enrichApprovalPreview() {
+    const approval = pendingApproval.value
+    if (!approval) return
+    const path = typeof approval.args.path === 'string' ? approval.args.path : ''
+    if (!path) return
+    if (approval.tool === 'patch_file') {
+      const oldText = typeof approval.args.old_text === 'string' ? approval.args.old_text : ''
+      const newText = typeof approval.args.new_text === 'string' ? approval.args.new_text : ''
+      pendingApproval.value = {
+        ...approval,
+        diff_preview: buildSimpleDiff(oldText, newText),
+      }
+      return
+    }
+    if (approval.tool !== 'write_file') return
+    const content = typeof approval.args.content === 'string' ? approval.args.content : ''
+    try {
+      const current = await fetchCodingFile(sessionId.value, path)
+      if (pendingApproval.value?.approval_id !== approval.approval_id) return
+      pendingApproval.value = {
+        ...pendingApproval.value,
+        diff_preview: buildSimpleDiff(current.content, content),
+      }
+    } catch {
+      pendingApproval.value = {
+        ...approval,
+        diff_preview: buildSimpleDiff('', content),
+      }
+    }
+  }
+
+  function buildSimpleDiff(before: string, after: string): CodingDiffLine[] {
+    const beforeLines = before.split('\n')
+    const afterLines = after.split('\n')
+    if (before.endsWith('\n')) beforeLines.pop()
+    if (after.endsWith('\n')) afterLines.pop()
+    if (before === after) {
+      return beforeLines.slice(0, 40).map((text) => ({ type: 'context', text }))
+    }
+    return [
+      ...beforeLines.slice(0, 40).map((text) => ({ type: 'remove' as const, text })),
+      ...afterLines.slice(0, 40).map((text) => ({ type: 'add' as const, text })),
+    ]
+  }
+
+  async function respondApproval(choice: CodingApprovalChoice) {
     if (!sessionId.value || !pendingApproval.value) return
     const approvalId = pendingApproval.value.approval_id
     await respondCodingApproval(sessionId.value, approvalId, choice)
