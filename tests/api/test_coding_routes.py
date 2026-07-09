@@ -252,7 +252,7 @@ def test_coding_websocket_waits_for_approval_then_continues(tmp_path: Path) -> N
             f"/api/v1/coding/{session_id}/approval/respond",
             json={"approval_id": approval["approval_id"], "choice": "once"},
         )
-        remaining_events = [websocket.receive_json() for _ in range(5)]
+        remaining_events = [websocket.receive_json() for _ in range(6)]
 
     assert [event["type"] for event in first_events] == [
         "model_requested",
@@ -262,6 +262,7 @@ def test_coding_websocket_waits_for_approval_then_continues(tmp_path: Path) -> N
     assert approval["tool"] == "write_file"
     assert response.status_code == 200
     assert [event["type"] for event in remaining_events] == [
+        "approval_granted",
         "tool_call",
         "tool_result",
         "model_requested",
@@ -316,7 +317,10 @@ def test_coding_run_history_lists_and_reads_traces(tmp_path: Path) -> None:
     assert run["last_event_type"] == "final"
     assert detail_response.status_code == 200
     assert detail_response.json()["run_id"] == run["run_id"]
-    assert [event["type"] for event in detail_response.json()["events"]][-1] == "final"
+    assert [event["type"] for event in detail_response.json()["events"]][-2:] == [
+        "final",
+        "turn_finished",
+    ]
     assert [entry["title"] for entry in detail_response.json()["timeline"]] == [
         "Model request",
         "Parsed tool",

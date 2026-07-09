@@ -155,36 +155,43 @@ export type CodingDiffLine = {
   text: string
 }
 
-export type CodingToolCallEvent = {
+export type CodingEventMeta = {
+  run_id?: string
+  created_at?: string
+}
+
+export type CodingToolCallEvent = CodingEventMeta & {
   type: 'tool_call'
   tool: string
   args: Record<string, unknown>
 }
 
-export type CodingToolResultEvent = {
+export type CodingToolResultEvent = CodingEventMeta & {
   type: 'tool_result'
   tool: string
   args: Record<string, unknown>
   content: string
   is_error: boolean
+  policy_reason?: string | null
+  security_event_type?: string | null
 }
 
-export type CodingFinalEvent = {
+export type CodingFinalEvent = CodingEventMeta & {
   type: 'final'
   content: string
 }
 
-export type CodingStepLimitEvent = {
+export type CodingStepLimitEvent = CodingEventMeta & {
   type: 'step_limit'
   content: string
 }
 
-export type CodingCancelledEvent = {
+export type CodingCancelledEvent = CodingEventMeta & {
   type: 'cancelled'
   content: string
 }
 
-export type CodingTraceEvent = {
+export type CodingTraceEvent = CodingEventMeta & {
   type: 'model_requested' | 'model_parsed' | 'retry'
   content?: string
   kind?: string
@@ -197,7 +204,7 @@ export type CodingSkillInvokedEvent = {
   arguments: string
 }
 
-export type CodingApprovalRequiredEvent = {
+export type CodingApprovalRequiredEvent = CodingEventMeta & {
   type: 'approval_required'
   approval_id: string
   tool: string
@@ -206,16 +213,33 @@ export type CodingApprovalRequiredEvent = {
   pattern_key: string
 }
 
+export type CodingApprovalGrantedEvent = CodingEventMeta & {
+  type: 'approval_granted'
+  tool: string
+}
+
+export type CodingTurnEvent = CodingEventMeta & {
+  type: 'turn_started' | 'turn_finished'
+}
+
+export type CodingErrorEvent = CodingEventMeta & {
+  type: 'error'
+  message: string
+  recoverable?: boolean
+}
+
 export type CodingServerEvent =
   | CodingToolCallEvent
   | CodingToolResultEvent
   | CodingFinalEvent
   | CodingStepLimitEvent
   | CodingCancelledEvent
-  | ErrorEvent
+  | CodingErrorEvent
   | CodingTraceEvent
   | CodingSkillInvokedEvent
   | CodingApprovalRequiredEvent
+  | CodingApprovalGrantedEvent
+  | CodingTurnEvent
 
 export type CodingFileEntry = {
   name: string

@@ -55,7 +55,10 @@ class RunStore:
         if not events:
             return None
         first = events[0]
-        last = events[-1]
+        business_events = [
+            event for event in events if str(event.get("type", "")) != "turn_finished"
+        ]
+        last = business_events[-1] if business_events else events[-1]
         return {
             "run_id": run_id,
             "status": _status_from_events(events),

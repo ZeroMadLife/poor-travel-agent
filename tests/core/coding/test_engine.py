@@ -121,7 +121,9 @@ async def test_engine_cancels_before_model_request(tmp_path: Path) -> None:
 
     events = [event async for event in engine.run_turn("读 README")]
 
-    assert events == [{"type": "cancelled", "content": "已停止当前运行。"}]
+    assert len(events) == 1
+    assert events[0]["type"] == "cancelled"
+    assert events[0]["content"] == "已停止当前运行。"
     assert model.prompts == []
 
 

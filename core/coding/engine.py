@@ -2,32 +2,44 @@
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 from collections.abc import AsyncIterator, Callable
 from typing import Any, Protocol
 
-from core.coding.approval import ApprovalManager, check_dangerous_command
+from core.coding.approval import ApprovalManager
 from core.coding.context_manager import ContextManager
 from core.coding.engine_helpers import (
     build_tool_descriptions,
-    normalize_tool_payload,
     step_limit_summary,
+)
+from core.coding.events import (
+    CancelledEvent,
+    FinalEvent,
+    ModelParsedEvent,
+    ModelRequestedEvent,
+    RetryEvent,
+    StepLimitEvent,
+    ToolResultEvent,
+    event_to_dict,
 )
 from core.coding.model_output import parse
 from core.coding.permissions import PermissionChecker
+from core.coding.tool_executor import ToolExecutor
 from core.coding.tool_policy import ToolPolicyChecker
-from core.coding.tools.base import RegisteredTool, ToolResult
+from core.coding.tools.base import RegisteredTool
 from core.coding.tools.registry import get_active_tools
 from core.coding.workspace import WorkspaceContext, now
 
 
-class ModelClient(Protocol):
+class ApiClient(Protocol):
     """Minimal model contract used by the coding engine."""
 
     async def complete(self, prompt: str) -> str:
         """Return raw model text."""
         ...
+
+
+ModelClient = ApiClient
 
 
 class Engine:
@@ -46,6 +58,9 @@ class Engine:
         should_stop: Callable[[], bool] | None = None,
         history: list[dict[str, Any]] | None = None,
         activated_tools: set[str] | None = None,
+        tool_executor: ToolExecutor | None = None,
+        run_id: str = "",
+        workspace_reminders: list[str] | None = None,
         max_steps: int = 50,
     ) -> None:
         self.model = model
@@ -59,6 +74,9 @@ class Engine:
         self.should_stop = should_stop or (lambda: False)
         self.history = history if history is not None else []
         self.activated_tools = activated_tools if activated_tools is not None else set()
+        self.tool_executor = tool_executor
+        self.run_id = run_id
+        self.workspace_reminders = workspace_reminders or []
         self.max_steps = max_steps
 
     async def run_turn(self, user_message: str) -> AsyncIterator[dict[str, Any]]:
@@ -76,20 +94,24 @@ class Engine:
                 user_message=user_message,
                 history=self.history,
                 tools=self._tool_descriptions(),
+                workspace_reminders=self.workspace_reminders,
+                deferred_tools=self._deferred_tool_names(),
             )
-            yield {
-                "type": "model_requested",
-                "attempts": attempts,
-                "tool_steps": tool_steps,
-                "prompt_chars": metadata["prompt_chars"],
-            }
+            yield event_to_dict(
+                ModelRequestedEvent(
+                    run_id=self.run_id,
+                    attempts=attempts,
+                    tool_steps=tool_steps,
+                    prompt_chars=metadata["prompt_chars"],
+                )
+            )
 
             raw = await self._call_model(prompt)
             if self.should_stop():
                 yield self._cancelled_event()
                 return
             kind, payload = parse(raw)
-            yield {"type": "model_parsed", "kind": kind}
+            yield event_to_dict(ModelParsedEvent(run_id=self.run_id, kind=kind))
 
             if kind in {"tool", "tools"}:
                 tool_payloads = [payload] if kind == "tool" else list(payload)
@@ -109,152 +131,61 @@ class Engine:
             if kind == "retry":
                 notice = str(payload)
                 self.history.append({"role": "assistant", "content": notice, "created_at": now()})
-                yield {"type": "retry", "content": notice}
+                yield event_to_dict(RetryEvent(run_id=self.run_id, content=notice))
                 continue
 
             final = str(payload).strip()
             self.history.append({"role": "assistant", "content": final, "created_at": now()})
-            yield {"type": "final", "content": final}
+            yield event_to_dict(FinalEvent(run_id=self.run_id, content=final))
             return
 
         content = self._step_limit_summary(user_message, tool_steps)
         self.history.append({"role": "assistant", "content": content, "created_at": now()})
-        yield {"type": "step_limit", "content": content}
+        yield event_to_dict(StepLimitEvent(run_id=self.run_id, content=content))
 
     async def _execute_tool_payload(self, payload: Any) -> AsyncIterator[dict[str, Any]]:
-        if self.should_stop():
-            yield self._cancelled_event()
-            return
-        name, args = normalize_tool_payload(payload)
-        tool = self.tools.get(name)
-        if tool is None:
-            result = ToolResult(content=f"unknown tool: {name}", is_error=True)
-            yield self._tool_result_event(name, args, result)
-            return
-
-        permission = self.permission_checker.check(tool, args, self.workspace)
-        if not permission.allowed:
-            result = ToolResult(content=permission.reason, is_error=True)
-            event = self._tool_result_event(name, args, result)
-            event["security_event_type"] = permission.security_event_type
-            yield event
-            return
-
-        policy = self.policy_checker.check(tool, args)
-        if not policy.allowed:
-            result = ToolResult(content=policy.message, is_error=True)
-            event = self._tool_result_event(name, args, result)
-            event["policy_reason"] = policy.reason
-            yield event
-            return
-
-        if permission.reason == "approval_required":
-            approved = False
-            async for event in self._approval_events(tool, args):
-                if event["type"] == "approval_granted":
-                    approved = True
-                    continue
-                yield event
-                if event["type"] == "tool_result":
-                    return
-            if not approved:
-                return
-
-        yield {"type": "tool_call", "tool": name, "args": args}
-        result = tool.execute(args)
-        if self.should_stop():
-            yield self._cancelled_event()
-            return
-        yield self._tool_result_event(name, args, result)
-
-    async def _approval_events(
-        self,
-        tool: RegisteredTool,
-        args: dict[str, Any],
-    ) -> AsyncIterator[dict[str, Any]]:
-        if self.approval_manager is None or not self.session_id:
-            result = ToolResult(content="approval manager is not configured", is_error=True)
-            yield self._tool_result_event(tool.name, args, result)
-            return
-
-        description = f"{tool.name} requires approval."
-        pattern_key = f"tool:{tool.name}"
-        if tool.name == "run_shell":
-            dangerous, command_description, command_pattern = check_dangerous_command(
-                str(args.get("command", ""))
-            )
-            if dangerous:
-                description = command_description
-                pattern_key = f"shell:{command_pattern}"
-
-        if self.approval_manager.is_session_approved(self.session_id, pattern_key):
-            yield {"type": "approval_granted", "tool": tool.name}
-            return
-
-        entry = self.approval_manager.submit(
-            self.session_id,
-            tool.name,
-            args,
-            description,
-            pattern_key,
+        executor = self.tool_executor or ToolExecutor(
+            tools=self.tools,
+            workspace=self.workspace,
+            permission_checker=self.permission_checker,
+            policy_checker=self.policy_checker,
+            approval_manager=self.approval_manager,
+            session_id=self.session_id,
+            should_stop=self.should_stop,
+            run_id=self.run_id,
         )
-        yield {
-            "type": "approval_required",
-            "approval_id": entry.approval_id,
-            "tool": tool.name,
-            "args": args,
-            "description": description,
-            "pattern_key": pattern_key,
-        }
-
-        waited_seconds = 0
-        while waited_seconds < 300:
-            if self.should_stop():
-                result = ToolResult(content="approval cancelled", is_error=True)
-                yield self._tool_result_event(tool.name, args, result)
-                yield self._cancelled_event()
-                return
-            if await asyncio.to_thread(entry.event.wait, 1.0):
-                break
-            waited_seconds += 1
-        if not entry.event.is_set():
-            result = ToolResult(content="approval timed out", is_error=True)
-            yield self._tool_result_event(tool.name, args, result)
-            return
-        if entry.result == "deny":
-            result = ToolResult(content="approval denied", is_error=True)
-            yield self._tool_result_event(tool.name, args, result)
-            return
-        yield {"type": "approval_granted", "tool": tool.name}
+        async for event in executor.execute(payload):
+            if isinstance(event, ToolResultEvent):
+                self._append_tool_history(event)
+            if isinstance(event, CancelledEvent):
+                self._append_cancelled_history(event.content)
+            yield event_to_dict(event)
 
     def _cancelled_event(self) -> dict[str, Any]:
         content = "已停止当前运行。"
-        self.history.append({"role": "assistant", "content": content, "created_at": now()})
-        return {"type": "cancelled", "content": content}
+        self._append_cancelled_history(content)
+        return event_to_dict(CancelledEvent(run_id=self.run_id, content=content))
 
-    def _tool_result_event(
-        self,
-        name: str,
-        args: dict[str, Any],
-        result: ToolResult,
-    ) -> dict[str, Any]:
+    def _append_tool_history(self, event: ToolResultEvent) -> None:
         self.history.append(
             {
                 "role": "tool",
-                "name": name,
-                "args": args,
-                "content": result.content,
-                "is_error": result.is_error,
+                "name": event.tool,
+                "args": event.args,
+                "content": event.content,
+                "is_error": event.is_error,
                 "created_at": now(),
             }
         )
-        return {
-            "type": "tool_result",
-            "tool": name,
-            "args": args,
-            "content": result.content,
-            "is_error": result.is_error,
-        }
+
+    def _append_cancelled_history(self, content: str) -> None:
+        if (
+            self.history
+            and self.history[-1].get("role") == "assistant"
+            and self.history[-1].get("content") == content
+        ):
+            return
+        self.history.append({"role": "assistant", "content": content, "created_at": now()})
 
     async def _call_model(self, prompt: str) -> str:
         complete = getattr(self.model, "complete", None)
@@ -275,17 +206,14 @@ class Engine:
 
     def _tool_descriptions(self) -> list[str]:
         active_tools = get_active_tools(self.tools, self.activated_tools)
-        descriptions = build_tool_descriptions(active_tools)
-        deferred = sorted(
+        return build_tool_descriptions(active_tools)
+
+    def _deferred_tool_names(self) -> list[str]:
+        return sorted(
             name
             for name, tool in self.tools.items()
             if tool.deferred and name not in self.activated_tools
         )
-        if deferred:
-            descriptions.append(
-                "Deferred tools (use tool_search to activate): " + ", ".join(deferred)
-            )
-        return descriptions
 
     @staticmethod
     def _step_limit_summary(user_message: str, tool_steps: int) -> str:

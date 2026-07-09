@@ -11,6 +11,7 @@ from typing import Any
 from core.coding.approval import ApprovalManager
 from core.coding.context_manager import ContextManager
 from core.coding.engine import Engine
+from core.coding.events import TurnFinishedEvent, TurnStartedEvent, event_to_dict
 from core.coding.permissions import ApprovalPolicy, PermissionChecker
 from core.coding.plan_mode import PlanModeManager
 from core.coding.run_store import RunStore
@@ -245,7 +246,9 @@ class CodingRuntime:
         self.stop_requested = False
         run_id = f"run_{uuid.uuid4().hex[:12]}"
         self.run_store.start_run(run_id)
-        self.session_event_bus.emit("turn_started", {"run_id": run_id})
+        started = event_to_dict(TurnStartedEvent(run_id=run_id))
+        self.run_store.append_trace(run_id, started)
+        self.session_event_bus.emit("turn_started", started)
         engine = Engine(
             model=self.model,
             workspace=self.workspace,
@@ -258,6 +261,8 @@ class CodingRuntime:
             should_stop=lambda: self.stop_requested,
             history=self.session["history"],
             activated_tools=self.activated_tools,
+            run_id=run_id,
+            workspace_reminders=self._workspace_reminders(),
             max_steps=50,
         )
         async for event in engine.run_turn(user_message):
@@ -266,7 +271,9 @@ class CodingRuntime:
             self.session_event_bus.emit(event["type"], event)
             self._sync_session_state()
             yield event
-        self.session_event_bus.emit("turn_finished", {"run_id": run_id})
+        finished = event_to_dict(TurnFinishedEvent(run_id=run_id))
+        self.run_store.append_trace(run_id, finished)
+        self.session_event_bus.emit("turn_finished", finished)
         self.stop_requested = False
         self._save_session()
 
@@ -281,6 +288,18 @@ class CodingRuntime:
             approval_policy=self.approval_policy,
             plan_mode=self.runtime_mode == "plan",
         )
+
+    def _workspace_reminders(self) -> list[str]:
+        reminders: list[str] = []
+        for name in ("SAGE.md", "AGENTS.md"):
+            path = self.workspace.root / name
+            if not path.is_file():
+                continue
+            content = path.read_text(encoding="utf-8", errors="replace").strip()
+            if not content:
+                continue
+            reminders.append(f"{name}:\n{content[:12000]}")
+        return reminders
 
     def _sync_session_state(self) -> None:
         self.session["updated_at"] = now()

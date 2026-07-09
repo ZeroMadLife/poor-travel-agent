@@ -1,9 +1,22 @@
 """Coding context budget and compaction tests."""
 
 from datetime import date
+from pathlib import Path
 
 from core.coding.compact import CompactManager
-from core.coding.context_manager import ContextManager
+from core.coding.context_manager import SYSTEM_PROMPT_DYNAMIC_BOUNDARY, ContextManager
+from core.coding.runtime import CodingRuntime
+
+
+class FakeModel:
+    """Model that records prompts for context tests."""
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    async def complete(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        return "<final>done</final>"
 
 
 def test_context_manager_keeps_prompt_under_budget() -> None:
@@ -86,10 +99,75 @@ def test_context_manager_uses_date_precision_for_volatile_tier() -> None:
     manager = ContextManager(today=lambda: date(2026, 7, 8))
 
     prompt = manager.build_system_prompt_once([])
+    date_line = next(line for line in prompt.splitlines() if line.startswith("Session date:"))
 
     assert "Session date: 2026-07-08" in prompt
-    assert "T" not in prompt
-    assert ":00" not in prompt
+    assert "T" not in date_line
+    assert ":00" not in date_line
+
+
+def test_system_prompt_has_seven_layers_and_dynamic_boundary() -> None:
+    """Sage system prompt exposes a stable seven-layer core before dynamic data."""
+    manager = ContextManager(today=lambda: date(2026, 7, 8))
+
+    prompt = manager.build_system_prompt_once(["read_file: read a file"])
+
+    for heading in (
+        "# System",
+        "# Doing tasks",
+        "# Executing actions with care",
+        "# Using your tools",
+        "# Tone and style",
+        "# Output efficiency",
+        "# Response protocol",
+    ):
+        assert heading in prompt
+    assert SYSTEM_PROMPT_DYNAMIC_BOUNDARY in prompt
+    assert prompt.index("read_file: read a file") < prompt.index(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
+    assert prompt.index(SYSTEM_PROMPT_DYNAMIC_BOUNDARY) < prompt.index("Session date: 2026-07-08")
+
+
+def test_workspace_reminder_is_after_boundary_and_not_stable_prompt() -> None:
+    """Project reminder content is render-only context after the cache boundary."""
+    manager = ContextManager(today=lambda: date(2026, 7, 8))
+
+    prompt, _ = manager.build(
+        "hello",
+        workspace_reminders=["SAGE.md:\nDo not forget repo notes."],
+    )
+
+    stable, dynamic = prompt.split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY, maxsplit=1)
+    assert "Do not forget repo notes." not in stable
+    assert "Do not forget repo notes." in dynamic
+
+
+async def test_workspace_reminder_does_not_enter_session_replay(tmp_path: Path) -> None:
+    """SAGE.md reminders are included in prompts but not persisted as chat messages."""
+    (tmp_path / "SAGE.md").write_text("Project-only instruction", encoding="utf-8")
+    model = FakeModel()
+    runtime = CodingRuntime(
+        session_id="coding_1",
+        workspace_root=tmp_path,
+        model=model,
+        storage_root=tmp_path / ".coding",
+    )
+
+    events = [event async for event in runtime.run_turn("say hi")]
+
+    assert events[-1]["type"] == "final"
+    assert "Project-only instruction" in model.prompts[0]
+    assert runtime.session["history"] == [
+        {
+            "role": "user",
+            "content": "say hi",
+            "created_at": runtime.session["history"][0]["created_at"],
+        },
+        {
+            "role": "assistant",
+            "content": "done",
+            "created_at": runtime.session["history"][1]["created_at"],
+        },
+    ]
 
 
 def test_compact_manager_invalidates_context_cache_after_compaction() -> None:

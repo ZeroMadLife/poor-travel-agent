@@ -1,0 +1,163 @@
+"""End-to-end coding-agent loop tests with a scripted model client."""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+from tests.core.coding.scripted_api_client import ScriptedApiClient
+
+from core.coding.approval import ApprovalManager
+from core.coding.context_manager import ContextManager
+from core.coding.engine import Engine
+from core.coding.permissions import ApprovalPolicy, PermissionChecker
+from core.coding.tool_policy import ToolPolicyChecker
+from core.coding.tools.registry import build_tool_registry
+from core.coding.workspace import WorkspaceContext
+
+
+def _engine(
+    tmp_path: Path,
+    responses: list[str],
+    *,
+    approval_policy: ApprovalPolicy = "auto",
+    approval_manager: ApprovalManager | None = None,
+    max_steps: int = 5,
+) -> Engine:
+    workspace = WorkspaceContext(root=tmp_path)
+    tools = build_tool_registry(workspace)
+    return Engine(
+        model=ScriptedApiClient(responses),
+        workspace=workspace,
+        tools=tools,
+        context_manager=ContextManager(),
+        permission_checker=PermissionChecker(approval_policy=approval_policy),
+        policy_checker=ToolPolicyChecker(workspace),
+        session_id="coding_1",
+        approval_manager=approval_manager,
+        max_steps=max_steps,
+    )
+
+
+async def test_agent_loop_user_to_tool_to_final(tmp_path: Path) -> None:
+    """User request can drive model -> tool -> model -> final without real API."""
+    (tmp_path / "README.md").write_text("# Sage\n", encoding="utf-8")
+    engine = _engine(
+        tmp_path,
+        [
+            '<tool>{"name":"read_file","args":{"path":"README.md"}}</tool>',
+            "<final>README says Sage.</final>",
+        ],
+    )
+
+    events = [event async for event in engine.run_turn("read README")]
+
+    assert [event["type"] for event in events] == [
+        "model_requested",
+        "model_parsed",
+        "tool_call",
+        "tool_result",
+        "model_requested",
+        "model_parsed",
+        "final",
+    ]
+    assert events[-1]["content"] == "README says Sage."
+
+
+async def test_agent_loop_user_to_final(tmp_path: Path) -> None:
+    """A direct final response exits the loop without tool execution."""
+    engine = _engine(tmp_path, ["<final>hello</final>"])
+
+    events = [event async for event in engine.run_turn("say hello")]
+
+    assert [event["type"] for event in events] == [
+        "model_requested",
+        "model_parsed",
+        "final",
+    ]
+    assert events[-1]["content"] == "hello"
+
+
+async def test_agent_loop_policy_denied_then_final(tmp_path: Path) -> None:
+    """Policy-denied tools are fed back to the model before final."""
+    (tmp_path / "app.py").write_text("value = 1\n", encoding="utf-8")
+    engine = _engine(
+        tmp_path,
+        [
+            (
+                '<tool>{"name":"patch_file","args":{"path":"app.py",'
+                '"old_text":"value = 1","new_text":"value = 2"}}</tool>'
+            ),
+            "<final>I need to read the file first.</final>",
+        ],
+    )
+
+    events = [event async for event in engine.run_turn("change app")]
+
+    assert [event["type"] for event in events] == [
+        "model_requested",
+        "model_parsed",
+        "tool_result",
+        "model_requested",
+        "model_parsed",
+        "final",
+    ]
+    assert events[2]["is_error"] is True
+    assert events[2]["policy_reason"] == "prior_read_required"
+
+
+async def test_agent_loop_approval_then_tool_then_final(tmp_path: Path) -> None:
+    """Approval mode can pause the loop, resume the tool, and then finish."""
+    manager = ApprovalManager()
+    engine = _engine(
+        tmp_path,
+        [
+            '<tool>{"name":"write_file","args":{"path":"note.txt","content":"ok"}}</tool>',
+            "<final>written</final>",
+        ],
+        approval_policy="ask",
+        approval_manager=manager,
+    )
+
+    async def collect() -> list[dict[str, object]]:
+        return [event async for event in engine.run_turn("write note")]
+
+    task = asyncio.create_task(collect())
+    approval_id = ""
+    for _ in range(50):
+        pending = manager.pending("coding_1")
+        if pending is not None:
+            approval_id = str(pending["approval_id"])
+            break
+        await asyncio.sleep(0.01)
+    assert approval_id
+    assert manager.resolve("coding_1", approval_id, "once") is True
+
+    events = await task
+
+    assert [event["type"] for event in events] == [
+        "model_requested",
+        "model_parsed",
+        "approval_required",
+        "approval_granted",
+        "tool_call",
+        "tool_result",
+        "model_requested",
+        "model_parsed",
+        "final",
+    ]
+    assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "ok"
+
+
+async def test_agent_loop_model_never_finishes_hits_step_limit(tmp_path: Path) -> None:
+    """Repeated tool calls eventually emit step_limit."""
+    (tmp_path / "README.md").write_text("# Sage\n", encoding="utf-8")
+    engine = _engine(
+        tmp_path,
+        ['<tool>{"name":"read_file","args":{"path":"README.md"}}</tool>'] * 3,
+        max_steps=2,
+    )
+
+    events = [event async for event in engine.run_turn("loop")]
+
+    assert events[-1]["type"] == "step_limit"

@@ -22,7 +22,6 @@ import {
 import type {
   CodingApproval,
   CodingApprovalChoice,
-  CodingApprovalRequiredEvent,
   CodingDiffLine,
   CodingFileEntry,
   CodingGitStatusResponse,
@@ -33,24 +32,13 @@ import type {
   CodingServerEvent,
   CodingSessionSummary,
   CodingSkillSummary,
-  CodingToolCallEvent,
   CodingToolResultEvent,
 } from '../types/api'
+import { applyCodingEvent } from './codingEvents'
+import type { ChatMessage } from './codingEvents'
+import { CodingStream } from './codingStream'
 
-export type ToolActivity = {
-  tool: string
-  args: Record<string, unknown>
-  status: 'running' | 'done' | 'error'
-  content: string
-  durationMs?: number
-}
-
-export type ChatMessage = {
-  role: 'user' | 'assistant'
-  content: string
-  tools?: ToolActivity[]
-  isThinking?: boolean
-}
+export type { ChatMessage, ToolActivity } from './codingEvents'
 
 export const useCodingStore = defineStore('coding', () => {
   const sessionId = ref('')
@@ -83,7 +71,7 @@ export const useCodingStore = defineStore('coding', () => {
   const previewContent = ref('')
   const breadcrumb = computed(() => fileTreePath.value.split('/').filter(Boolean))
 
-  let socket: WebSocket | null = null
+  let stream: CodingStream | null = null
   let approvalPollTimer: number | null = null
   let fileTreeGeneration = 0
   const dirCache = new Map<string, CodingFileEntry[]>()
@@ -111,115 +99,56 @@ export const useCodingStore = defineStore('coding', () => {
 
   function connectSocket() {
     if (!sessionId.value) return
-    socket?.close()
-    socket = new WebSocket(buildCodingStreamUrl(sessionId.value))
-    socket.onmessage = (event) => {
-      handleServerEvent(JSON.parse(event.data) as CodingServerEvent)
-    }
-    socket.onerror = () => {
-      errorMessage.value = '连接中断'
-      isThinking.value = false
-    }
+    stream?.disconnect()
+    stream = new CodingStream({
+      onEvent: handleServerEvent,
+      onError: (message) => {
+        errorMessage.value = message
+        isThinking.value = false
+      },
+    })
+    stream.connect(sessionId.value, buildCodingStreamUrl(sessionId.value))
   }
 
   function handleServerEvent(event: CodingServerEvent) {
-    if (event.type === 'model_requested') {
-      if (event.prompt_chars) contextChars.value = event.prompt_chars
-      return
-    }
-    if (event.type === 'tool_call') {
-      appendToolActivity(event as CodingToolCallEvent)
-      return
-    }
-    if (event.type === 'approval_required') {
-      setApprovalFromEvent(event as CodingApprovalRequiredEvent)
+    const effect = applyCodingEvent(
+      {
+        sessionId,
+        messages,
+        isThinking,
+        errorMessage,
+        contextChars,
+        pendingApproval,
+      },
+      event,
+    )
+    if (effect.approvalRequired) {
       void enrichApprovalPreview()
       startApprovalPolling()
       return
     }
-    if (event.type === 'tool_result') {
-      updateToolActivity(event as CodingToolResultEvent)
-      void refreshWorkspaceAfterTool(event as CodingToolResultEvent)
+    if (effect.toolResult) {
+      void refreshWorkspaceAfterTool(effect.toolResult)
       return
     }
-    if (event.type === 'final' || event.type === 'step_limit' || event.type === 'cancelled') {
-      finalizeCurrentMessage(event.content)
-      isThinking.value = false
+    if (effect.terminal) {
       stopApprovalPolling()
-      void loadSessions()
-      void loadRuns()
-      return
-    }
-    if (event.type === 'error') {
-      errorMessage.value = event.message
-      isThinking.value = false
-      stopApprovalPolling()
-    }
-  }
-
-  function setApprovalFromEvent(event: CodingApprovalRequiredEvent) {
-    pendingApproval.value = {
-      approval_id: event.approval_id,
-      session_id: sessionId.value,
-      tool: event.tool,
-      args: event.args,
-      description: event.description,
-      pattern_key: event.pattern_key,
-    }
-  }
-
-  function appendToolActivity(event: CodingToolCallEvent) {
-    const lastMessage = messages.value[messages.value.length - 1]
-    if (!lastMessage || lastMessage.role !== 'assistant' || !lastMessage.isThinking) {
-      messages.value.push({
-        role: 'assistant',
-        content: '',
-        tools: [],
-        isThinking: true,
-      })
-    }
-    const current = messages.value[messages.value.length - 1]
-    current.tools = current.tools || []
-    current.tools.push({
-      tool: event.tool,
-      args: event.args,
-      status: 'running',
-      content: '',
-    })
-  }
-
-  function updateToolActivity(event: CodingToolResultEvent) {
-    for (const msg of [...messages.value].reverse()) {
-      if (!msg.tools) continue
-      const target = [...msg.tools].reverse().find(
-        (t) => t.tool === event.tool && t.status === 'running',
-      )
-      if (target) {
-        target.status = event.is_error ? 'error' : 'done'
-        target.content = event.content.slice(0, 2000)
-        return
+      if (event.type !== 'error') {
+        void loadSessions()
+        void loadRuns()
       }
     }
   }
 
-  function finalizeCurrentMessage(content: string) {
-    const lastMessage = messages.value[messages.value.length - 1]
-    if (lastMessage && lastMessage.isThinking) {
-      lastMessage.content = content
-      lastMessage.isThinking = false
-    } else {
-      messages.value.push({ role: 'assistant', content })
-    }
-  }
-
   function sendMessage(content: string) {
-    if (!content.trim() || !socket || socket.readyState !== WebSocket.OPEN) return
+    if (!content.trim() || !stream) return
+    const sent = stream.send(content)
+    if (!sent) return
     messages.value.push({ role: 'user', content })
     isThinking.value = true
     errorMessage.value = ''
     pendingApproval.value = null
     startApprovalPolling()
-    socket.send(JSON.stringify({ content }))
   }
 
   async function pollApproval() {
@@ -353,8 +282,8 @@ export const useCodingStore = defineStore('coding', () => {
   async function selectSession(targetSessionId: string) {
     if (!targetSessionId || targetSessionId === sessionId.value) return
     stopApprovalPolling()
-    socket?.close()
-    socket = null
+    stream?.disconnect()
+    stream = null
     const session = await resumeCodingSession(targetSessionId)
     sessionId.value = session.session_id
     workspaceRoot.value = session.workspace_root
@@ -371,8 +300,8 @@ export const useCodingStore = defineStore('coding', () => {
 
   async function startNewSession() {
     stopApprovalPolling()
-    socket?.close()
-    socket = null
+    stream?.disconnect()
+    stream = null
     const session = await startCodingSession()
     sessionId.value = session.session_id
     workspaceRoot.value = session.workspace_root
@@ -469,8 +398,8 @@ export const useCodingStore = defineStore('coding', () => {
   }
 
   function disconnect() {
-    socket?.close()
-    socket = null
+    stream?.disconnect()
+    stream = null
     stopApprovalPolling()
   }
 
