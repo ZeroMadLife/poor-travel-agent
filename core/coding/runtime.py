@@ -24,7 +24,6 @@ from core.coding.plan_review import PlanReviewManager
 from core.coding.skills import SkillRegistry
 from core.coding.tool_executor import (
     ApprovalManager,
-    ApprovalPolicy,
     PermissionChecker,
     ToolPolicyChecker,
 )
@@ -42,7 +41,7 @@ class CodingRuntime:
         model: Any,
         storage_root: Path | str,
         model_factory: Callable[[], Any] | None = None,
-        approval_policy: ApprovalPolicy = "auto",
+        approval_policy: str = "auto",
         session_state: dict[str, Any] | None = None,
         save_on_init: bool = True,
         permission_mode: str = "default",
@@ -115,7 +114,7 @@ class CodingRuntime:
         model: Any,
         storage_root: Path | str,
         model_factory: Callable[[], Any] | None = None,
-        approval_policy: ApprovalPolicy = "auto",
+        approval_policy: str = "auto",
     ) -> CodingRuntime:
         """Rehydrate a persisted coding runtime for a new WebSocket connection."""
         storage_path = Path(storage_root)

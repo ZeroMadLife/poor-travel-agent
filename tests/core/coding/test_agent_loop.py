@@ -11,7 +11,6 @@ from core.coding.context import ContextManager, WorkspaceContext
 from core.coding.engine import Engine
 from core.coding.tool_executor import (
     ApprovalManager,
-    ApprovalPolicy,
     PermissionChecker,
     ToolPolicyChecker,
 )
@@ -22,18 +21,19 @@ def _engine(
     tmp_path: Path,
     responses: list[str],
     *,
-    approval_policy: ApprovalPolicy = "auto",
+    approval_policy: str = "auto",
     approval_manager: ApprovalManager | None = None,
     max_steps: int = 5,
 ) -> Engine:
     workspace = WorkspaceContext(root=tmp_path)
     tools = build_tool_registry(workspace)
+    mode = "auto" if approval_policy == "auto" else "default"
     return Engine(
         model=ScriptedApiClient(responses),
         workspace=workspace,
         tools=tools,
         context_manager=ContextManager(),
-        permission_checker=PermissionChecker(approval_policy=approval_policy),
+        permission_checker=PermissionChecker(permission_mode=mode, approval_policy=approval_policy),
         policy_checker=ToolPolicyChecker(workspace),
         session_id="coding_1",
         approval_manager=approval_manager,

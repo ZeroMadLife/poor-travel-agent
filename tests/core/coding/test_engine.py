@@ -42,7 +42,7 @@ def _engine(tmp_path: Path, responses: list[str], max_steps: int = 5) -> Engine:
         workspace=workspace,
         tools=tools,
         context_manager=ContextManager(),
-        permission_checker=PermissionChecker(approval_policy="auto"),
+        permission_checker=PermissionChecker(permission_mode="auto", approval_policy="auto"),
         policy_checker=ToolPolicyChecker(workspace),
         max_steps=max_steps,
     )
@@ -126,7 +126,7 @@ async def test_engine_cancels_before_model_request(tmp_path: Path) -> None:
         workspace=workspace,
         tools=tools,
         context_manager=ContextManager(),
-        permission_checker=PermissionChecker(approval_policy="auto"),
+        permission_checker=PermissionChecker(permission_mode="auto", approval_policy="auto"),
         policy_checker=ToolPolicyChecker(workspace),
         should_stop=lambda: True,
     )
@@ -157,7 +157,7 @@ async def test_engine_tool_search_activates_deferred_tools_for_next_prompt(
         workspace=workspace,
         tools=tools,
         context_manager=ContextManager(),
-        permission_checker=PermissionChecker(approval_policy="auto"),
+        permission_checker=PermissionChecker(permission_mode="auto", approval_policy="auto"),
         policy_checker=ToolPolicyChecker(workspace),
         activated_tools=activated_tools,
     )
@@ -196,7 +196,7 @@ async def test_engine_ainvoke_splits_system_and_user_messages(tmp_path: Path) ->
         workspace=workspace,
         tools=tools,
         context_manager=ContextManager(),
-        permission_checker=PermissionChecker(approval_policy="auto"),
+        permission_checker=PermissionChecker(permission_mode="auto", approval_policy="auto"),
         policy_checker=ToolPolicyChecker(workspace),
         max_steps=5,
     )
@@ -234,7 +234,7 @@ async def test_engine_streams_text_delta(tmp_path: Path) -> None:
         workspace=workspace,
         tools=tools,
         context_manager=ContextManager(),
-        permission_checker=PermissionChecker(approval_policy="auto"),
+        permission_checker=PermissionChecker(permission_mode="auto", approval_policy="auto"),
         policy_checker=ToolPolicyChecker(workspace),
         max_steps=5,
     )
@@ -275,7 +275,7 @@ async def test_engine_ainvoke_fallback_emits_no_text_delta(tmp_path: Path) -> No
         workspace=workspace,
         tools=tools,
         context_manager=ContextManager(),
-        permission_checker=PermissionChecker(approval_policy="auto"),
+        permission_checker=PermissionChecker(permission_mode="auto", approval_policy="auto"),
         policy_checker=ToolPolicyChecker(workspace),
         max_steps=5,
     )
@@ -299,7 +299,7 @@ async def test_engine_detects_repeated_tool_calls(tmp_path: Path) -> None:
         workspace=workspace,
         tools=tools,
         context_manager=ContextManager(),
-        permission_checker=PermissionChecker(approval_policy="auto"),
+        permission_checker=PermissionChecker(permission_mode="auto", approval_policy="auto"),
         policy_checker=ToolPolicyChecker(workspace),
         max_steps=50,
     )
@@ -316,3 +316,35 @@ async def test_engine_detects_repeated_tool_calls(tmp_path: Path) -> None:
     # the fourth repetition tripped the guard and emitted the final event.
     tool_results = [event for event in events if event["type"] == "tool_result"]
     assert len(tool_results) == 3
+
+
+async def test_engine_detects_repeated_write_same_path_different_content(tmp_path: Path) -> None:
+    """Loop guard catches repeated writes to the same path even if content differs."""
+    workspace = WorkspaceContext(root=tmp_path)
+    tools = build_tool_registry(workspace)
+    # Model writes to the same path but varies content on each call.
+    calls = [
+        f'<tool>{{"name":"write_file","args":{{"path":"test.txt","content":"attempt {i}"}}}}</tool>'
+        for i in range(8)
+    ]
+    model = ScriptedApiClient(calls)
+    # Must read file first for policy, then auto-approve writes.
+    (tmp_path / "test.txt").write_text("original", encoding="utf-8")
+    # Simulate a prior read by writing a read entry into history.
+    engine = Engine(
+        model=model,
+        workspace=workspace,
+        tools=tools,
+        context_manager=ContextManager(),
+        permission_checker=PermissionChecker(permission_mode="auto"),
+        policy_checker=ToolPolicyChecker(workspace),
+        max_steps=50,
+    )
+    # Patch the policy checker to skip prior-read requirement for this test.
+    engine.policy_checker.check = lambda tool, args: type("P", (), {"allowed": True, "reason": "", "message": ""})()
+
+    events = [event async for event in engine.run_turn("循环写文件")]
+
+    assert events[-1]["type"] == "final"
+    assert "重复调用" in events[-1]["content"]
+    assert "write_file" in events[-1]["content"]

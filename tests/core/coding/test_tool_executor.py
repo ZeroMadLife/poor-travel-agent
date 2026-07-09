@@ -12,7 +12,6 @@ from core.coding.engine import (
 )
 from core.coding.tool_executor import (
     ApprovalManager,
-    ApprovalPolicy,
     PermissionChecker,
     ToolExecutor,
     ToolPolicyChecker,
@@ -23,17 +22,19 @@ from core.coding.tools.registry import build_tool_registry
 def _executor(
     tmp_path: Path,
     *,
-    approval_policy: ApprovalPolicy = "auto",
+    approval_policy: str = "auto",
     approval_manager: ApprovalManager | None = None,
     session_id: str = "coding_1",
     should_stop: bool = False,
 ) -> ToolExecutor:
     workspace = WorkspaceContext(root=tmp_path)
     tools = build_tool_registry(workspace)
+    # Map legacy approval_policy to permission_mode for backward compat in tests
+    mode = "auto" if approval_policy == "auto" else "default"
     return ToolExecutor(
         tools=tools,
         workspace=workspace,
-        permission_checker=PermissionChecker(approval_policy=approval_policy),
+        permission_checker=PermissionChecker(permission_mode=mode, approval_policy=approval_policy),
         policy_checker=ToolPolicyChecker(workspace),
         approval_manager=approval_manager,
         session_id=session_id,

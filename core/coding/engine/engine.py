@@ -147,11 +147,17 @@ class Engine:
             if kind in {"tool", "tools"}:
                 tool_payloads = [payload] if kind == "tool" else list(payload)
                 for tool_payload in tool_payloads:
-                    # Detect repeated identical tool calls to prevent infinite loops
-                    sig = (
-                        str(tool_payload.get("name", "")),
-                        json.dumps(tool_payload.get("args", {}), sort_keys=True),
+                    # Detect repeated tool calls to prevent infinite loops.
+                    # Only compare tool name + key identifier fields (path, command),
+                    # NOT the full args (which may include large content/text that
+                    # the model slightly varies on each retry, defeating exact match).
+                    tool_name = str(tool_payload.get("name", ""))
+                    tool_args = tool_payload.get("args", {})
+                    key_fields = tuple(
+                        str(tool_args.get(k, ""))
+                        for k in ("path", "command", "query")
                     )
+                    sig = (tool_name, key_fields)
                     if sig == last_tool_signature:
                         repeat_count += 1
                     else:

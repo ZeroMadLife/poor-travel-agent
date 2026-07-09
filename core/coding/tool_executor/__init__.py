@@ -7,7 +7,6 @@ from core.coding.tool_executor.approval import (
 )
 from core.coding.tool_executor.permissions import (
     ApprovalCallback,
-    ApprovalPolicy,
     PermissionChecker,
     PermissionDecision,
     PermissionMode,
@@ -18,7 +17,6 @@ __all__ = [
     "ApprovalCallback",
     "ApprovalEntry",
     "ApprovalManager",
-    "ApprovalPolicy",
     "PermissionChecker",
     "PermissionDecision",
     "PermissionMode",
