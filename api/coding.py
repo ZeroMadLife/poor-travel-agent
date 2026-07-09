@@ -37,7 +37,7 @@ from api.schemas import (
 )
 from core.coding.persistence import CodingSessionStore
 from core.coding.runtime import CodingRuntime
-from core.llm import _PROVIDERS, create_llm
+from core.llm import create_llm
 
 router = APIRouter()
 
@@ -63,6 +63,7 @@ async def create_coding_session(
         storage_root=storage_root,
         model_factory=model_factory,
         approval_policy=payload.approval_policy,
+        save_on_init=False,
     )
     sessions: dict[str, CodingRuntime] = request.app.state.coding_sessions
     sessions[session_id] = runtime
@@ -213,10 +214,14 @@ async def coding_stream(websocket: WebSocket, session_id: str) -> None:
             await websocket.send_json(
                 {"type": "skill_invoked", "skill": command, "arguments": args}
             )
-            content = expanded
+            # Pass original user text to run_turn; the expanded skill prompt is
+            # injected into the LLM request only and is not persisted to history.
+            skill_prompt = expanded
+        else:
+            skill_prompt = None
 
         try:
-            async for event in runtime.run_turn(content):
+            async for event in runtime.run_turn(content, skill_prompt=skill_prompt):
                 await websocket.send_json(event)
         except Exception as exc:
             await websocket.send_json(ErrorEvent(message=f"Coding agent error: {exc}").model_dump())
@@ -294,6 +299,19 @@ async def stop_coding_run(session_id: str, request: Request) -> dict[str, bool]:
     return {"ok": True}
 
 
+@router.post("/api/v1/coding/{session_id}/plan/enter")
+async def enter_plan_mode_route(session_id: str, payload: dict, request: Request) -> dict[str, str]:
+    """Manually enter plan mode with a given topic."""
+    runtime = _require_runtime(request, session_id)
+    if runtime.runtime_mode == "plan":
+        raise HTTPException(status_code=400, detail="already in plan mode")
+    topic = str(payload.get("topic", "")).strip()
+    if not topic:
+        raise HTTPException(status_code=400, detail="topic is required")
+    plan_path = runtime.enter_plan_mode(topic)
+    return {"status": "entered", "mode": runtime.runtime_mode, "plan_path": plan_path, "topic": topic}
+
+
 @router.post("/api/v1/coding/{session_id}/plan/approve")
 async def approve_plan(session_id: str, request: Request) -> dict[str, str]:
     """Approve the pending plan review and exit plan mode."""
@@ -346,17 +364,12 @@ async def get_coding_run(
 
 @router.get("/api/v1/coding/models", response_model=CodingModelsResponse)
 async def list_coding_models(request: Request) -> CodingModelsResponse:
-    """Return available models from the provider registry."""
-    models: list[CodingModel] = []
-    for provider, config in _PROVIDERS.items():
-        models.append(
-            CodingModel(
-                id=f"{provider}:{config.default_model}",
-                label=f"{provider} / {config.default_model}",
-                provider=provider,
-            )
-        )
-    return CodingModelsResponse(models=models)
+    """Return available models (simplified: deepseek v4 flash/pro only)."""
+    models = [
+        CodingModel(id="deepseek:deepseek-v4-flash", label="DeepSeek V4 Flash", provider="deepseek"),
+        CodingModel(id="deepseek:deepseek-v4-pro", label="DeepSeek V4 Pro", provider="deepseek"),
+    ]
+    return CodingModelsResponse(models=models, current="deepseek:deepseek-v4-flash")
 
 
 @router.patch("/api/v1/coding/{session_id}/model")

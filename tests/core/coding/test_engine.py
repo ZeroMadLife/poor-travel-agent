@@ -218,3 +218,69 @@ def test_build_ainvoke_messages_falls_back_to_single_user_message() -> None:
     """Without a boundary marker the whole prompt stays a single user message."""
     messages = Engine._build_ainvoke_messages("plain prompt without boundary")
     assert messages == [{"role": "user", "content": "plain prompt without boundary"}]
+
+
+async def test_engine_streams_text_delta(tmp_path: Path) -> None:
+    """run_turn yields text_delta events whose deltas reassemble the response."""
+    from tests.core.coding.scripted_api_client import ScriptedApiClient
+
+    final_text = "README says Sage."
+    full_response = f"<final>{final_text}</final>"
+    workspace = WorkspaceContext(root=tmp_path)
+    tools = build_tool_registry(workspace)
+    model = ScriptedApiClient([full_response])
+    engine = Engine(
+        model=model,
+        workspace=workspace,
+        tools=tools,
+        context_manager=ContextManager(),
+        permission_checker=PermissionChecker(approval_policy="auto"),
+        policy_checker=ToolPolicyChecker(workspace),
+        max_steps=5,
+    )
+
+    events = [event async for event in engine.run_turn("read README")]
+
+    delta_events = [event for event in events if event["type"] == "text_delta"]
+    assert delta_events, "expected at least one text_delta event from the stream"
+    reassembled = "".join(event["delta"] for event in delta_events)
+    assert reassembled == full_response
+
+    # text_delta chunks must arrive before the matching model_parsed event and
+    # must never appear after a final/terminal event.
+    seen_parsed = False
+    for event in events:
+        if event["type"] == "model_parsed":
+            seen_parsed = True
+        if event["type"] == "text_delta":
+            assert not seen_parsed, "text_delta arrived after model_parsed"
+    assert events[-1]["type"] == "final"
+    assert events[-1]["content"] == final_text
+
+    # The streaming path consumes the scripted response through astream.
+    assert model.calls, "astream should have been invoked with messages"
+    assert model.prompts == [], "complete fallback should not run when astream exists"
+
+
+async def test_engine_ainvoke_fallback_emits_no_text_delta(tmp_path: Path) -> None:
+    """A model with ainvoke but no astream keeps the non-streaming path."""
+    (tmp_path / "README.md").write_text("TourSwarm coding agent\n", encoding="utf-8")
+    workspace = WorkspaceContext(root=tmp_path)
+    tools = build_tool_registry(workspace)
+    model = FakeAinvokeModel(
+        ['<tool>{"name":"read_file","args":{"path":"README.md"}}</tool>', "<final>done</final>"]
+    )
+    engine = Engine(
+        model=model,
+        workspace=workspace,
+        tools=tools,
+        context_manager=ContextManager(),
+        permission_checker=PermissionChecker(approval_policy="auto"),
+        policy_checker=ToolPolicyChecker(workspace),
+        max_steps=5,
+    )
+
+    events = [event async for event in engine.run_turn("read README")]
+
+    assert not any(event["type"] == "text_delta" for event in events)
+    assert events[-1]["type"] == "final"

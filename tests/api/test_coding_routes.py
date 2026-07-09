@@ -71,6 +71,7 @@ def test_create_coding_session_accepts_approval_policy(tmp_path: Path) -> None:
 
 def test_list_coding_sessions_returns_persisted_sessions(tmp_path: Path) -> None:
     """GET /coding/sessions exposes local Sage coding session history."""
+    (tmp_path / "README.md").write_text("# Sage\n", encoding="utf-8")
     client = TestClient(
         create_app(
             coding_model_factory=FakeModel,
@@ -79,12 +80,18 @@ def test_list_coding_sessions_returns_persisted_sessions(tmp_path: Path) -> None
         )
     )
     created = client.post("/api/v1/coding/session", json={}).json()
+    session_id = created["session_id"]
+    # Run a turn so the session is persisted (save_on_init=False) and non-empty.
+    with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
+        websocket.send_json({"content": "读 README.md"})
+        while websocket.receive_json()["type"] != "final":
+            pass
 
     response = client.get("/api/v1/coding/sessions")
 
     assert response.status_code == 200
     sessions = response.json()["sessions"]
-    assert sessions[0]["session_id"] == created["session_id"]
+    assert sessions[0]["session_id"] == session_id
     assert sessions[0]["workspace_root"] == str(tmp_path.resolve())
     assert sessions[0]["runtime_mode"] == "default"
 
@@ -370,6 +377,66 @@ def test_plan_approve_rejects_when_not_in_plan_mode(tmp_path: Path) -> None:
     assert response.json()["detail"] == "not in plan mode"
 
 
+def test_plan_enter_creates_plan_mode(tmp_path: Path) -> None:
+    """POST /plan/enter enters plan mode with a topic."""
+    app = create_app(
+        coding_model_factory=FakeModel,
+        coding_workspace_root=tmp_path,
+        coding_storage_root=tmp_path / ".coding",
+    )
+    client = TestClient(app)
+    session_id = client.post("/api/v1/coding/session", json={}).json()["session_id"]
+
+    response = client.post(
+        f"/api/v1/coding/{session_id}/plan/enter", json={"topic": "重构认证模块"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "entered"
+    assert body["mode"] == "plan"
+    assert body["topic"] == "重构认证模块"
+    assert "plan_path" in body
+    runtime = app.state.coding_sessions[session_id]
+    assert runtime.runtime_mode == "plan"
+
+
+def test_plan_enter_rejects_empty_topic(tmp_path: Path) -> None:
+    """POST /plan/enter returns 400 when topic is empty."""
+    app = create_app(
+        coding_model_factory=FakeModel,
+        coding_workspace_root=tmp_path,
+        coding_storage_root=tmp_path / ".coding",
+    )
+    client = TestClient(app)
+    session_id = client.post("/api/v1/coding/session", json={}).json()["session_id"]
+
+    response = client.post(f"/api/v1/coding/{session_id}/plan/enter", json={"topic": ""})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "topic is required"
+
+
+def test_plan_enter_rejects_when_already_in_plan_mode(tmp_path: Path) -> None:
+    """POST /plan/enter returns 400 when already in plan mode."""
+    app = create_app(
+        coding_model_factory=FakeModel,
+        coding_workspace_root=tmp_path,
+        coding_storage_root=tmp_path / ".coding",
+    )
+    client = TestClient(app)
+    session_id = client.post("/api/v1/coding/session", json={}).json()["session_id"]
+    runtime = app.state.coding_sessions[session_id]
+    runtime.enter_plan_mode("Existing plan")
+
+    response = client.post(
+        f"/api/v1/coding/{session_id}/plan/enter", json={"topic": "New plan"}
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "already in plan mode"
+
+
 def test_coding_websocket_streams_plan_ready_then_approve_exits(tmp_path: Path) -> None:
     """exit_plan_mode yields plan_ready_for_review; approve via REST exits plan mode."""
     (tmp_path / "README.md").write_text("# Sage\n", encoding="utf-8")
@@ -589,15 +656,19 @@ def test_git_status_returns_branch_info(tmp_path: Path) -> None:
 
 
 def test_list_coding_models_returns_providers(tmp_path: Path) -> None:
-    """GET /models returns one entry per provider."""
+    """GET /models returns the simplified deepseek v4 flash/pro set."""
     client = _make_bare_client(tmp_path)
 
     response = client.get("/api/v1/coding/models")
 
     assert response.status_code == 200
-    models = response.json()["models"]
-    assert len(models) >= 1
+    data = response.json()
+    models = data["models"]
+    assert len(models) == 2
+    ids = {m["id"] for m in models}
+    assert ids == {"deepseek:deepseek-v4-flash", "deepseek:deepseek-v4-pro"}
     assert all("id" in m and "provider" in m for m in models)
+    assert data["current"] == "deepseek:deepseek-v4-flash"
 
 
 def test_list_coding_skills_returns_bundled_skills(tmp_path: Path) -> None:
@@ -688,3 +759,113 @@ def test_coding_websocket_unknown_skill_returns_error(tmp_path: Path) -> None:
 
     assert event["type"] == "error"
     assert "Unknown skill" in event["message"]
+
+
+def test_coding_websocket_slash_command_persists_original_text(tmp_path: Path) -> None:
+    """Slash command original text is persisted to history, not the expanded prompt."""
+    (tmp_path / "README.md").write_text("# Sage\n", encoding="utf-8")
+
+    class PromptRecordingModel:
+        """Model that records the prompt and returns a final answer."""
+
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        async def complete(self, prompt: str) -> str:
+            self.prompts.append(prompt)
+            return "<final>已审查。</final>"
+
+    app = create_app(
+        coding_model_factory=PromptRecordingModel,
+        coding_workspace_root=tmp_path,
+        coding_storage_root=tmp_path / ".coding",
+    )
+    client = TestClient(app)
+    session_id = client.post("/api/v1/coding/session", json={}).json()["session_id"]
+    runtime = app.state.coding_sessions[session_id]
+
+    with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
+        websocket.send_json({"content": "/review"})
+        events = []
+        while True:
+            event = websocket.receive_json()
+            events.append(event)
+            if event["type"] in {"final", "step_limit", "error"}:
+                break
+
+    # The skill_invoked event still fires.
+    skill_event = next(event for event in events if event["type"] == "skill_invoked")
+    assert skill_event["skill"] == "review"
+
+    # History stores the original slash command text, not the expanded prompt.
+    history = runtime.session["history"]
+    user_messages = [item for item in history if item.get("role") == "user"]
+    assert user_messages == [{"role": "user", "content": "/review", "created_at": user_messages[0]["created_at"]}]
+    # The expanded review prompt (git diff instructions) is never persisted to history.
+    assert all("git diff" not in str(item.get("content", "")) for item in history)
+
+    # The expanded skill prompt IS injected into the LLM request for this turn.
+    assert "git diff" in runtime.model.prompts[0]
+
+
+def test_coding_websocket_slash_command_with_args_keeps_original(tmp_path: Path) -> None:
+    """Slash command with arguments keeps the raw /command args text in history."""
+    (tmp_path / "README.md").write_text("# Sage\n", encoding="utf-8")
+
+    class FinalModel:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        async def complete(self, prompt: str) -> str:
+            self.prompts.append(prompt)
+            return "<final>我来帮你规划。</final>"
+
+    app = create_app(
+        coding_model_factory=FinalModel,
+        coding_workspace_root=tmp_path,
+        coding_storage_root=tmp_path / ".coding",
+    )
+    client = TestClient(app)
+    session_id = client.post("/api/v1/coding/session", json={}).json()["session_id"]
+    runtime = app.state.coding_sessions[session_id]
+
+    with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
+        websocket.send_json({"content": "/travel-planning 我要去莆田"})
+        while websocket.receive_json()["type"] not in {"final", "step_limit", "error"}:
+            pass
+
+    # History keeps the original slash command including the user's arguments.
+    user_messages = [item for item in runtime.session["history"] if item.get("role") == "user"]
+    assert user_messages[0]["content"] == "/travel-planning 我要去莆田"
+    # The expanded prompt body is injected into the LLM request but not history.
+    assert "你正在使用 Sage 的 travel-planning domain skill" in runtime.model.prompts[0]
+    assert all(
+        "你正在使用 Sage 的 travel-planning domain skill"
+        not in str(item.get("content", ""))
+        for item in runtime.session["history"]
+    )
+
+    # Replayed messages also expose only the original command text.
+    messages = client.get(
+        f"/api/v1/coding/session/{session_id}/messages"
+    ).json()["messages"]
+    assert messages[0]["role"] == "user"
+    assert messages[0]["content"] == "/travel-planning 我要去莆田"
+
+
+def test_create_coding_session_does_not_persist_empty_session(tmp_path: Path) -> None:
+    """A freshly created session is not persisted until the first turn runs."""
+    client = TestClient(
+        create_app(
+            coding_model_factory=FakeModel,
+            coding_workspace_root=tmp_path,
+            coding_storage_root=tmp_path / ".coding",
+        )
+    )
+    session_id = client.post("/api/v1/coding/session", json={}).json()["session_id"]
+
+    # No empty session shows up in the session list.
+    response = client.get("/api/v1/coding/sessions")
+    assert response.status_code == 200
+    session_ids = [item["session_id"] for item in response.json()["sessions"]]
+    assert session_id not in session_ids

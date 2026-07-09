@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     # DeepSeek
     deepseek_api_key: str = Field(default="", description="DeepSeek API key")
     deepseek_base_url: str = "https://api.deepseek.com/v1"
-    deepseek_model: str = "deepseek-chat"
+    deepseek_model: str = "deepseek-v4-flash"
 
     # 火山引擎豆包（OpenAI 兼容格式，多模态）
     doubao_api_key: str = Field(default="", description="Volcengine Doubao API key")
@@ -53,7 +53,7 @@ class Settings(BaseSettings):
 
     # 主模型 / 轻量模型，格式 provider:model
     llm_model: str = "doubao:Doubao-Seed-2.0-pro"
-    llm_light_model: str = "deepseek:deepseek-chat"
+    llm_light_model: str = "deepseek:deepseek-v4-flash"
 
     def resolve_llm(self, model_spec: str | None = None) -> dict[str, str]:
         """将 'provider:model' 解析为 {api_key, base_url, model}。

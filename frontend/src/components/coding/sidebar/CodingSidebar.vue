@@ -4,7 +4,6 @@ import {
   ChevronDown,
   ChevronRight,
   Clock3,
-  FileCode,
   MessagesSquare,
   Plus,
   Search,
@@ -20,7 +19,7 @@ const store = useCodingStore()
 const emit = defineEmits<{ useSkill: [name: string] }>()
 
 // Collapsible panels: Sessions expanded by default, others collapsed.
-const collapsedPanels = ref<Set<string>>(new Set(['skills', 'runs', 'mcp', 'model']))
+const collapsedPanels = ref<Set<string>>(new Set(['skills', 'runs', 'mcp']))
 
 function togglePanel(panel: string) {
   const next = new Set(collapsedPanels.value)
@@ -105,6 +104,27 @@ function runIcon(status: string) {
   if (status === 'error' || status === 'cancelled') return XCircle
   return Clock3
 }
+
+// Manual plan-mode entry.
+const showPlanInput = ref(false)
+const planTopicInput = ref('')
+
+function togglePlanInput() {
+  showPlanInput.value = !showPlanInput.value
+  if (!showPlanInput.value) planTopicInput.value = ''
+}
+
+function confirmPlan() {
+  if (!planTopicInput.value.trim()) return
+  void store.enterPlanMode(planTopicInput.value.trim())
+  planTopicInput.value = ''
+  showPlanInput.value = false
+}
+
+function cancelPlanInput() {
+  showPlanInput.value = false
+  planTopicInput.value = ''
+}
 </script>
 
 <template>
@@ -157,6 +177,37 @@ function runIcon(status: string) {
         >
           显示全部 ({{ filteredSessions.length }})
         </button>
+      </div>
+    </section>
+
+    <section class="sidebar-section plan-mode-section">
+      <div class="plan-mode-controls">
+        <button
+          v-if="store.runtimeMode !== 'plan'"
+          class="plan-btn"
+          data-testid="enter-plan-mode"
+          @click="togglePlanInput"
+        >
+          进入计划模式
+        </button>
+        <span v-else class="plan-active">已在计划模式</span>
+      </div>
+      <div v-if="showPlanInput" class="plan-input-row">
+        <input
+          v-model="planTopicInput"
+          class="plan-topic-input"
+          placeholder="计划主题..."
+          data-testid="plan-topic-input"
+          @keydown.enter="confirmPlan"
+        />
+        <button
+          class="plan-confirm-btn"
+          data-testid="plan-confirm"
+          @click="confirmPlan"
+        >
+          确认
+        </button>
+        <button class="plan-cancel-btn" @click="cancelPlanInput">取消</button>
       </div>
     </section>
 
@@ -277,31 +328,6 @@ function runIcon(status: string) {
           <span class="mcp-dot" :class="server.status"></span>
           <span class="mcp-name">{{ server.name }}</span>
           <span class="mcp-transport">{{ server.transport }}</span>
-        </div>
-      </div>
-    </section>
-
-    <section class="sidebar-section">
-      <div class="section-heading">
-        <button class="panel-toggle" @click="togglePanel('model')">
-          <component
-            :is="isPanelCollapsed('model') ? ChevronRight : ChevronDown"
-            :size="13"
-          />
-          <h3><FileCode :size="13" /> 模型</h3>
-        </button>
-      </div>
-      <div v-if="!isPanelCollapsed('model')">
-        <div v-if="store.models.length === 0" class="empty">加载中...</div>
-        <div
-          v-for="model in store.models"
-          :key="model.id"
-          class="model-item"
-          :class="{ active: model.id === store.currentModelId }"
-          @click="store.changeModel(model.id)"
-        >
-          <span class="model-provider">{{ model.provider }}</span>
-          <span class="model-label">{{ model.label.split(' / ')[1] || model.label }}</span>
         </div>
       </div>
     </section>
@@ -738,32 +764,86 @@ function runIcon(status: string) {
   color: #9ca3af;
 }
 
-.model-item {
+.plan-mode-section {
+  padding-top: 8px;
+  padding-bottom: 10px;
+}
+
+.plan-mode-controls {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 6px;
-  border-radius: 4px;
-  cursor: pointer;
+}
+
+.plan-btn {
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid #2563eb;
+  border-radius: 6px;
+  background: #eff6ff;
+  color: #1e40af;
   font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
 }
 
-.model-item:hover {
-  background: #f3f4f6;
-}
-
-.model-item.active {
+.plan-btn:hover {
   background: #dbeafe;
 }
 
-.model-provider {
-  font-size: 10px;
+.plan-active {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: #d1fae5;
+  color: #065f46;
+  font-size: 11px;
   font-weight: 700;
-  color: #6b7280;
-  text-transform: uppercase;
 }
 
-.model-label {
-  color: #374151;
+.plan-input-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.plan-topic-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  font-size: 12px;
+  outline: 0;
+}
+
+.plan-topic-input:focus {
+  border-color: #2563eb;
+}
+
+.plan-confirm-btn,
+.plan-cancel-btn {
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  background: #fff;
+  padding: 4px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.plan-confirm-btn {
+  border-color: #2563eb;
+  color: #1e40af;
+  font-weight: 600;
+}
+
+.plan-confirm-btn:hover {
+  background: #eff6ff;
+}
+
+.plan-cancel-btn:hover {
+  background: #f3f4f6;
 }
 </style>

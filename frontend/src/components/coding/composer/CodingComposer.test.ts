@@ -80,6 +80,8 @@ it('selects a skill via enter and fills the input with /name and a trailing spac
 
   expect(store.sendMessage).not.toHaveBeenCalled()
   expect((textarea(wrapper).element as HTMLTextAreaElement).value).toBe('/review ')
+  // Menu should be dismissed after a skill is selected.
+  expect(wrapper.find('.skill-menu').exists()).toBe(false)
 })
 
 it('moves selection with arrow keys and confirms with enter', async () => {
@@ -119,6 +121,48 @@ it('closes the menu and clears input on escape', async () => {
 
   expect(wrapper.find('.skill-menu').exists()).toBe(false)
   expect((textarea(wrapper).element as HTMLTextAreaElement).value).toBe('')
+
+  // After escape, typing "/" again should re-show the menu (dismissed reset).
+  await textarea(wrapper).setValue('/')
+  await nextTick()
+  expect(wrapper.find('.skill-menu').exists()).toBe(true)
+})
+
+it('sends the message on enter after a skill has been selected', async () => {
+  const { wrapper, store } = mountComposer()
+  store.sendMessage = vi.fn()
+
+  await textarea(wrapper).setValue('/rev')
+  await nextTick()
+
+  // First enter selects the skill (menu is dismissed afterwards).
+  await textarea(wrapper).trigger('keydown', { key: 'Enter', shiftKey: false })
+  expect(store.sendMessage).not.toHaveBeenCalled()
+  expect(wrapper.find('.skill-menu').exists()).toBe(false)
+
+  // Second enter should send the message, not re-enter the skill menu branch.
+  await textarea(wrapper).trigger('keydown', { key: 'Enter', shiftKey: false })
+  expect(store.sendMessage).toHaveBeenCalledTimes(1)
+  expect(store.sendMessage).toHaveBeenCalledWith('/review')
+  expect((textarea(wrapper).element as HTMLTextAreaElement).value).toBe('')
+})
+
+it('re-shows the skill menu after sending a message', async () => {
+  const { wrapper, store } = mountComposer()
+  store.sendMessage = vi.fn()
+
+  // Select a skill, then send it.
+  await textarea(wrapper).setValue('/rev')
+  await nextTick()
+  await textarea(wrapper).trigger('keydown', { key: 'Enter', shiftKey: false })
+  await textarea(wrapper).trigger('keydown', { key: 'Enter', shiftKey: false })
+  expect(store.sendMessage).toHaveBeenCalledTimes(1)
+
+  // Typing "/" again should pop the menu back up.
+  await textarea(wrapper).setValue('/')
+  await nextTick()
+  expect(wrapper.find('.skill-menu').exists()).toBe(true)
+  expect(wrapper.findAll('.skill-menu-item')).toHaveLength(3)
 })
 
 it('selects a skill by mouse click', async () => {

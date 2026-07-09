@@ -98,6 +98,13 @@ class StepLimitEvent(RunEventBase):
     content: str
 
 
+class TextDeltaEvent(RunEventBase):
+    """A chunk of streamed model output text."""
+
+    type: Literal["text_delta"] = "text_delta"
+    delta: str = ""
+
+
 class CancelledEvent(RunEventBase):
     """The current run was cancelled."""
 
@@ -147,6 +154,7 @@ RunEvent: TypeAlias = (
     | RetryEvent
     | FinalEvent
     | StepLimitEvent
+    | TextDeltaEvent
     | CancelledEvent
     | ErrorEvent
     | TurnFinishedEvent

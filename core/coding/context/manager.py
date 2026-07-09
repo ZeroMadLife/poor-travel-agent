@@ -139,8 +139,13 @@ class ContextManager:
         tools: list[str] | None = None,
         workspace_reminders: list[str] | None = None,
         deferred_tools: list[str] | None = None,
+        skill_prompt: str | None = None,
     ) -> tuple[str, dict[str, Any]]:
-        """Return a budgeted prompt and metadata."""
+        """Return a budgeted prompt and metadata.
+
+        ``skill_prompt`` is an expanded skill instruction injected into the LLM
+        prompt for this turn only; it is never written to ``history``.
+        """
         history = history or []
         tools = tools or []
         system_prompt = self._build_system_prompt_once(
@@ -148,11 +153,15 @@ class ContextManager:
             workspace_reminders=workspace_reminders,
             deferred_tools=deferred_tools,
         )
-        raw_sections = {
+        raw_sections: dict[str, str] = {
             "prefix": system_prompt,
             "history": self._render_history(history),
             "current_request": f"Current user request:\n{normalize_text(user_message)}",
         }
+        if skill_prompt:
+            raw_sections["skill_prompt"] = (
+                f"<skill-instructions>\n{normalize_text(skill_prompt)}\n</skill-instructions>"
+            )
         rendered = self._render_to_budget(raw_sections)
         prompt = self._assemble(rendered)
         metadata = {
@@ -171,11 +180,13 @@ class ContextManager:
 
     def _render_to_budget(self, raw_sections: dict[str, str]) -> dict[str, SectionRender]:
         current = raw_sections["current_request"]
-        separators = 6
-        remaining = max(0, self.total_budget - len(current) - separators)
+        skill = raw_sections.get("skill_prompt", "")
+        separators = 8
+        reserved = len(current) + len(skill) + separators
+        remaining = max(0, self.total_budget - reserved)
         prefix_budget = max(0, remaining // 3)
         history_budget = max(0, remaining - prefix_budget)
-        sections = {
+        sections: dict[str, SectionRender] = {
             "prefix": SectionRender(
                 raw_sections["prefix"], tail_clip(raw_sections["prefix"], prefix_budget)
             ),
@@ -184,6 +195,8 @@ class ContextManager:
             ),
             "current_request": SectionRender(current, current),
         }
+        if skill:
+            sections["skill_prompt"] = SectionRender(skill, skill)
         prompt = self._assemble(sections)
         if len(prompt) <= self.total_budget:
             return sections
@@ -248,8 +261,9 @@ class ContextManager:
 
     @staticmethod
     def _assemble(sections: dict[str, SectionRender]) -> str:
+        order = ("prefix", "skill_prompt", "history", "current_request")
         return "\n\n".join(
-            sections[name].rendered for name in ("prefix", "history", "current_request")
+            sections[name].rendered for name in order if name in sections
         ).strip()
 
 

@@ -187,3 +187,90 @@ def test_compact_manager_invalidates_context_cache_after_compaction() -> None:
     manager.build_system_prompt_once(["read_file: read a file"])
 
     assert manager.system_prompt_build_count == 2
+
+
+def test_context_manager_injects_skill_prompt_between_prefix_and_history() -> None:
+    """skill_prompt is injected after the prefix and before history/current request."""
+    manager = ContextManager(today=lambda: date(2026, 7, 8))
+    skill_body = "你正在使用 Sage 的 travel-planning domain skill。"
+    history = [
+        {"role": "user", "content": "earlier question"},
+        {"role": "assistant", "content": "earlier answer"},
+    ]
+
+    prompt, metadata = manager.build(
+        user_message="/travel-planning 我要去莆田",
+        history=history,
+        tools=["read_file: read a file"],
+        skill_prompt=skill_body,
+    )
+
+    # The skill instruction is wrapped and present in the prompt.
+    assert "<skill-instructions>" in prompt
+    assert skill_body in prompt
+    # Order: prefix -> skill_prompt -> history -> current_request.
+    prefix_index = prompt.index("Available tools:")
+    skill_index = prompt.index(skill_body)
+    history_index = prompt.index("earlier question")
+    request_index = prompt.index("/travel-planning 我要去莆田")
+    assert prefix_index < skill_index < history_index < request_index
+    # The skill_prompt section is reported in metadata.
+    assert "skill_prompt" in metadata["sections"]
+    assert metadata["sections"]["skill_prompt"]["rendered_chars"] > 0
+
+
+def test_context_manager_omits_skill_prompt_section_when_absent() -> None:
+    """Without a skill_prompt the section is absent and ordering is unchanged."""
+    manager = ContextManager(today=lambda: date(2026, 7, 8))
+
+    prompt, metadata = manager.build(
+        user_message="hello",
+        tools=["read_file: read a file"],
+    )
+
+    assert "<skill-instructions>" not in prompt
+    assert "skill_prompt" not in metadata["sections"]
+
+
+async def test_skill_prompt_injected_into_llm_request_but_not_history(tmp_path: Path) -> None:
+    """A skill_prompt flows into the LLM request but is never persisted to history."""
+    (tmp_path / "README.md").write_text("# Sage\n", encoding="utf-8")
+
+    class RecordingModel:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        async def complete(self, prompt: str) -> str:
+            self.prompts.append(prompt)
+            return "<final>done</final>"
+
+    model = RecordingModel()
+    runtime = CodingRuntime(
+        session_id="coding_skill",
+        workspace_root=tmp_path,
+        model=model,
+        storage_root=tmp_path / ".coding",
+    )
+
+    events = [
+        event
+        async for event in runtime.run_turn(
+            "/travel-planning 我要去莆田",
+            skill_prompt="你正在使用 Sage 的 travel-planning domain skill。\n\n规划行程",
+        )
+    ]
+
+    assert events[-1]["type"] == "final"
+    # The skill body is in the LLM request.
+    assert "你正在使用 Sage 的 travel-planning domain skill" in model.prompts[0]
+    # The original command text is the persisted user message; the skill body is not.
+    assert runtime.session["history"][0] == {
+        "role": "user",
+        "content": "/travel-planning 我要去莆田",
+        "created_at": runtime.session["history"][0]["created_at"],
+    }
+    assert all(
+        "你正在使用 Sage 的 travel-planning domain skill"
+        not in str(item.get("content", ""))
+        for item in runtime.session["history"]
+    )

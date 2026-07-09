@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import {
   approveCodingPlan,
   buildCodingStreamUrl,
+  enterCodingPlan,
   fetchCodingFile,
   fetchCodingFiles,
   fetchCodingApprovalPending,
@@ -294,6 +295,18 @@ export const useCodingStore = defineStore('coding', () => {
     }
   }
 
+  async function enterPlanMode(topic: string) {
+    if (!sessionId.value) return
+    try {
+      const result = await enterCodingPlan(sessionId.value, topic)
+      runtimeMode.value = result.mode
+      planTopic.value = result.topic
+      planPath.value = result.plan_path
+    } catch (e) {
+      errorMessage.value = String(e)
+    }
+  }
+
   async function loadSkills() {
     try {
       const res = await fetchCodingSkills()
@@ -513,6 +526,7 @@ export const useCodingStore = defineStore('coding', () => {
     stopCurrentRun,
     approvePlan,
     rejectPlan,
+    enterPlanMode,
     selectSession,
     startNewSession,
     connectSocket,

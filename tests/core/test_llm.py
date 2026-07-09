@@ -3,6 +3,8 @@
 from unittest.mock import patch
 
 import pytest
+from langchain_anthropic import ChatAnthropic
+from langchain_openai import ChatOpenAI
 
 from core.llm import create_llm
 
@@ -34,10 +36,10 @@ def test_create_llm_deepseek() -> None:
         },
         clear=True,
     ):
-        llm = create_llm("deepseek:deepseek-chat")
+        llm = create_llm("deepseek:deepseek-v4-flash")
 
     assert llm is not None
-    assert llm.model_name == "deepseek-chat"
+    assert llm.model_name == "deepseek-v4-flash"
     assert str(llm.openai_api_base) == "https://api.deepseek.com/v1"
 
 
@@ -46,7 +48,7 @@ def test_create_llm_uses_provider_default_model() -> None:
     with patch.dict("os.environ", {"DEEPSEEK_API_KEY": "test-ds"}, clear=True):
         llm = create_llm("deepseek:")
 
-    assert llm.model_name == "deepseek-chat"
+    assert llm.model_name == "deepseek-v4-flash"
 
 
 def test_create_llm_unknown_provider_raises() -> None:
@@ -62,3 +64,46 @@ def test_create_llm_missing_key_raises() -> None:
         pytest.raises(ValueError, match="API key"),
     ):
         create_llm("openai:gpt-4o")
+
+
+def test_create_llm_routes_to_openai() -> None:
+    """OpenAI-compatible providers return a ChatOpenAI instance."""
+    with patch.dict(
+        "os.environ",
+        {
+            "DEEPSEEK_API_KEY": "test-ds",
+            "DEEPSEEK_BASE_URL": "https://api.deepseek.com/v1",
+        },
+        clear=True,
+    ):
+        llm = create_llm("deepseek:deepseek-v4-flash")
+
+    assert isinstance(llm, ChatOpenAI)
+    assert llm.model_name == "deepseek-v4-flash"
+
+
+def test_create_llm_routes_to_anthropic() -> None:
+    """Anthropic-native providers (deepseek_anthropic) return a ChatAnthropic instance."""
+    with patch.dict(
+        "os.environ",
+        {
+            "DEEPSEEK_API_KEY": "test-ds",
+            "DEEPSEEK_BASE_URL": "https://api.deepseek.com/v1",
+        },
+        clear=True,
+    ):
+        llm = create_llm("deepseek_anthropic:deepseek-v4-flash")
+
+    assert isinstance(llm, ChatAnthropic)
+    assert llm.model == "deepseek-v4-flash"
+    # Non-anthropic base URL is suffixed with /anthropic.
+    assert str(llm.anthropic_api_url) == "https://api.deepseek.com/v1/anthropic"
+
+
+def test_create_llm_deepseek_anthropic_missing_key_raises() -> None:
+    """deepseek_anthropic without a key raises a clear ValueError."""
+    with (
+        patch.dict("os.environ", {}, clear=True),
+        pytest.raises(ValueError, match="DEEPSEEK_API_KEY"),
+    ):
+        create_llm("deepseek_anthropic:deepseek-v4-flash")

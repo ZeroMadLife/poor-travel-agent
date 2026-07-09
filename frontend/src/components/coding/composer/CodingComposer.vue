@@ -28,7 +28,10 @@ const contextTooltip = computed(
 )
 
 // --- Skill menu (triggered when input starts with "/") ---
-const showSkillMenu = computed(() => input.value.startsWith('/'))
+const skillMenuDismissed = ref(false)
+const showSkillMenu = computed(
+  () => input.value.startsWith('/') && !skillMenuDismissed.value,
+)
 
 const skillQuery = computed(() => input.value.slice(1).toLowerCase())
 
@@ -45,11 +48,15 @@ const selectedIndex = ref(0)
 function selectSkill(skill: CodingSkillSummary) {
   input.value = `/${skill.name} `
   selectedIndex.value = 0
+  skillMenuDismissed.value = true
 }
 
 function onInput() {
   // Reset selection whenever the filter result set changes.
   selectedIndex.value = 0
+  if (!input.value.startsWith('/')) {
+    skillMenuDismissed.value = false
+  }
 }
 
 function send() {
@@ -58,6 +65,7 @@ function send() {
   store.sendMessage(content)
   input.value = ''
   selectedIndex.value = 0
+  skillMenuDismissed.value = false
 }
 
 function stop() {
@@ -89,6 +97,7 @@ function onKeydown(event: KeyboardEvent) {
       event.preventDefault()
       input.value = ''
       selectedIndex.value = 0
+      skillMenuDismissed.value = false
       return
     }
   }
@@ -108,16 +117,6 @@ defineExpose({
 <template>
   <div class="composer">
     <div class="composer-controls">
-      <select
-        v-model="store.currentModelId"
-        class="model-select"
-        @change="store.changeModel(store.currentModelId)"
-      >
-        <option v-for="model in store.models" :key="model.id" :value="model.id">
-          {{ model.label }}
-        </option>
-      </select>
-
       <button
         v-if="store.contextPercent > 75"
         class="compact-hint"
@@ -204,16 +203,6 @@ defineExpose({
   align-items: center;
   gap: 10px;
   margin-bottom: 8px;
-}
-
-.model-select {
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  padding: 4px 8px;
-  font-size: 12px;
-  background: #fff;
-  color: #374151;
-  cursor: pointer;
 }
 
 .context-ring {

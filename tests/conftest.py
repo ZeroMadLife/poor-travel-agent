@@ -24,7 +24,7 @@ def set_test_env(monkeypatch: MonkeyPatch) -> Iterator[None]:
         "QDRANT_HOST": "localhost",
         "QDRANT_PORT": "6333",
         "LLM_MODEL": "doubao:Doubao-Seed-2.0-pro",
-        "LLM_LIGHT_MODEL": "deepseek:deepseek-chat",
+        "LLM_LIGHT_MODEL": "deepseek:deepseek-v4-flash",
         "APP_ENV": "test",
     }
     for key, value in test_env.items():

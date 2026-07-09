@@ -35,7 +35,7 @@ def _build_mem0_config() -> dict[str, Any]:
     qdrant_port = int(os.environ.get("QDRANT_PORT", "6333"))
     deepseek_api_key = os.environ.get("DEEPSEEK_API_KEY", "")
     deepseek_base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
-    deepseek_model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+    deepseek_model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
     embedder_provider = os.environ.get("MEM0_EMBEDDER_PROVIDER", "huggingface")
     embedder_model = _resolve_embedder_model(embedder_provider)
     embedder_dims = _resolve_embedder_dims(embedder_provider, embedder_model)

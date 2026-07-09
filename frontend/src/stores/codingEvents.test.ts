@@ -198,6 +198,51 @@ describe('codingEvents', () => {
     expect(current.thinkingPhase.value).toBe('')
   })
 
+  it('accumulates text deltas into assistant message', () => {
+    const current = state()
+    current.isThinking.value = true
+
+    applyCodingEvent(current, { type: 'text_delta', delta: 'Hello' })
+    applyCodingEvent(current, { type: 'text_delta', delta: ', ' })
+    applyCodingEvent(current, { type: 'text_delta', delta: 'world!' })
+
+    expect(current.messages.value).toHaveLength(1)
+    expect(current.messages.value[0].role).toBe('assistant')
+    expect(current.messages.value[0].isThinking).toBe(true)
+    expect(current.messages.value[0].content).toBe('Hello, world!')
+  })
+
+  it('accumulates text deltas into an existing thinking message', () => {
+    const current = state()
+    current.isThinking.value = true
+    current.messages.value = [
+      { role: 'assistant', content: 'partial', tools: [], isThinking: true },
+    ]
+
+    applyCodingEvent(current, { type: 'text_delta', delta: ' response' })
+
+    expect(current.messages.value).toHaveLength(1)
+    expect(current.messages.value[0].content).toBe('partial response')
+    expect(current.messages.value[0].isThinking).toBe(true)
+  })
+
+  it('final event overwrites accumulated content', () => {
+    const current = state()
+    current.isThinking.value = true
+
+    applyCodingEvent(current, { type: 'text_delta', delta: 'streaming' })
+    applyCodingEvent(current, { type: 'text_delta', delta: ' partial' })
+
+    expect(current.messages.value[0].content).toBe('streaming partial')
+
+    const effect = applyCodingEvent(current, { type: 'final', content: '完整的最终回复。' })
+
+    expect(effect.terminal).toBe(true)
+    expect(current.messages.value).toHaveLength(1)
+    expect(current.messages.value[0].content).toBe('完整的最终回复。')
+    expect(current.messages.value[0].isThinking).toBe(false)
+  })
+
   it('enters plan mode on runtime_mode_changed', () => {
     const current = state()
 

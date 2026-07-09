@@ -293,8 +293,14 @@ class CodingRuntime:
         content = target.read_text(encoding="utf-8", errors="replace")
         return content[:2000]
 
-    async def run_turn(self, user_message: str) -> AsyncIterator[dict[str, Any]]:
-        """Run one coding turn, persist events, and stream them to caller."""
+    async def run_turn(
+        self, user_message: str, skill_prompt: str | None = None
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Run one coding turn, persist events, and stream them to caller.
+
+        ``skill_prompt`` is an expanded skill instruction injected into the LLM
+        prompt for this turn only; it is never persisted to session history.
+        """
         self.stop_requested = False
         run_id = f"run_{uuid.uuid4().hex[:12]}"
         self.run_store.start_run(run_id)
@@ -319,9 +325,12 @@ class CodingRuntime:
             workspace_reminders=self._workspace_reminders(),
             max_steps=50,
         )
-        async for event in engine.run_turn(user_message):
+        async for event in engine.run_turn(user_message, skill_prompt=skill_prompt):
             event = {"run_id": run_id, **event}
-            self.run_store.append_trace(run_id, event)
+            # Skip persisting ephemeral text_delta events to avoid trace bloat;
+            # they are streamed to the client but not stored in the run trace.
+            if event["type"] != "text_delta":
+                self.run_store.append_trace(run_id, event)
             self.session_event_bus.emit(event["type"], event)
             self._sync_session_state()
             yield event

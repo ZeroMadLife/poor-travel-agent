@@ -48,9 +48,9 @@ def test_resolve_llm_deepseek(monkeypatch) -> None:
     """resolve_llm 正确解析 deepseek provider。"""
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-ds-key")
     settings = Settings()
-    result = settings.resolve_llm("deepseek:deepseek-chat")
+    result = settings.resolve_llm("deepseek:deepseek-v4-flash")
     assert result["api_key"] == "test-ds-key"
-    assert result["model"] == "deepseek-chat"
+    assert result["model"] == "deepseek-v4-flash"
     assert "deepseek.com" in result["base_url"]
 
 

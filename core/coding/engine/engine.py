@@ -19,6 +19,7 @@ from core.coding.engine.events import (
     ModelRequestedEvent,
     RetryEvent,
     StepLimitEvent,
+    TextDeltaEvent,
     ToolResultEvent,
     event_to_dict,
 )
@@ -80,8 +81,14 @@ class Engine:
         self.workspace_reminders = workspace_reminders or []
         self.max_steps = max_steps
 
-    async def run_turn(self, user_message: str) -> AsyncIterator[dict[str, Any]]:
-        """Run one coding turn and yield streamable events."""
+    async def run_turn(
+        self, user_message: str, skill_prompt: str | None = None
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Run one coding turn and yield streamable events.
+
+        ``skill_prompt`` is an expanded skill instruction injected into the LLM
+        prompt for this turn only; it is never written to ``self.history``.
+        """
         self.history.append({"role": "user", "content": user_message, "created_at": now()})
         tool_steps = 0
         attempts = 0
@@ -97,6 +104,7 @@ class Engine:
                 tools=self._tool_descriptions(),
                 workspace_reminders=self.workspace_reminders,
                 deferred_tools=self._deferred_tool_names(),
+                skill_prompt=skill_prompt,
             )
             yield event_to_dict(
                 ModelRequestedEvent(
@@ -107,7 +115,24 @@ class Engine:
                 )
             )
 
-            raw = await self._call_model(prompt)
+            raw = ""
+            astream = getattr(self.model, "astream", None)
+            if callable(astream):
+                messages = self._build_ainvoke_messages(prompt)
+                async for chunk in astream(messages):
+                    delta = getattr(chunk, "content", "")
+                    if isinstance(delta, list):
+                        delta = "".join(
+                            block.get("text", "") if isinstance(block, dict) else str(block)
+                            for block in delta
+                        )
+                    if delta:
+                        raw += str(delta)
+                        yield event_to_dict(
+                            TextDeltaEvent(run_id=self.run_id, delta=str(delta))
+                        )
+            else:
+                raw = await self._call_model(prompt)
             if self.should_stop():
                 yield self._cancelled_event()
                 return

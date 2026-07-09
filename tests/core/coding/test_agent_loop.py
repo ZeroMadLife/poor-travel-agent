@@ -54,7 +54,10 @@ async def test_agent_loop_user_to_tool_to_final(tmp_path: Path) -> None:
 
     events = [event async for event in engine.run_turn("read README")]
 
-    assert [event["type"] for event in events] == [
+    # Streaming emits text_delta chunks between model_requested and model_parsed;
+    # collapse them to compare against the structural event sequence.
+    structural = [event["type"] for event in events if event["type"] != "text_delta"]
+    assert structural == [
         "model_requested",
         "model_parsed",
         "tool_call",
@@ -72,7 +75,7 @@ async def test_agent_loop_user_to_final(tmp_path: Path) -> None:
 
     events = [event async for event in engine.run_turn("say hello")]
 
-    assert [event["type"] for event in events] == [
+    assert [event["type"] for event in events if event["type"] != "text_delta"] == [
         "model_requested",
         "model_parsed",
         "final",
@@ -96,7 +99,7 @@ async def test_agent_loop_policy_denied_then_final(tmp_path: Path) -> None:
 
     events = [event async for event in engine.run_turn("change app")]
 
-    assert [event["type"] for event in events] == [
+    assert [event["type"] for event in events if event["type"] != "text_delta"] == [
         "model_requested",
         "model_parsed",
         "tool_result",
@@ -104,8 +107,11 @@ async def test_agent_loop_policy_denied_then_final(tmp_path: Path) -> None:
         "model_parsed",
         "final",
     ]
-    assert events[2]["is_error"] is True
-    assert events[2]["policy_reason"] == "prior_read_required"
+    policy_error = next(
+        event for event in events if event["type"] == "tool_result"
+    )
+    assert policy_error["is_error"] is True
+    assert policy_error["policy_reason"] == "prior_read_required"
 
 
 async def test_agent_loop_approval_then_tool_then_final(tmp_path: Path) -> None:
@@ -137,7 +143,7 @@ async def test_agent_loop_approval_then_tool_then_final(tmp_path: Path) -> None:
 
     events = await task
 
-    assert [event["type"] for event in events] == [
+    assert [event["type"] for event in events if event["type"] != "text_delta"] == [
         "model_requested",
         "model_parsed",
         "approval_required",

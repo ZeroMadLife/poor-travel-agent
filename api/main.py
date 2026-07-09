@@ -42,7 +42,7 @@ def create_runtime_agent() -> Any | None:
         repo_root = Path(__file__).resolve().parent.parent
 
         # 主 Agent 用 DeepSeek
-        chat_llm = create_llm("deepseek:deepseek-chat")
+        chat_llm = create_llm("deepseek:deepseek-v4-flash")
 
         # 规划 Agent 用豆包
         model_spec = _planning_model_spec(settings.llm_model)

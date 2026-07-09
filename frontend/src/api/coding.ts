@@ -195,6 +195,22 @@ export async function rejectCodingPlan(sessionId: string): Promise<void> {
   if (!response.ok) throw new Error(`reject plan failed: ${response.status}`)
 }
 
+export async function enterCodingPlan(
+  sessionId: string,
+  topic: string,
+): Promise<{ status: string; mode: string; plan_path: string; topic: string }> {
+  const response = await fetch(
+    new URL(`/api/v1/coding/${sessionId}/plan/enter`, API_BASE_URL),
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ topic }),
+    },
+  )
+  if (!response.ok) throw new Error(`enter plan failed: ${response.status}`)
+  return await response.json()
+}
+
 export async function fetchCodingRuns(sessionId: string): Promise<CodingRunsResponse> {
   const response = await fetch(new URL(`/api/v1/coding/${sessionId}/runs`, API_BASE_URL))
   if (!response.ok) throw new Error(`fetch runs failed: ${response.status}`)

@@ -222,6 +222,11 @@ export type CodingTurnEvent = CodingEventMeta & {
   type: 'turn_started' | 'turn_finished'
 }
 
+export type CodingTextDeltaEvent = CodingEventMeta & {
+  type: 'text_delta'
+  delta: string
+}
+
 export type CodingRuntimeModeChangedEvent = CodingEventMeta & {
   type: 'runtime_mode_changed'
   mode: string
@@ -254,6 +259,7 @@ export type CodingServerEvent =
   | CodingApprovalRequiredEvent
   | CodingApprovalGrantedEvent
   | CodingTurnEvent
+  | CodingTextDeltaEvent
   | CodingRuntimeModeChangedEvent
   | CodingPlanReadyForReviewEvent
 

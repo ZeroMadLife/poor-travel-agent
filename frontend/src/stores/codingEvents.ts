@@ -94,6 +94,19 @@ export function applyCodingEvent(
     state.thinkingPhase.value = '正在重试...'
     return {}
   }
+  if (event.type === 'text_delta') {
+    const last = state.messages.value[state.messages.value.length - 1]
+    if (last && last.isThinking) {
+      last.content += event.delta
+    } else {
+      state.messages.value.push({
+        role: 'assistant',
+        content: event.delta,
+        isThinking: true,
+      })
+    }
+    return {}
+  }
   if (event.type === 'tool_call') {
     appendToolActivity(state.messages.value, event)
     return {}
