@@ -1,4 +1,4 @@
-# Codex Goal：Sage v5 - 前端渐进式升级（Naive UI + diff 可视化 + monaco 编辑器 + xterm 终端）
+# Codex Goal：Sage v5 - 架构重构 + 前端渐进式升级
 
 ## 任务类型
 goal 执行（自驱完成，直到验收通过）
@@ -9,343 +9,259 @@ goal 执行（自驱完成，直到验收通过）
 
 项目代号 **Sage**，位于 `/Users/zeromadlife/Desktop/tour-agent`，分支 `dev/sage-v4`。
 
-v4.1 已完成后端 runtime contract（typed events + ToolExecutor + 7层 system prompt + DYNAMIC_BOUNDARY + ScriptedApiClient 端到端测试）。前端也做了事件归约（codingEvents.ts）+ stream 分层（codingStream.ts）。
+v4.1 已完成后端 runtime contract。但当前 `core/coding/` 下 30 个文件平铺，模块边界不清晰。旅游侧代码和 coding 侧混在同一仓库。前端组件也平铺。
 
-但前端 UI 太朴素（手写 CSS，无 UI 库），缺少 coding workbench 的核心能力。参照 **hermes-studio**（`https://github.com/EKKOLearnAI/hermes-studio`，Vue3 + Naive UI + Pinia + monaco + xterm 的生产级 agent 控制台），渐进式升级四个能力。
+v5 分两阶段：
+- **v5.0 架构重构**：目录按职责域分 8 个子目录 + 旅游封装成 skill + 前端组件分目录
+- **v5.1 前端升级**：Naive UI + diff 可视化 + monaco 编辑器 + xterm 终端
 
 **先读 `docs/plans/10-SAGE-V4.1.md` 了解 v4.1 现状。**
 
 ## 两条红线
 
-1. **旅游侧代码不动**：`agents/`、`mcp_servers/`、`core/verifier.py`、`evals/` 等全部不改
-2. **现有测试不破**：`bash scripts/check.sh` 必须 350 passed，`cd frontend && npm run test -- --run` 必须 58 passed
-
-## 参考源
-
-- **hermes-studio**：`https://github.com/EKKOLearnAI/hermes-studio`（网页，用 WebFetch 读 ARCHITECTURE.md 和关键组件源码）
-  - 技术栈：Vue3 + Naive UI + Pinia + Vite8 + monaco + xterm + mermaid
-  - 工具展示：MessageItem.vue 里 diff 自动识别高亮 + NDrawer
-  - workspace diff：run-chat/workspace-diff-tracker.ts（agent run 前后 git 快照）
-  - 模型选择：ModelSelector.vue（弹窗 + provider 分组 + 搜索）
-- **hermes-webui（vanilla JS 版）**：`/Users/zeromadlife/Desktop/hermes-study/hermes-webui/static/`
-  - ui.js 的 buildToolCard / context 环 / 文件树
-  - messages.js 的 SSE 事件处理
+1. **现有测试不破**：`bash scripts/check.sh` 必须 350 passed，`cd frontend && npm run test -- --run` 必须 58 passed
+2. **行为不变**：重构后功能完全不变，只是文件位置和目录结构变化
 
 ---
 
-## 方向一：引入 Naive UI，替换手写 CSS
+## v5.0 阶段一：架构重构
 
-### 问题
+### 方向一：后端目录按职责域分 8 个子目录
 
-当前前端全部手写 CSS（`.coding-view`、`.sidebar`、`.message` 等），样式朴素且维护成本高。
+当前 `core/coding/` 下 30 个文件平铺。重构为：
 
-### 要做的事
-
-#### 1.1 安装 Naive UI
-
-```bash
-cd frontend
-npm install naive-ui
+```text
+core/coding/
+├── engine/              ← 引擎层（模型循环 + 协议解析 + 事件）
+│   ├── __init__.py      ← re-export Engine, ApiClient, parse, RunEvent 等
+│   ├── engine.py        ← Engine 主循环（从 core/coding/engine.py 移入）
+│   ├── helpers.py       ← engine_helpers.py 改名移入
+│   ├── model_output.py  ← <tool>/<final> 解析（移入）
+│   └── events.py        ← typed RunEvent 契约（移入）
+│
+├── tools/               ← 工具层（已有，保持位置）
+│   ├── base.py          ← RegisteredTool / ToolResult
+│   ├── registry.py      ← @register_tool + tool_search + get_active_tools
+│   ├── schemas.py
+│   ├── file_tools.py
+│   ├── shell_tool.py
+│   ├── todo_tools.py
+│   ├── plan_tools.py
+│   └── agent_tools.py
+│
+├── tool_executor/       ← 工具执行管线（权限治理域）
+│   ├── __init__.py
+│   ├── executor.py      ← ToolExecutor（从 tool_executor.py 移入）
+│   ├── permissions.py   ← PermissionChecker（从 permissions.py 移入）
+│   ├── policy.py        ← ToolPolicyChecker（tool_policy.py 改名移入）
+│   └── approval.py      ← ApprovalManager + 危险命令检测（从 approval.py 移入）
+│
+├── context/             ← 上下文层
+│   ├── __init__.py
+│   ├── manager.py       ← ContextManager（context_manager.py 改名移入）
+│   ├── compact.py       ← CompactManager（移入）
+│   └── workspace.py     ← WorkspaceContext（移入）
+│
+├── skills/              ← 技能层（已有，保持 + 加旅游 skill）
+│   ├── skill.py
+│   ├── registry.py
+│   └── bundled/
+│       ├── review/
+│       ├── test/
+│       ├── commit/
+│       └── travel/      ← 新增：旅游 domain skill
+│
+├── memory/              ← 记忆层（占位，后期填充）
+│   └── __init__.py
+│
+├── multiagent/          ← 多Agent层（worker 子agent）
+│   ├── __init__.py
+│   ├── manager.py       ← WorkerManager（worker_manager.py 改名移入）
+│   ├── execution.py     ← worker_execution.py 改名移入
+│   └── runtime.py       ← worker_runtime.py 改名移入
+│
+├── persistence/         ← 持久化层
+│   ├── __init__.py
+│   ├── session_store.py ← CodingSessionStore（移入）
+│   ├── run_store.py     ← RunStore（移入）
+│   ├── session_events.py← SessionEventBus（移入）
+│   └── todo_ledger.py   ← TodoLedger（移入）
+│
+├── plan_mode.py         ← Plan mode（太小不单独建目录）
+│
+└── runtime.py           ← Runtime 组装（顶层，不变，更新 import 路径）
 ```
 
-#### 1.2 逐个组件迁移
+**重构规则**：
+1. 只移动文件 + 更新 import 路径，不改逻辑
+2. 每个子目录的 `__init__.py` re-export 公开接口，让外部 import 路径简洁
+3. `runtime.py` 是唯一组装点，更新它的 import 指向新路径
+4. 所有测试的 import 路径同步更新
+5. `api/coding.py` 的 import 同步更新
 
-**不要一次性重写所有组件**。按以下顺序逐个迁移，每个迁移完跑测试确认不破：
+**验证**：重构后 `bash scripts/check.sh` 必须全绿，所有测试通过。
 
-1. **CodingView.vue** -- 用 `NLayout`（header+sider+content+aside）替换手写 grid 三栏
-2. **CodingSidebar.vue** -- 用 `NMenu` / `NCollapse` / `NTag` 替换手写 skills/mcp/model 列表
-3. **CodingComposer.vue** -- 用 `NInput`（textarea）+ `NSelect`（model）+ `NButton`（send/stop）替换手写输入
-4. **CodingToolActivity.vue** -- 用 `NCollapse` + `NCode` 替换手写折叠
-5. **CodingFileTree.vue** -- 用 `NTree` 替换手写文件树
-6. **CodingGitBadge.vue** -- 用 `NTag` 替换手写 badge
-7. **CodingApprovalCard.vue** -- 用 `NCard` + `NButton` 替换手写卡片
+### 方向二：旅游侧封装成 Sage 的 domain skill + domain tools
 
-#### 1.3 主题
+当前旅游代码散在 `agents/`、`mcp_servers/`、`core/verifier.py`、`evals/`。封装成 Sage 的 domain skill + domain tools。
 
-用 Naive UI 的 `NConfigProvider` + `darkTheme`（或自定义主题），统一配色。保持当前浅色风格为默认。
+#### 2.1 新增 `/travel` skill
 
-#### 1.4 保留 lucide-vue-next 图标
+`core/coding/skills/bundled/travel/SKILL.md`：
 
-Naive UI 和 lucide 图标不冲突，继续用 lucide。
-
-### 验收
-- `npm run test -- --run` 全过（组件测试可能需要调整 mock）
-- `npm run build` 通过
-- 视觉上比 v4 更专业（Naive UI 组件替代手写 CSS）
-
+```markdown
 ---
+name: travel
+description: 旅游行程规划（多Agent协作 + 预算约束 + 确定性验证）
+allowed-tools: generate_itinerary, search_attractions, get_weather, get_forecast, geocode, search_nearby, get_route
+---
+你是旅游规划助手。用户想规划旅游行程时：
 
-## 方向二：diff 可视化 + workspace diff 追踪
+1. 确认目的地、天数、预算、偏好
+2. 调用 generate_itinerary 生成完整行程（内部多Agent协作）
+3. 如果用户问天气，调用 get_weather 或 get_forecast
+4. 如果用户问附近，调用 search_nearby
+5. 预算敏感 - 推荐时考虑学生消费水平
+```
 
-### 问题
+#### 2.2 旅游工具注册到 Sage 的 tool registry
 
-当前工具调用结果只显示纯文本，不识别 diff。agent 改文件后没有 workspace diff 追踪。
-
-### 要做的事
-
-#### 2.1 工具结果 diff 高亮
-
-改造 `CodingToolActivity.vue`：
-- 工具 result 内容如果包含 `+` / `-` / `@@` 行（unified diff 格式），自动识别并用 diff 语法高亮
-- 用 Naive UI 的 `NCode` 或 highlight.js 渲染
-- diff 结果超过 1000 字符截断 + "查看完整 diff" 按钮
-
-#### 2.2 后端 workspace diff 追踪
-
-新增 `core/coding/workspace_diff.py`：
+在 `core/coding/tools/` 下新增 `travel_tools.py`，把旅游的核心能力注册为 Sage 工具：
 
 ```python
-class WorkspaceDiffTracker:
-    """Track file changes across agent runs via git snapshots."""
-
-    def snapshot_before_run(self, workspace_root: Path) -> dict:
-        """Take git status snapshot before a run."""
-        # git status --porcelain=v1 -z
-
-    def snapshot_after_run(self, workspace_root: Path, before: dict) -> list[FileChange]:
-        """Compare before/after, return changed files with patches."""
-        # git diff for each changed file
-
-    def get_diff(self, file_path: str) -> str:
-        """Return unified diff for one file."""
-        # git diff <file>
+@register_tool(
+    name="generate_itinerary",
+    description="生成完整多日旅游行程（内部多Agent协作：信息->推荐->规划->预算）",
+    schema={"destination": "str", "budget_total": "int", "preferences": "str", "dates": "str"},
+    schema_model=ItineraryArgs,
+    risky=False,
+    category="travel",
+    deferred=True,  # 延迟加载，通过 tool_search 激活
+)
+def generate_itinerary(workspace, args, ctx):
+    """调用 LangGraph 多Agent图生成行程。"""
+    # 复用 agents/itinerary_tool.py 的逻辑
+    ...
 ```
 
-在 `CodingRuntime.run_turn()` 里：
-- run 开始前调 `snapshot_before_run()`
-- run 结束后调 `snapshot_after_run()` -> yield `workspace_diff` 事件
+同时把旅游 MCP 工具（search_attractions / get_weather / get_forecast / geocode / search_nearby / get_route）也注册为 deferred tools。
 
-新增 WebSocket 事件类型：
-```python
-{"type": "workspace_diff", "changed_files": [...], "diffs": {"path": "diff content"}}
+#### 2.3 前端移除旅游视图
+
+- `App.vue` 移除"旅行/代码"切换，默认进入 Sage coding 界面
+- `ChatView.vue` 保留但不再是默认视图
+- 用户通过 `/travel` skill 在 Sage 界面里使用旅游能力
+
+#### 2.4 旅游侧代码保留但重新组织
+
+- `agents/` -- 保留（LangGraph 图 + itinerary_tool），被 travel_tools.py 调用
+- `mcp_servers/` -- 保留（amap/weather/scenic MCP Server），被 travel_tools.py 调用
+- `core/verifier.py` -- 保留（确定性验证器），被 generate_itinerary 调用
+- `evals/` -- 保留（旅游评测数据）
+- `api/routes.py` / `api/ws.py` -- 保留（旅游 chat API），但不作为主入口
+
+**关键**：旅游代码不删，只是从"主产品"降级为"Sage 的 domain skill + domain tools"。
+
+### 方向三：前端组件分目录
+
+当前 7 个 `Coding*.vue` 平铺在 `components/` 下。重构为：
+
+```text
+frontend/src/components/coding/
+├── chat/                ← 聊天区
+│   ├── CodingToolActivity.vue
+│   ├── CodingThinkingIndicator.vue
+│   └── CodingApprovalCard.vue
+├── sidebar/             ← 左栏
+│   └── CodingSidebar.vue
+├── files/               ← 右栏文件树
+│   ├── CodingFileTree.vue
+│   └── CodingGitBadge.vue
+├── composer/            ← 底部输入
+│   └── CodingComposer.vue
+└── index.ts             ← re-export
 ```
 
-#### 2.3 前端 diff drawer
+`CodingView.vue` 的 import 路径同步更新。
 
-新增 `frontend/src/components/CodingDiffDrawer.vue`：
-- 用 Naive UI `NDrawer` + `NDrawerContent`
-- 收到 `workspace_diff` 事件后，显示"本次运行修改了 N 个文件"
-- 点击文件名 -> 展开该文件的 unified diff（高亮）
-- 支持 diff/edit 模式切换（edit 模式用 monaco，方向三做）
-
-### 验收
-- 工具结果中的 diff 内容自动高亮
-- agent 修改文件后，前端显示 workspace diff drawer
-- 新增后端测试：workspace diff tracker
-- 新增前端测试：diff drawer 渲染
+**验证**：`cd frontend && npm run test -- --run` 全绿 + `npm run build` 通过。
 
 ---
 
-## 方向三：monaco 代码编辑器
+## v5.1 阶段二：前端渐进式升级（Naive UI + diff + monaco + xterm）
 
-### 问题
+**v5.0 完成后再做 v5.1。** v5.1 的内容见下方，如果 v5.0 已经是完整一轮 goal，v5.1 可以作为后续 goal。
 
-当前文件预览只读（`<pre>` 标签），无语法高亮，无编辑能力。
+### 方向四：引入 Naive UI
 
-### 要做的事
+安装 `naive-ui`，逐个组件迁移（NLayout / NMenu / NCollapse / NInput / NSelect / NButton / NTree / NTag / NCard）。
 
-#### 3.1 安装 monaco
+### 方向五：diff 可视化
 
-```bash
-cd frontend
-npm install monaco-editor
-```
+- 工具结果 diff 自动识别高亮
+- 后端新增 `core/coding/context/workspace_diff.py`（WorkspaceDiffTracker）
+- 前端新增 `CodingDiffDrawer.vue`（NDrawer + diff 高亮）
 
-#### 3.2 Vite 配置
+### 方向六：monaco 代码编辑器
 
-在 `vite.config.ts` 里加 monaco 的 manualChunks（避免首屏加载过大）：
-```typescript
-build: {
-  rollupOptions: {
-    output: {
-      manualChunks: {
-        monaco: ['monaco-editor'],
-      }
-    }
-  }
-}
-```
+安装 `monaco-editor`，新增 `CodingCodeEditor.vue`，替换文件预览的 `<pre>`。diff drawer 用 monaco DiffEditor。
 
-#### 3.3 新增 CodingCodeEditor.vue
+### 方向七：xterm 内嵌终端
 
-替换 `CodingFileTree.vue` 里的 `<pre>` 预览：
-
-```vue
-<script setup lang="ts">
-import * as monaco from 'monaco-editor'
-import { onMounted, ref, watch } from 'vue'
-
-const props = defineProps<{
-  path: string
-  content: string
-  readOnly?: boolean
-}>()
-
-const containerRef = ref<HTMLElement>()
-let editor: monaco.editor.ICodeEditor | null = null
-
-onMounted(() => {
-  if (containerRef.value) {
-    editor = monaco.editor.create(containerRef.value, {
-      value: props.content,
-      language: detectLanguage(props.path),
-      theme: 'vs',
-      readOnly: props.readOnly ?? true,
-      automaticLayout: true,
-      minimap: { enabled: false },
-    })
-  }
-})
-
-watch(() => props.content, (newContent) => {
-  editor?.setValue(newContent)
-})
-</script>
-```
-
-#### 3.4 文件预览用 monaco
-
-`CodingFileTree.vue` 的预览区从 `<pre>` 改为 `<CodingCodeEditor :path="..." :content="..." read-only />`
-
-#### 3.5 diff 预览用 monaco DiffEditor
-
-`CodingDiffDrawer.vue` 里用 monaco 的 `createDiffEditor` 展示 diff：
-```typescript
-monaco.editor.createDiffEditor(container, {
-  original: originalModel,
-  modified: modifiedModel,
-})
-```
-
-### 验收
-- 文件预览有语法高亮
-- diff drawer 用 monaco DiffEditor 展示
-- `npm run build` 通过（monaco 分包正确）
-
----
-
-## 方向四：xterm 内嵌终端
-
-### 问题
-
-当前用户不能在网页里跑命令，只能通过 agent 的 run_shell 工具间接执行。
-
-### 要做的事
-
-#### 4.1 安装 xterm
-
-```bash
-cd frontend
-npm install @xterm/xterm @xterm/addon-fit
-```
-
-#### 4.2 后端 WebSocket 终端端点
-
-新增 `api/coding.py` 里加 WebSocket 终端：
-
-```python
-@router.websocket("/api/v1/coding/{session_id}/terminal")
-async def coding_terminal(websocket: WebSocket, session_id: str):
-    """PTY-like terminal over WebSocket."""
-    await websocket.accept()
-    runtime = sessions.get(session_id)
-    if runtime is None:
-        await websocket.close()
-        return
-    # 用 subprocess 跑 shell，WebSocket 双向通信
-    # stdin -> subprocess, stdout/stderr -> WebSocket
-```
-
-**注意**：这不是真正的 PTY（macOS 需要 pty 模块），第一版用 subprocess + pipe 简化实现。后续可升级到 `ptyprocess`。
-
-#### 4.3 新增 CodingTerminal.vue
-
-```vue
-<script setup lang="ts">
-import { Terminal } from '@xterm/xterm'
-import { FitAddon } from '@xterm/addon-fit'
-import { onMounted, onBeforeUnmount, ref } from 'vue'
-import '@xterm/xterm/css/xterm.css'
-
-const props = defineProps<{ sessionId: string }>()
-const containerRef = ref<HTMLElement>()
-let term: Terminal | null = null
-let ws: WebSocket | null = null
-
-onMounted(() => {
-  term = new Terminal({ fontSize: 13 })
-  const fitAddon = new FitAddon()
-  term.loadAddon(fitAddon)
-  term.open(containerRef.value!)
-  fitAddon.fit()
-
-  ws = new WebSocket(`ws://.../api/v1/coding/${props.sessionId}/terminal`)
-  ws.onmessage = (event) => term?.write(event.data)
-  term.onData((data) => ws?.send(data))
-})
-</script>
-```
-
-#### 4.4 集成到右栏
-
-`CodingView.vue` 右栏加 tab 切换：Files / Terminal。
-- Files tab：现有的文件树 + monaco 预览
-- Terminal tab：xterm 终端
-
-### 验收
-- 网页里能打开终端，输入命令，看到输出
-- 终端和文件树可切换
-- `npm run build` 通过（xterm 分包正确）
+安装 `@xterm/xterm`，后端新增 WebSocket 终端端点，前端新增 `CodingTerminal.vue`，右栏加 Files/Terminal tab 切换。
 
 ---
 
 ## 不要做的事
 
-- 不要动旅游侧代码
-- 不要改 v4.1 的后端 events/tool_executor/engine/context_manager（只新增 workspace_diff）
-- 不要一次性重写所有前端组件（逐个迁移）
-- 不要引入 hermes-studio 的 Koa BFF / Electron / Socket.IO（我们用 FastAPI + WebSocket）
-- 不要引入 vue-flow / mermaid（暂不需要）
-- 不要做 i18n（暂不需要）
-- 不要改 `core/coding/` 的 engine/runtime/tools（方向二只新增 workspace_diff.py）
+- 不要改 v4.1 的后端逻辑（events/tool_executor/engine/context_manager 只移动不改逻辑）
+- 不要删除旅游侧代码（保留，只重新组织调用关系）
+- 不要引入 hermes-studio 的 Koa BFF / Electron / Socket.IO
+- 不要一次性重写所有前端组件（v5.1 逐个迁移）
+- 不要在 v5.0 阶段引入 Naive UI / monaco / xterm（那是 v5.1 的事）
 
 ## 执行顺序
 
 ```
-方向一  Naive UI 引入 + 逐个组件迁移    ← 先建 UI 基础
-   ↓
-方向三  monaco 代码编辑器              ← 替换文件预览
-   ↓
-方向二  diff 可视化 + workspace diff   ← 依赖 monaco 的 DiffEditor
-   ↓
-方向四  xterm 终端                     ← 独立模块
-   ↓
-验收    全量测试 + build + 前后端自测截图
+v5.0 阶段一：架构重构
+  方向一  后端目录分 8 个子目录（只移动文件 + 更新 import）
+     ↓
+  方向二  旅游封装成 domain skill + domain tools
+     ↓
+  方向三  前端组件分目录
+     ↓
+  验收    全量测试 + build
+
+v5.1 阶段二：前端升级（v5.0 完成后再做）
+  方向四  Naive UI
+  方向五  diff 可视化
+  方向六  monaco 编辑器
+  方向七  xterm 终端
 ```
 
-## 完成标志
+## 完成标志（v5.0）
 
 - `bash scripts/check.sh` 全绿
 - `cd frontend && npm run test -- --run` 全绿
 - `cd frontend && npm run build` 通过
-- Naive UI 替换手写 CSS
-- monaco 代码编辑器有语法高亮
-- 工具结果 diff 自动高亮 + workspace diff drawer
-- xterm 终端可输入命令
-- commit message 标注 `sage-v5`
+- `core/coding/` 下有 8 个子目录，文件不再平铺
+- `/travel` skill 存在且可调用
+- 旅游工具注册到 Sage tool registry（deferred=True）
+- 前端组件在 `components/coding/` 子目录下
+- `App.vue` 默认进入 Sage coding 界面
+- commit message 标注 `sage-v5.0`
 - `docs/plans/11-SAGE-V5.md` 记录落地
-- **前后端自测：启动后端+前端，截图三栏布局 + 文件预览(高亮) + 终端 + diff drawer**
 
 ## 参考文件速查
 
 | 要解决的问题 | 参考源 |
 |---|---|
-| Naive UI 组件用法 | `https://www.naiveui.com/zh-CN/os-theme` |
-| hermes-studio 工具 diff 展示 | WebFetch `https://github.com/EKKOLearnAI/hermes-studio` 看 MessageItem.vue |
-| hermes-studio workspace diff | WebFetch 看 `packages/server/src/services/hermes/run-chat/workspace-diff-tracker.ts` |
-| hermes-studio 模型选择器 | WebFetch 看 `packages/client/src/components/layout/ModelSelector.vue` |
-| monaco editor 集成 | `https://github.com/microsoft/monaco-editor` |
-| xterm.js 集成 | `https://github.com/xtermjs/xterm.js` |
-| 当前前端结构 | `frontend/src/views/CodingView.vue` + `frontend/src/components/Coding*.vue` |
-| 当前前端 store | `frontend/src/stores/coding.ts` + `codingEvents.ts` + `codingStream.ts` |
-| v4.1 后端事件 | `core/coding/events.py`（workspace_diff 事件加到这里） |
+| 当前后端结构 | `core/coding/` 下 30 个文件 |
+| 当前前端结构 | `frontend/src/components/Coding*.vue` |
+| v4.1 events/tool_executor | `core/coding/events.py` + `core/coding/tool_executor.py` |
+| 旅游 LangGraph 图 | `agents/itinerary_tool.py` + `agents/graph.py` |
+| 旅游 MCP Server | `mcp_servers/amap/` + `mcp_servers/weather/` + `mcp_servers/scenic/` |
+| 旅游验证器 | `core/verifier.py` |
+| skill 注册机制 | `core/coding/skills/registry.py` |
+| tool 注册机制 | `core/coding/tools/registry.py` |
+| hermes-studio 参考 | `https://github.com/EKKOLearnAI/hermes-studio`（WebFetch） |
