@@ -354,3 +354,159 @@ Add `diff_attribution_rate`, `memory_recall_accuracy`, and `first_pass_test_succ
 ### 12.3 Implementation: branches 1-3 sequential
 
 Branches 1 (run correctness), 2 (workspace evidence), and 3 (memory) are sequential, not parallel. Each branch commits its event and storage contracts before the next begins. This overrides the product plan's "A and C can parallelize" note.
+
+## 13. V6-V8 Evolution Boundaries
+
+Sage must distinguish three different places where source code can exist:
+
+1. **Browser**: can render files returned by Sage, but cannot silently read a user's local directory or local Git working tree.
+2. **Server workspace**: a checkout owned by Sage. The backend can read files and run Git operations inside this checkout.
+3. **Local Companion workspace**: a future opt-in local process that can access a user-authorized local repository, including unpushed changes.
+
+Git status is meaningful only for the checkout where Git runs. GitHub APIs expose remote repositories, commits, branches, and pull requests; they do not expose uncommitted or unpushed changes from a developer's computer.
+
+### 13.1 Version boundaries
+
+| Version | Product shape | Core deliverables | Release audience |
+| --- | --- | --- | --- |
+| **V6** | Single-workspace coding harness | Correct run lifecycle, workspace diff, evidence-backed memory, benchmark, workbench inspection surfaces | Single-user controlled private preview |
+| **V7** | Cloud workspace platform | User/project/workspace ownership, GitHub repository import, isolated Git state, quotas, cleanup, and execution isolation | Invite-only beta |
+| **V8** | Hybrid local/cloud code intelligence | Local Companion, code RAG, AST knowledge graph, incremental indexing, and public-release hardening | Limited public beta or public launch |
+
+```text
+Sage Evolution
+├── V6: make the harness correct and observable
+│   ├── one configured server workspace
+│   ├── run lease and terminal state
+│   ├── workspace diff evidence
+│   ├── working and durable memory
+│   ├── deterministic harness benchmark
+│   └── single-user preview with basic CI/CD
+├── V7: make workspaces a platform resource
+│   ├── User -> Project -> Workspace ownership
+│   ├── server-side WorkspaceManager
+│   ├── GitHub App/OAuth repository import
+│   ├── isolated Git, run, diff, and memory state
+│   ├── sandbox, concurrency, quotas, and cleanup
+│   └── invite-only beta
+└── V8: deepen code intelligence and local integration
+    ├── Sage Local Companion
+    ├── authorized access to unpushed local changes
+    ├── revision-aware CodeIndex
+    ├── exact search + vector retrieval
+    ├── AST import/call/reference graph
+    ├── incremental indexing by Git revision
+    └── monitoring, audit, data governance, and public-release gates
+```
+
+### 13.2 V6: single-workspace private preview
+
+V6 continues to use one server-owned workspace configured by the operator. The browser never chooses an arbitrary server path. A session references a server-issued `workspace_id`, and the backend resolves that identifier to a canonical root.
+
+V6 may expose narrow read-only Git facts:
+
+- current branch and HEAD revision;
+- porcelain status summary;
+- bounded diff metadata;
+- changed-file list associated with a run.
+
+The model should receive Git facts through dedicated harness APIs or tools, not by relying on arbitrary shell commands. V6 does not onboard arbitrary user repositories and does not claim access to local unpushed changes.
+
+The V6 deployment phase begins after the harness acceptance gates. It adds a minimal CI/CD pipeline, reverse proxy, authentication gate, secret management, health checks, logging, and rollback for a single controlled workspace.
+
+### 13.3 V7: cloud workspaces for invited users
+
+V7 introduces `WorkspaceManager` as a control-plane boundary. The client requests a project or workspace by opaque identifier; it never submits a filesystem path.
+
+```mermaid
+flowchart LR
+    UI["Browser Workbench"] --> API["Authenticated Sage API"]
+    API --> WM["WorkspaceManager"]
+    WM --> META["Workspace metadata"]
+    WM --> CHECKOUT["Isolated server checkout"]
+    CHECKOUT --> GIT["Git status / diff / HEAD"]
+    CHECKOUT --> RUNNER["Bounded harness runner"]
+    META --> MEMORY["Workspace-scoped memory"]
+    META --> EVIDENCE["Session / run / diff evidence"]
+```
+
+The minimum ownership model is:
+
+```text
+User
+└── Project
+    └── Workspace
+        ├── Session
+        │   └── Run
+        │       ├── Trace
+        │       └── Diff artifact
+        ├── Project memory
+        └── Code index metadata
+```
+
+All persistent records must carry, directly or through enforced foreign keys:
+
+- `owner_id`;
+- `project_id`;
+- `workspace_id`;
+- `session_id` and `run_id` where applicable.
+
+Repository import uses a GitHub App or OAuth authorization. Clone/fetch credentials remain in the control plane, are short-lived where possible, and are never exposed to the browser, model prompt, tool output, trace, or workspace files.
+
+Each workspace has its own checkout, Git state, run evidence, project memory, resource limits, and deletion lifecycle. V7 requires execution isolation and quotas before invited users can run write or shell tools.
+
+### 13.4 V8: Local Companion and code intelligence
+
+A pure web application cannot observe local unpushed changes. If Sage must work against a developer's actual local working tree, V8 introduces an explicitly installed Local Companion.
+
+The Companion:
+
+- runs on the user's device;
+- requires explicit directory authorization;
+- reports a signed workspace identity and Git revision;
+- executes narrowly scoped file and Git operations locally;
+- streams bounded events and artifacts to the web control plane;
+- supports revocation and never accepts unauthenticated remote commands.
+
+Local and cloud workspaces implement the same logical `WorkspaceProvider` contract, but use different execution transports. A session records which provider produced each file, Git, tool, and diff event.
+
+Code intelligence is also a V8 concern. It is separate from durable memory:
+
+| Layer | Stores | Scope and invalidation |
+| --- | --- | --- |
+| Working memory | active objective, recent files, errors, tool state | session/run; rebuilt from evidence |
+| Durable project memory | approved conventions and decisions | project/workspace; explicit review |
+| Code RAG | code and documentation chunks with citations | repository revision; invalidate on changed content hash |
+| Knowledge graph | symbols and deterministic relationships | repository revision; incrementally rebuild affected nodes |
+
+Retrieval order is intentionally hybrid:
+
+1. exact file, symbol, and text search;
+2. vector retrieval over revision-scoped chunks;
+3. graph expansion through imports, calls, definitions, references, and tests;
+4. final reranking with file paths, line spans, symbol names, and revision citations.
+
+The knowledge graph should be AST-derived where language tooling permits. LLM-inferred relationships may be stored only as explicitly marked hypotheses, never as equivalent to extracted call or import edges.
+
+Every code-index record is keyed by `owner_id`, `workspace_id`, repository fingerprint, and Git revision. Incremental indexing uses Git diff and content hashes; stale index entries must not be retrieved for a newer revision without being labeled stale.
+
+### 13.5 Cross-version invariants
+
+These constraints apply from V6 onward so later versions do not require another storage rewrite:
+
+- Public APIs use opaque `workspace_id`; filesystem paths are internal implementation details.
+- Git status is computed only inside the resolved workspace provider.
+- Session, run, diff, memory, and index data are workspace-scoped.
+- Durable memory and code RAG are separate systems with different truth and invalidation rules.
+- Tool permissions are evaluated against workspace ownership and provider capabilities.
+- Secrets and repository credentials never enter model context or persisted trace content.
+- A browser-only session never claims access to unpushed local changes.
+- New retrieval systems provide cited context; they do not bypass normal file-read, permission, or freshness policies.
+
+### 13.6 Release gates by version
+
+**V6 private preview** requires a green deterministic benchmark, correct run terminal states, safe diff artifacts, reviewed memory, one fixed workspace, authentication gate, basic CI/CD, logs, health checks, and rollback.
+
+**V7 invite-only beta** additionally requires authenticated ownership checks, isolated workspace checkout and execution, repository credential handling, per-user quotas, cleanup/retention, audit logs, and cross-workspace isolation tests.
+
+**V8 public readiness** additionally requires Local Companion threat-model review if enabled, revision-correct RAG/graph retrieval, deletion/export controls, abuse and cost limits, monitoring and alerting, disaster recovery, and an external security review of workspace execution boundaries.
