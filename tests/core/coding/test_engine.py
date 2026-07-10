@@ -319,15 +319,15 @@ async def test_engine_detects_repeated_tool_calls(tmp_path: Path) -> None:
     assert len(tool_results) == 3
 
 
-async def test_engine_detects_repeated_write_same_path_different_content(tmp_path: Path) -> None:
-    """Loop guard catches repeated writes to the same path even if content differs."""
+async def test_engine_allows_successive_writes_with_different_content(tmp_path: Path) -> None:
+    """Successive writes to one file are not a loop when their content changes."""
     workspace = WorkspaceContext(root=tmp_path)
     tools = build_tool_registry(workspace)
-    # Model writes to the same path but varies content on each call.
+    # Model writes to the same path but refines the content on each call.
     calls = [
         f'<tool>{{"name":"write_file","args":{{"path":"test.txt","content":"attempt {i}"}}}}</tool>'
-        for i in range(8)
-    ]
+        for i in range(4)
+    ] + ["<final>finished refining test.txt</final>"]
     model = ScriptedApiClient(calls)
     # Must read file first for policy, then auto-approve writes.
     (tmp_path / "test.txt").write_text("original", encoding="utf-8")
@@ -349,5 +349,30 @@ async def test_engine_detects_repeated_write_same_path_different_content(tmp_pat
     events = [event async for event in engine.run_turn("循环写文件")]
 
     assert events[-1]["type"] == "final"
+    assert events[-1]["content"] == "finished refining test.txt"
+    assert len([event for event in events if event["type"] == "tool_result"]) == 4
+
+
+async def test_engine_detects_repeated_identical_write_calls(tmp_path: Path) -> None:
+    """Loop guard still stops identical write calls before the step limit."""
+    workspace = WorkspaceContext(root=tmp_path)
+    tools = build_tool_registry(workspace)
+    repeated_call = '<tool>{"name":"write_file","args":{"path":"test.txt","content":"same"}}</tool>'
+    engine = Engine(
+        model=ScriptedApiClient([repeated_call] * 8),
+        workspace=workspace,
+        tools=tools,
+        context_manager=ContextManager(),
+        permission_checker=PermissionChecker(permission_mode="auto"),
+        policy_checker=ToolPolicyChecker(workspace),
+        max_steps=50,
+    )
+    engine.policy_checker.check = lambda tool, args: type(
+        "P", (), {"allowed": True, "reason": "", "message": ""}
+    )()
+
+    events = [event async for event in engine.run_turn("循环写文件")]
+
+    assert events[-1]["type"] == "final"
     assert "重复调用" in events[-1]["content"]
-    assert "write_file" in events[-1]["content"]
+    assert len([event for event in events if event["type"] == "tool_result"]) == 3

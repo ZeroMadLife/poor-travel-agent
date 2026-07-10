@@ -71,9 +71,6 @@ function compactArgs(args: Record<string, unknown>) {
       <button class="session" :disabled="busy" @click="emit('respond', 'session')">
         本会话允许
       </button>
-      <button class="always" :disabled="busy" @click="emit('respond', 'always')">
-        始终允许
-      </button>
       <button class="allow" :disabled="busy" @click="emit('respond', 'once')">允许一次</button>
     </div>
 
@@ -204,8 +201,7 @@ button:disabled {
   background: #111827;
 }
 
-.session,
-.always {
+.session {
   border: 1px solid #d1d5db;
   color: #111827;
   background: #fff;

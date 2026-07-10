@@ -9,7 +9,7 @@ const open = ref(false)
 const changing = ref(false)
 
 const modes: Array<{ value: PermissionMode; label: string; description: string }> = [
-  { value: 'default', label: '默认', description: '修改文件和执行命令前请求确认。' },
+  { value: 'default', label: '默认', description: '每个高风险操作请求确认，可选择本会话允许。' },
   { value: 'accept_edits', label: '接受编辑', description: '自动执行文件编辑，命令仍需确认。' },
   { value: 'auto', label: '自动', description: '自动执行常规操作，危险命令仍需确认。' },
   { value: 'plan', label: '计划', description: '只读规划，不执行写入或命令工具。' },

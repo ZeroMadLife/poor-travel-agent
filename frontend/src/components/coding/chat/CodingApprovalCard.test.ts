@@ -2,7 +2,7 @@ import { mount } from '@vue/test-utils'
 import { expect, it } from 'vitest'
 import CodingApprovalCard from './CodingApprovalCard.vue'
 
-it('renders approval details and emits all approval choices', async () => {
+it('renders approval details and emits supported approval choices', async () => {
   const wrapper = mount(CodingApprovalCard, {
     props: {
       approval: {
@@ -21,10 +21,9 @@ it('renders approval details and emits all approval choices', async () => {
 
   await wrapper.find('button.allow').trigger('click')
   await wrapper.find('button.session').trigger('click')
-  await wrapper.find('button.always').trigger('click')
   await wrapper.find('button.deny').trigger('click')
 
-  expect(wrapper.emitted('respond')).toEqual([['once'], ['session'], ['always'], ['deny']])
+  expect(wrapper.emitted('respond')).toEqual([['once'], ['session'], ['deny']])
 })
 
 it('renders diff preview when provided', () => {

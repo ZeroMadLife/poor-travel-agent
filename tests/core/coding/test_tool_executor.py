@@ -164,6 +164,32 @@ async def test_ask_approval_granted_then_executes_tool(tmp_path: Path) -> None:
     assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "approved"
 
 
+async def test_session_approval_skips_the_next_matching_tool_prompt(tmp_path: Path) -> None:
+    """A session approval is reused for the same risky tool within the session."""
+    manager = ApprovalManager()
+    executor = _executor(tmp_path, approval_policy="ask", approval_manager=manager)
+    first_stream = executor.execute(
+        {"name": "write_file", "args": {"path": "first.txt", "content": "first"}}
+    )
+
+    first = await anext(first_stream)
+    assert isinstance(first, ApprovalRequiredEvent)
+    assert manager.resolve("coding_1", first.approval_id, "session") is True
+    _ = [event async for event in first_stream]
+
+    second_stream = executor.execute(
+        {"name": "write_file", "args": {"path": "second.txt", "content": "second"}}
+    )
+    events = [event async for event in second_stream]
+
+    assert [event.type for event in events] == [
+        "approval_granted",
+        "tool_call",
+        "tool_result",
+    ]
+    assert (tmp_path / "second.txt").read_text(encoding="utf-8") == "second"
+
+
 async def test_ask_approval_denied_returns_error(tmp_path: Path) -> None:
     """Denied approvals become tool_result errors and do not execute."""
     manager = ApprovalManager()

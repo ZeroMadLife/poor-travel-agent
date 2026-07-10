@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from collections.abc import AsyncIterator, Callable
 from typing import Any, Protocol
 
@@ -97,7 +98,7 @@ class Engine:
         protocol_retries = 0
         protocol_correction = ""
 
-        last_tool_signature: tuple[str, tuple[str, str, str]] = ("", ("", "", ""))
+        last_tool_signature: tuple[str, str] = ("", "")
         repeat_count = 0
         MAX_REPEAT = 3
 
@@ -157,18 +158,18 @@ class Engine:
             if kind in {"tool", "tools"}:
                 tool_payloads = [payload] if kind == "tool" else list(payload)
                 for tool_payload in tool_payloads:
-                    # Detect repeated tool calls to prevent infinite loops.
-                    # Only compare tool name + key identifier fields (path, command),
-                    # NOT the full args (which may include large content/text that
-                    # the model slightly varies on each retry, defeating exact match).
+                    # Detect only repeated *identical* calls. A coding task can
+                    # legitimately refine the same file across several writes, so
+                    # path alone is not enough to prove a loop.
                     tool_name = str(tool_payload.get("name", ""))
                     tool_args = tool_payload.get("args", {})
-                    key_fields = (
-                        str(tool_args.get("path", "")),
-                        str(tool_args.get("command", "")),
-                        str(tool_args.get("query", "")),
+                    serialized_args = json.dumps(
+                        tool_args if isinstance(tool_args, dict) else {},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        default=str,
                     )
-                    sig = (tool_name, key_fields)
+                    sig = (tool_name, serialized_args)
                     if sig == last_tool_signature:
                         repeat_count += 1
                     else:
