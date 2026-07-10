@@ -251,6 +251,13 @@ export type CodingWorkspaceDiffReadyEvent = CodingEventMeta & {
   truncated: boolean
 }
 
+export type CodingRunFinishedEvent = CodingEventMeta & {
+  type: 'run_finished'
+  status: string
+  duration_ms: number
+  tool_steps: number
+}
+
 export type CodingErrorEvent = CodingEventMeta & {
   type: 'error'
   message: string
@@ -273,6 +280,7 @@ export type CodingServerEvent =
   | CodingRuntimeModeChangedEvent
   | CodingPlanReadyForReviewEvent
   | CodingWorkspaceDiffReadyEvent
+  | CodingRunFinishedEvent
 
 export type CodingFileEntry = {
   name: string

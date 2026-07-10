@@ -56,6 +56,24 @@ def assert_approval_requested(events: list[dict[str, Any]]) -> bool:
     return any(event.get("type") == "approval_required" for event in events)
 
 
+def assert_run_finished(events: list[dict[str, Any]]) -> bool:
+    """Check that the runtime emitted a run_finished terminal event.
+
+    The real CodingRuntime always yields ``run_finished`` at the end of a turn
+    (after the workspace diff and before ``turn_finished``), even on errors.
+    """
+    return any(event.get("type") == "run_finished" for event in events)
+
+
+def assert_diff_ready(events: list[dict[str, Any]]) -> bool:
+    """Check that the runtime emitted a workspace_diff_ready event.
+
+    The runtime produces a bounded workspace diff artifact from before/after
+    snapshots after each run and surfaces it before ``run_finished``.
+    """
+    return any(event.get("type") == "workspace_diff_ready" for event in events)
+
+
 def assert_memory_saved(workspace_root: Path, fact: str) -> bool:
     """Check that a memory fact was saved under the workspace storage tree.
 

@@ -138,3 +138,44 @@ def test_large_diff_truncated(tmp_path: Path) -> None:
     assert diff.truncated is True
     assert len(diff.changed_files) == MAX_DIFF_FILES
     assert diff.file_count == MAX_DIFF_FILES
+
+
+def test_symlink_not_followed(tmp_path: Path) -> None:
+    """Symlinks are not diffed."""
+    (tmp_path / "real.txt").write_text("secret", encoding="utf-8")
+    (tmp_path / "link.txt").symlink_to(tmp_path / "real.txt")
+    tracker = WorkspaceDiffTracker(tmp_path)
+    tracker.snapshot_before_run()
+    (tmp_path / "real.txt").write_text("changed", encoding="utf-8")
+    diff = tracker.snapshot_after_run("run_1")
+
+    paths = [f.path for f in diff.changed_files]
+    assert "link.txt" not in paths
+
+
+def test_large_file_hash_detection(tmp_path: Path) -> None:
+    """Files >256KB still have hash for change detection."""
+    big = "x" * (300 * 1024)
+    (tmp_path / "big.txt").write_text(big, encoding="utf-8")
+    tracker = WorkspaceDiffTracker(tmp_path)
+    tracker.snapshot_before_run()
+    (tmp_path / "big.txt").write_text("y" * (300 * 1024), encoding="utf-8")
+    diff = tracker.snapshot_after_run("run_1")
+
+    changes = [f for f in diff.changed_files if f.path == "big.txt"]
+    assert len(changes) == 1
+    assert changes[0].status == "modified"
+
+
+def test_truncated_uses_changed_count_not_total(tmp_path: Path) -> None:
+    """truncated is based on changed files, not total workspace files."""
+    for i in range(60):
+        (tmp_path / f"f{i}.txt").write_text(f"content {i}", encoding="utf-8")
+    tracker = WorkspaceDiffTracker(tmp_path)
+    tracker.snapshot_before_run()
+    (tmp_path / "f0.txt").write_text("changed", encoding="utf-8")
+    (tmp_path / "f1.txt").write_text("changed", encoding="utf-8")
+    diff = tracker.snapshot_after_run("run_1")
+
+    assert diff.truncated is False
+    assert diff.file_count == 2

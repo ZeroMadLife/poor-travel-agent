@@ -64,17 +64,30 @@ describe('codingEvents', () => {
     expect(current.messages.value[0].tools![0].content).toBe('# Sage')
   })
 
-  it('finalizes assistant thinking message on terminal events', () => {
+  it('finalizes assistant thinking message on final events without triggering terminal refresh', () => {
     const current = state()
     current.messages.value = [{ role: 'assistant', content: '', tools: [], isThinking: true }]
     current.isThinking.value = true
 
     const effect = applyCodingEvent(current, { type: 'final', content: '完成' })
 
-    expect(effect.terminal).toBe(true)
+    expect(effect.terminal).toBeUndefined()
     expect(current.messages.value[0].content).toBe('完成')
     expect(current.messages.value[0].isThinking).toBe(false)
     expect(current.isThinking.value).toBe(false)
+  })
+
+  it('triggers terminal refresh on run_finished', () => {
+    const current = state()
+
+    const effect = applyCodingEvent(current, {
+      type: 'run_finished',
+      status: 'completed',
+      duration_ms: 1234,
+      tool_steps: 5,
+    })
+
+    expect(effect.terminal).toBe(true)
   })
 
   it('sets pending approval from approval_required', () => {
@@ -338,7 +351,7 @@ describe('codingEvents', () => {
 
     const effect = applyCodingEvent(current, { type: 'final', content: '完整的最终回复。' })
 
-    expect(effect.terminal).toBe(true)
+    expect(effect.terminal).toBeUndefined()
     expect(current.messages.value).toHaveLength(1)
     expect(current.messages.value[0].content).toBe('完整的最终回复。')
     expect(current.messages.value[0].isThinking).toBe(false)

@@ -298,10 +298,21 @@ async def coding_approval_respond(
 
 @router.post("/api/v1/coding/{session_id}/run/stop")
 async def stop_coding_run(session_id: str, request: Request) -> dict[str, bool]:
-    """Request cancellation for the active coding run."""
+    """Request cancellation for the active coding run.
+
+    The request body may optionally carry a ``run_id`` to guard against a late
+    stop request for a previous run polluting a newer active run. When
+    ``run_id`` is omitted or ``None`` the stop is applied unconditionally
+    (backward compatible).
+    """
     runtime = _require_runtime(request, session_id)
-    runtime.request_stop()
-    return {"ok": True}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    run_id = body.get("run_id") if isinstance(body, dict) else None
+    stopped = runtime.request_stop(run_id=run_id)
+    return {"ok": stopped}
 
 
 @router.post("/api/v1/coding/{session_id}/plan/approve")
@@ -326,6 +337,24 @@ async def reject_plan(session_id: str, request: Request) -> dict[str, str]:
     if not success:
         raise HTTPException(status_code=400, detail="no pending plan review")
     return {"status": "rejected", "mode": runtime.runtime_mode}
+
+
+@router.post("/api/v1/coding/{session_id}/memory/proposal/approve")
+async def approve_memory_proposal(session_id: str, request: Request) -> dict[str, str]:
+    """Approve the pending memory consolidation proposal and persist it."""
+    runtime = _require_runtime(request, session_id)
+    success = runtime.memory_manager.approve_dream()
+    if not success:
+        raise HTTPException(status_code=400, detail="no pending memory proposal")
+    return {"ok": "true", "status": "approved"}
+
+
+@router.post("/api/v1/coding/{session_id}/memory/proposal/reject")
+async def reject_memory_proposal(session_id: str, request: Request) -> dict[str, str]:
+    """Reject the pending memory consolidation proposal and discard it."""
+    runtime = _require_runtime(request, session_id)
+    runtime.memory_manager.reject_dream()
+    return {"ok": "true", "status": "rejected"}
 
 
 @router.get("/api/v1/coding/{session_id}/runs", response_model=CodingRunsResponse)

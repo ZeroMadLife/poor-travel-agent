@@ -64,7 +64,7 @@ class CodingRuntime:
         self.model_factory = model_factory or (lambda: model)
         self.storage_root = Path(storage_root)
         self.session_store = CodingSessionStore(self.storage_root / "sessions")
-        self.run_store = RunStore(self.storage_root / "runs", session_id=session_id)
+        self.run_store = RunStore(self.storage_root, session_id=session_id)
         self.diff_tracker = WorkspaceDiffTracker(self.workspace.root)
         self.session_event_bus = SessionEventBus(
             session_id=session_id,
@@ -331,10 +331,12 @@ class CodingRuntime:
 
         An active-run lease prevents two concurrent turns on the same session:
         if ``active_run_id`` is already set the call short-circuits with an
-        ``error`` event. The whole engine loop is wrapped in try/except so a
-        runtime exception is converted into an ``error`` event and the lease is
-        always released after emitting a ``run_finished`` + ``turn_finished``
-        pair.
+        ``error`` event. The whole engine loop plus post-run terminal events
+        are wrapped in an outer ``try/finally`` so the lease is always released
+        (and session state persisted) even when the consumer closes the async
+        generator early via ``aclose()`` / a dropped WebSocket (GeneratorExit).
+        Yielding is forbidden inside ``finally`` for an async generator, so the
+        cleanup block performs only state mutation (no yield).
         """
         # Active-run lease: reject if a run is already in progress.
         if self.active_run_id is not None:
@@ -383,122 +385,138 @@ class CodingRuntime:
             max_steps=50,
         )
         try:
-            async for event in engine.run_turn(
-                user_message, skill_prompt=skill_prompt, memory_block=memory_block
-            ):
-                event = {"run_id": run_id, **event}
-                # Skip persisting ephemeral text_delta events to avoid trace bloat;
-                # they are streamed to the client but not stored in the run trace.
-                if event["type"] != "text_delta":
-                    self.run_store.append_trace(run_id, event)
-                self.session_event_bus.emit(event["type"], event)
-                self._sync_session_state()
-                yield event
-                # Surface runtime mode changes (enter/exit plan mode) that happen
-                # during tool execution to the WebSocket stream. These mutations are
-                # performed on the runtime via the tool context, so they are not
-                # part of the engine's own event stream and must be re-injected.
-                if self.runtime_mode != prev_mode:
-                    mode_event = event_to_dict(
-                        RuntimeModeChangedEvent(
-                            run_id=run_id,
-                            mode=self.runtime_mode,
-                            topic=self.plan_mode.topic,
-                            plan_path=self.plan_mode.plan_path,
-                        )
-                    )
-                    mode_event = {"run_id": run_id, **mode_event}
-                    self.run_store.append_trace(run_id, mode_event)
-                    yield mode_event
-                    prev_mode = self.runtime_mode
-                # Surface a pending plan review exactly once per outstanding request.
-                # The exit_plan_mode tool submits a review instead of exiting; the
-                # actual mode switch happens when the user approves via the REST API.
-                pending = self.plan_review_manager.pending
-                if (
-                    pending is not None
-                    and not pending.event.is_set()
-                    and pending.review_id != last_notified_review_id
+            # --- Engine loop ---
+            try:
+                async for event in engine.run_turn(
+                    user_message, skill_prompt=skill_prompt, memory_block=memory_block
                 ):
-                    review_event = event_to_dict(
-                        PlanReadyForReviewEvent(
-                            run_id=run_id,
-                            review_id=pending.review_id,
-                            plan_path=pending.plan_path,
-                            summary=pending.summary,
+                    event = {"run_id": run_id, **event}
+                    # Skip persisting ephemeral text_delta events to avoid trace bloat;
+                    # they are streamed to the client but not stored in the run trace.
+                    if event["type"] != "text_delta":
+                        self.run_store.append_trace(run_id, event)
+                    self.session_event_bus.emit(event["type"], event)
+                    self._sync_session_state()
+                    yield event
+                    # Surface runtime mode changes (enter/exit plan mode) that happen
+                    # during tool execution to the WebSocket stream. These mutations are
+                    # performed on the runtime via the tool context, so they are not
+                    # part of the engine's own event stream and must be re-injected.
+                    if self.runtime_mode != prev_mode:
+                        mode_event = event_to_dict(
+                            RuntimeModeChangedEvent(
+                                run_id=run_id,
+                                mode=self.runtime_mode,
+                                topic=self.plan_mode.topic,
+                                plan_path=self.plan_mode.plan_path,
+                            )
                         )
-                    )
-                    review_event = {"run_id": run_id, **review_event}
-                    self.run_store.append_trace(run_id, review_event)
-                    self.session_event_bus.emit("plan_ready_for_review", review_event)
-                    yield review_event
-                    last_notified_review_id = pending.review_id
-        except Exception as exc:
-            error_event = event_to_dict(ErrorEvent(run_id=run_id, message=str(exc)))
-            error_event = {"run_id": run_id, **error_event}
-            self.run_store.append_trace(run_id, error_event)
-            self.session_event_bus.emit("error", error_event)
-            yield error_event
+                        mode_event = {"run_id": run_id, **mode_event}
+                        self.run_store.append_trace(run_id, mode_event)
+                        yield mode_event
+                        prev_mode = self.runtime_mode
+                    # Surface a pending plan review exactly once per outstanding request.
+                    # The exit_plan_mode tool submits a review instead of exiting; the
+                    # actual mode switch happens when the user approves via the REST API.
+                    pending = self.plan_review_manager.pending
+                    if (
+                        pending is not None
+                        and not pending.event.is_set()
+                        and pending.review_id != last_notified_review_id
+                    ):
+                        review_event = event_to_dict(
+                            PlanReadyForReviewEvent(
+                                run_id=run_id,
+                                review_id=pending.review_id,
+                                plan_path=pending.plan_path,
+                                summary=pending.summary,
+                            )
+                        )
+                        review_event = {"run_id": run_id, **review_event}
+                        self.run_store.append_trace(run_id, review_event)
+                        self.session_event_bus.emit("plan_ready_for_review", review_event)
+                        yield review_event
+                        last_notified_review_id = pending.review_id
+            except Exception as exc:
+                error_event = event_to_dict(ErrorEvent(run_id=run_id, message=str(exc)))
+                error_event = {"run_id": run_id, **error_event}
+                self.run_store.append_trace(run_id, error_event)
+                self.session_event_bus.emit("error", error_event)
+                yield error_event
 
-        # Post-run terminal events. Always emitted (even after an error) so the
-        # client learns the run has ended and the lease is released. Note: these
-        # run AFTER try/except but outside any finally block, so yielding here is
-        # legal for an async generator (yield is forbidden inside finally).
-        # Produce a bounded workspace diff artifact from before/after snapshots
-        # and surface it as a workspace_diff_ready event before run_finished.
-        try:
-            diff = self.diff_tracker.snapshot_after_run(run_id)
-            self.diff_tracker.write_artifact(diff, self.run_store.evidence_root)
-            diff_event = event_to_dict(
-                WorkspaceDiffReadyEvent(
+            # --- Post-run terminal events ---
+            # Always emitted (even after an error) so the client learns the run
+            # has ended. These run inside the outer try block (yield is legal
+            # here); if the consumer closes the generator mid-yield the outer
+            # finally still releases the lease. Produce a bounded workspace diff
+            # artifact from before/after snapshots and surface it as a
+            # workspace_diff_ready event before run_finished.
+            try:
+                diff = self.diff_tracker.snapshot_after_run(run_id)
+                self.diff_tracker.write_artifact(diff, self.run_store.evidence_root)
+                diff_event = event_to_dict(
+                    WorkspaceDiffReadyEvent(
+                        run_id=run_id,
+                        changed_files=[f.path for f in diff.changed_files],
+                        file_count=diff.file_count,
+                        truncated=diff.truncated,
+                    )
+                )
+                diff_event = {"run_id": run_id, **diff_event}
+                self.run_store.append_trace(run_id, diff_event)
+                self.session_event_bus.emit("workspace_diff_ready", diff_event)
+                yield diff_event
+            except Exception as exc:  # diff must never break the run
+                error_event = event_to_dict(
+                    ErrorEvent(run_id=run_id, message=f"workspace diff failed: {exc}")
+                )
+                error_event = {"run_id": run_id, **error_event}
+                self.run_store.append_trace(run_id, error_event)
+                self.session_event_bus.emit("error", error_event)
+                yield error_event
+
+            duration_ms = int((time.monotonic() - run_start_time) * 1000)
+            status = self.run_store.run_status(run_id)
+            tool_steps = self.run_store.run_tool_count(run_id)
+            finished = event_to_dict(
+                RunFinishedEvent(
                     run_id=run_id,
-                    changed_files=[f.path for f in diff.changed_files],
-                    file_count=diff.file_count,
-                    truncated=diff.truncated,
+                    status=status,
+                    duration_ms=duration_ms,
+                    tool_steps=tool_steps,
                 )
             )
-            diff_event = {"run_id": run_id, **diff_event}
-            self.run_store.append_trace(run_id, diff_event)
-            self.session_event_bus.emit("workspace_diff_ready", diff_event)
-            yield diff_event
-        except Exception as exc:  # diff must never break the run
-            error_event = event_to_dict(
-                ErrorEvent(run_id=run_id, message=f"workspace diff failed: {exc}")
-            )
-            error_event = {"run_id": run_id, **error_event}
-            self.run_store.append_trace(run_id, error_event)
-            self.session_event_bus.emit("error", error_event)
-            yield error_event
+            finished = {"run_id": run_id, **finished}
+            self.run_store.append_trace(run_id, finished)
+            self.session_event_bus.emit("run_finished", finished)
+            yield finished
 
-        duration_ms = int((time.monotonic() - run_start_time) * 1000)
-        status = self.run_store.run_status(run_id)
-        tool_steps = self.run_store.run_tool_count(run_id)
-        finished = event_to_dict(
-            RunFinishedEvent(
-                run_id=run_id,
-                status=status,
-                duration_ms=duration_ms,
-                tool_steps=tool_steps,
-            )
-        )
-        finished = {"run_id": run_id, **finished}
-        self.run_store.append_trace(run_id, finished)
-        self.session_event_bus.emit("run_finished", finished)
-        yield finished
+            finished_turn = event_to_dict(TurnFinishedEvent(run_id=run_id))
+            finished_turn = {"run_id": run_id, **finished_turn}
+            self.run_store.append_trace(run_id, finished_turn)
+            self.session_event_bus.emit("turn_finished", finished_turn)
+            yield finished_turn
+        finally:
+            # Cleanup: release the lease and persist session state. This runs
+            # whether the turn completed normally, the engine raised, or the
+            # consumer closed the generator early (GeneratorExit). Note: no
+            # yield is allowed inside finally for an async generator.
+            self.stop_requested = False
+            self.active_run_id = None
+            self._save_session()
 
-        finished_turn = event_to_dict(TurnFinishedEvent(run_id=run_id))
-        finished_turn = {"run_id": run_id, **finished_turn}
-        self.run_store.append_trace(run_id, finished_turn)
-        self.session_event_bus.emit("turn_finished", finished_turn)
-        yield finished_turn
+    def request_stop(self, run_id: str | None = None) -> bool:
+        """Request cancellation for the current or next engine checkpoint.
 
-        # Cleanup: release the lease and persist session state.
-        self.stop_requested = False
-        self.active_run_id = None
-        self._save_session()
-
-    def request_stop(self) -> None:
-        """Request cancellation for the current or next engine checkpoint."""
+        If ``run_id`` is provided and does not match the currently active run,
+        the request is rejected (returns ``False``) without mutating state.
+        This prevents a late stop request from a previous run from polluting a
+        newer run on the same session. When ``run_id`` is ``None`` (the
+        default) the request is accepted unconditionally for backward
+        compatibility.
+        """
+        if run_id is not None and self.active_run_id != run_id:
+            return False
         self.stop_requested = True
         self.approval_manager.cancel_session(self.session_id)
         self.plan_review_manager.cancel()
@@ -506,6 +524,7 @@ class CodingRuntime:
             "stop_requested",
             {"session_id": self.session_id, "run_id": self.active_run_id},
         )
+        return True
 
     def _permission_checker(self) -> PermissionChecker:
         return PermissionChecker(

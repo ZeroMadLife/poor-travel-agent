@@ -161,6 +161,14 @@ class WorkspaceDiffReadyEvent(RunEventBase):
     truncated: bool = False
 
 
+class MemoryProposalReadyEvent(RunEventBase):
+    """Memory consolidation proposals are ready for user review."""
+
+    type: Literal["memory_proposal_ready"] = "memory_proposal_ready"
+    proposal_id: str = ""
+    facts: list[dict[str, str]] = Field(default_factory=list)
+
+
 RunEvent: TypeAlias = (
     TurnStartedEvent
     | ModelRequestedEvent
@@ -179,6 +187,7 @@ RunEvent: TypeAlias = (
     | RuntimeModeChangedEvent
     | PlanReadyForReviewEvent
     | WorkspaceDiffReadyEvent
+    | MemoryProposalReadyEvent
     | RunFinishedEvent
 )
 

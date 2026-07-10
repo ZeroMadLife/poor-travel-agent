@@ -103,6 +103,16 @@ class WorkspaceDiffTracker:
         changes: list[FileChange] = []
 
         all_paths = set(self._before.keys()) | set(after.keys())
+        # Count total changed files (independent of the MAX_DIFF_FILES cap) so
+        # `truncated` reflects changed-file count, not total workspace size.
+        total_changed = 0
+        for path in sorted(all_paths):
+            before = self._before.get(path)
+            after_snap = after.get(path)
+            if before and after_snap and before.hash == after_snap.hash:
+                continue  # unchanged
+            total_changed += 1
+
         for path in sorted(all_paths):
             before = self._before.get(path)
             after_snap = after.get(path)
@@ -144,13 +154,13 @@ class WorkspaceDiffTracker:
                 if not before.is_text or not after_snap.is_text:
                     change.binary = True
                 else:
-                    change.diff = self._generate_diff(path, before, after_snap)
+                    change.diff, change.truncated = self._generate_diff(path, before, after_snap)
                 changes.append(change)
 
             if len(changes) >= MAX_DIFF_FILES:
                 break
 
-        truncated = len(all_paths) > MAX_DIFF_FILES
+        truncated = total_changed > MAX_DIFF_FILES
         return WorkspaceDiff(
             run_id=run_id,
             changed_files=changes,
@@ -181,25 +191,24 @@ class WorkspaceDiffTracker:
                 ):
                     continue
                 fpath = Path(root) / fname
+                if fpath.is_symlink():
+                    continue  # never follow symlinks
                 rel_path = str(fpath.relative_to(self.workspace_root))
                 try:
                     stat = fpath.stat()
                 except OSError:
                     continue
                 snap = FileSnapshot(path=rel_path, size=stat.st_size)
-                if stat.st_size > MAX_FILE_SIZE:
-                    snap.is_text = False
-                else:
-                    try:
-                        content_bytes = fpath.read_bytes()
-                        snap.hash = hashlib.sha256(content_bytes).hexdigest()
-                        snap.is_text = self._is_text(content_bytes)
-                        # Store content for small text files so a real unified
-                        # diff can be generated after the run.
-                        if snap.is_text and stat.st_size <= STORE_CONTENT_LIMIT:
-                            snap.content = content_bytes.decode("utf-8", errors="replace")
-                    except (OSError, PermissionError):
-                        snap.exists = False
+                try:
+                    content_bytes = fpath.read_bytes()
+                    snap.hash = hashlib.sha256(content_bytes).hexdigest()
+                    snap.is_text = self._is_text(content_bytes) and stat.st_size <= MAX_FILE_SIZE
+                    # Store content for small text files so a real unified
+                    # diff can be generated after the run.
+                    if snap.is_text and stat.st_size <= STORE_CONTENT_LIMIT:
+                        snap.content = content_bytes.decode("utf-8", errors="replace")
+                except (OSError, PermissionError):
+                    snap.exists = False
                 snapshots[rel_path] = snap
         return snapshots
 
@@ -210,8 +219,22 @@ class WorkspaceDiffTracker:
 
     def _generate_diff(
         self, rel_path: str, before: FileSnapshot, after: FileSnapshot
-    ) -> str:
-        """Generate unified diff for a modified text file."""
+    ) -> tuple[str, bool]:
+        """Return (diff_text, truncated) for a modified text file.
+
+        - If neither side stored its content (both too large), return a short
+          summary referencing the hashes instead of a full-file diff.
+        - Otherwise generate a real unified diff, reading the after content
+          from disk if it wasn't stored, and truncate the result if it exceeds
+          MAX_FILE_SIZE.
+        """
+        if not before.content and not after.content:
+            # Both too large to store content; a full diff would be misleading.
+            return (
+                f"File modified (hash: {before.hash[:8]} -> {after.hash[:8]})",
+                False,
+            )
+
         after_text = after.content
         if not after_text:
             # After content wasn't stored (too large); read it now if possible.
@@ -219,8 +242,8 @@ class WorkspaceDiffTracker:
             try:
                 after_text = fpath.read_text(encoding="utf-8", errors="replace")
             except OSError:
-                return ""
-        before_lines = before.content.splitlines(keepends=True)
+                return ("", False)
+        before_lines = before.content.splitlines(keepends=True) if before.content else []
         after_lines = after_text.splitlines(keepends=True)
         diff = difflib.unified_diff(
             before_lines,
@@ -228,7 +251,10 @@ class WorkspaceDiffTracker:
             fromfile=f"a/{rel_path}",
             tofile=f"b/{rel_path}",
         )
-        return "".join(diff)[:MAX_FILE_SIZE]  # Truncate to prevent huge diffs
+        result = "".join(diff)
+        if len(result) > MAX_FILE_SIZE:
+            return (result[:MAX_FILE_SIZE], True)
+        return (result, False)
 
     def _generate_added_diff(self, rel_path: str, after: FileSnapshot) -> str:
         """Generate unified diff for a newly added text file."""

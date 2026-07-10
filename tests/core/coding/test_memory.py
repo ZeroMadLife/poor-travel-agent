@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from core.coding.memory import (
@@ -168,3 +169,121 @@ def test_memory_manager_combines_working_and_durable(tmp_path: Path) -> None:
     assert "do the thing" in block
     assert "<durable-memory>" in block
     assert "always run ruff" in block
+
+
+def test_remember_records_source_ref(tmp_path: Path) -> None:
+    """remember persists source_ref as a JSON line in the topic file."""
+    storage = tmp_path / "storage"
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    ws_id = workspace_id_from_path(workspace)
+
+    mem = DurableMemory(storage, ws_id)
+    mem.remember("use ruff", topic="project-conventions", source_ref="run_abc12345")
+
+    topic_path = mem.root / "project-conventions.md"
+    lines = [
+        line
+        for line in topic_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(lines) == 1
+    data = json.loads(lines[0])
+    assert data["content"] == "use ruff"
+    assert data["source_ref"] == "run_abc12345"
+    assert data["source"] == "explicit_remember"
+
+    # The fact round-trips through list_facts with source_ref intact.
+    facts = mem.list_facts("project-conventions")
+    assert len(facts) == 1
+    assert facts[0].source_ref == "run_abc12345"
+    # The index surfaces the run prefix.
+    assert "run_abc1" in mem.get_index()
+
+
+def test_dream_generates_pending_proposal(tmp_path: Path) -> None:
+    """propose_dream stages a pending proposal with a proposal id."""
+    storage = tmp_path / "storage"
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    manager = MemoryManager(storage, workspace)
+    manager.remember("use ruff for linting", topic="project-conventions")
+    # No pending proposal before proposing.
+    assert manager.pending_proposal is None
+
+    proposals = manager.propose_dream()
+
+    assert proposals
+    assert all(p.status == "proposed" for p in proposals)
+    pending = manager.pending_proposal
+    assert pending is not None
+    assert pending["proposal_id"].startswith("dream_")
+    assert pending["facts"][0]["content"] == "use ruff for linting"
+
+
+def test_approve_dream_writes_to_durable(tmp_path: Path) -> None:
+    """approve_dream persists the pending proposal to durable topic files."""
+    storage = tmp_path / "storage"
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    manager = MemoryManager(storage, workspace)
+    manager.remember("use ruff for linting", topic="project-conventions")
+    manager.propose_dream()
+
+    # The proposal has not yet been written as active facts.
+    topic_path = manager.durable.root / "project-conventions.md"
+    before = topic_path.read_text(encoding="utf-8")
+    active_count_before = len(manager.durable.list_facts())
+
+    approved = manager.approve_dream()
+
+    assert approved is True
+    # Approving clears the pending proposal.
+    assert manager.pending_proposal is None
+    # Approving wrote new active facts to durable storage.
+    assert len(manager.durable.list_facts()) == active_count_before + 1
+    # The topic file grew.
+    assert topic_path.read_text(encoding="utf-8") != before
+
+
+def test_reject_dream_clears_proposal(tmp_path: Path) -> None:
+    """reject_dream discards the pending proposal without mutating durable files."""
+    storage = tmp_path / "storage"
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    manager = MemoryManager(storage, workspace)
+    manager.remember("use ruff for linting", topic="project-conventions")
+    manager.propose_dream()
+    topic_path = manager.durable.root / "project-conventions.md"
+    before = topic_path.read_text(encoding="utf-8")
+
+    rejected = manager.reject_dream()
+
+    assert rejected is True
+    assert manager.pending_proposal is None
+    # No new active facts are written when rejecting.
+    assert topic_path.read_text(encoding="utf-8") == before
+    assert len(manager.durable.list_facts()) == 1
+
+
+def test_list_facts_backward_compat(tmp_path: Path) -> None:
+    """Old `- content` formatted topic files still parse into facts."""
+    storage = tmp_path / "storage"
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    mem = DurableMemory(storage, workspace_id_from_path(workspace))
+
+    # Simulate a legacy topic file using the old markdown bullet format.
+    topic_path = mem.root / "project-conventions.md"
+    topic_path.write_text("- legacy convention one\n- legacy convention two\n", encoding="utf-8")
+    # Also place a JSON-line entry alongside it to ensure mixed parsing works.
+    mem.remember("new convention", topic="project-conventions", source_ref="run_1")
+
+    facts = mem.list_facts("project-conventions")
+    contents = {f.content for f in facts}
+    assert "legacy convention one" in contents
+    assert "legacy convention two" in contents
+    assert "new convention" in contents

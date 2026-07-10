@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -67,15 +68,7 @@ class DurableMemory:
         facts: list[MemoryFact] = []
         topics = [topic] if topic else list(self.TOPIC_FILES.keys())
         for t in topics:
-            path = self.root / self.TOPIC_FILES.get(t, "")
-            if not path.is_file():
-                continue
-            for line in path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line.startswith("- "):
-                    facts.append(
-                        MemoryFact(topic=t, content=line[2:].strip(), status="active")
-                    )
+            facts.extend(self._read_topic_file(t))
         return facts
 
     def get_index(self) -> str:
@@ -129,8 +122,46 @@ class DurableMemory:
 
     def _append_topic_file(self, fact: MemoryFact) -> None:
         topic_path = self.root / self.TOPIC_FILES.get(fact.topic, "decisions.md")
+        entry = json.dumps(
+            {
+                "content": fact.content,
+                "source": fact.source,
+                "source_ref": fact.source_ref,
+                "created_at": fact.created_at,
+            },
+            ensure_ascii=False,
+        )
         with topic_path.open("a", encoding="utf-8") as f:
-            f.write(f"- {fact.content}\n")
+            f.write(entry + "\n")
+
+    def _read_topic_file(self, topic: str) -> list[MemoryFact]:
+        """Parse a topic file into facts (JSON lines, backward-compat with `- content`)."""
+        path = self.root / self.TOPIC_FILES.get(topic, "")
+        if not path.is_file():
+            return []
+        facts: list[MemoryFact] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                facts.append(
+                    MemoryFact(
+                        topic=topic,
+                        content=data.get("content", ""),
+                        source=data.get("source", "explicit_remember"),
+                        source_ref=data.get("source_ref", ""),
+                        created_at=data.get("created_at", ""),
+                        status="active",
+                    )
+                )
+            except json.JSONDecodeError:
+                if line.startswith("- "):
+                    facts.append(
+                        MemoryFact(topic=topic, content=line[2:].strip(), status="active")
+                    )
+        return facts
 
     def _rebuild_index(self) -> None:
         lines = ["# Memory Index", ""]
@@ -138,12 +169,11 @@ class DurableMemory:
             path = self.root / filename
             if not path.is_file():
                 continue
-            topic_lines = path.read_text(encoding="utf-8").splitlines()
-            count = sum(1 for line in topic_lines if line.strip().startswith("- "))
-            lines.append(f"## {topic} ({count} facts)")
-            for line in topic_lines:
-                if line.strip().startswith("- "):
-                    lines.append(f"  {line.strip()}")
+            facts = self._read_topic_file(topic)
+            lines.append(f"## {topic} ({len(facts)} facts)")
+            for fact in facts:
+                ref = f" [run: {fact.source_ref[:8]}]" if fact.source_ref else ""
+                lines.append(f"  - {fact.content}{ref}")
             lines.append("")
         self.index_path.write_text("\n".join(lines), encoding="utf-8")
 

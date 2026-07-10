@@ -1,8 +1,12 @@
 """Benchmark runner for the Sage coding harness.
 
-Drives 10 deterministic scenarios through the real Engine + tool stack using a
-ScriptedApiClient (no live LLM). The benchmark is informational: it emits a JSON
-and Markdown report under ``evals/coding/results/`` and never gates the build.
+Drives 10 deterministic scenarios through the real CodingRuntime + tool stack
+using a ScriptedApiClient (no live LLM). Driving the real runtime exercises
+the active-run lease, run_finished terminal event, workspace diff artifact,
+session evidence, and memory injection paths that a direct Engine construction
+would bypass. The benchmark is informational: it emits JSON, Markdown, and a
+self-contained HTML report under ``evals/coding/results/`` and never gates the
+build.
 """
 
 from __future__ import annotations
@@ -13,7 +17,6 @@ import shutil
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -24,35 +27,20 @@ if str(_REPO_ROOT) not in sys.path:
 
 from tests.core.coding.scripted_api_client import ScriptedApiClient  # noqa: E402
 
-from core.coding.context import ContextManager, WorkspaceContext  # noqa: E402
-from core.coding.engine.engine import Engine  # noqa: E402
-from core.coding.memory import MemoryManager  # noqa: E402
-from core.coding.tool_executor import (  # noqa: E402
-    ApprovalManager,
-    PermissionChecker,
-    ToolPolicyChecker,
-)
-from core.coding.tools.base import ToolContext  # noqa: E402
-from core.coding.tools.registry import build_tool_registry  # noqa: E402
+from core.coding.runtime import CodingRuntime  # noqa: E402
 from evals.coding.assertions import (  # noqa: E402
     assert_approval_requested,
+    assert_diff_ready,
     assert_files_match,
     assert_memory_saved,
     assert_no_write,
     assert_policy_denial,
+    assert_run_finished,
     assert_tool_calls_match,
 )
 from evals.coding.metrics import BenchmarkReport, ScenarioResult  # noqa: E402
+from evals.coding.report import generate_html_report  # noqa: E402
 from evals.coding.scenarios import SCENARIOS, Scenario  # noqa: E402
-
-
-@dataclass
-class _Harness:
-    engine: Engine
-    workspace: WorkspaceContext
-    approval_manager: ApprovalManager | None
-    session_id: str
-    activated_tools: set[str]
 
 
 def _permission_mode_for(scenario: Scenario) -> str:
@@ -66,94 +54,75 @@ def _permission_mode_for(scenario: Scenario) -> str:
     return "auto"
 
 
-def _build_harness(scenario: Scenario, workspace_root: Path, storage_root: Path) -> _Harness:
-    """Assemble Engine + tools wired for one scenario."""
-    workspace = WorkspaceContext(root=workspace_root)
-    activated_tools: set[str] = set()
-    # Memory scenarios need a runtime exposing memory_manager to the remember tool.
-    memory_manager = MemoryManager(storage_root, workspace.root) if scenario.memory_fact else None
-    tool_context = ToolContext(runtime=_FakeRuntime(memory_manager)) if memory_manager else None
-    tools = build_tool_registry(
-        workspace, tool_context=tool_context, activated_tools=activated_tools
-    )
-    permission_mode = _permission_mode_for(scenario)
-    permission_checker = PermissionChecker(
-        permission_mode=permission_mode,
-        approval_policy="auto" if permission_mode == "auto" else "",
-    )
-    policy_checker = ToolPolicyChecker(workspace)
+def _build_runtime(
+    scenario: Scenario,
+    workspace_root: Path,
+    storage_root: Path,
+    *,
+    session_suffix: str = "",
+    model_responses: list[str] | None = None,
+    permission_mode: str | None = None,
+) -> CodingRuntime:
+    """Assemble a real CodingRuntime wired for one scenario.
 
-    # The default-mode approval scenario must go through the real approval flow so
-    # an ``approval_required`` event is emitted; other scenarios keep it simple.
-    approval_manager: ApprovalManager | None = None
-    session_id = ""
-    if scenario.expected_approval:
-        approval_manager = ApprovalManager()
-        session_id = f"bench_{scenario.name}"
-
-    engine = Engine(
-        model=ScriptedApiClient(scenario.model_responses),
-        workspace=workspace,
-        tools=tools,
-        context_manager=ContextManager(),
-        permission_checker=permission_checker,
-        policy_checker=policy_checker,
-        approval_manager=approval_manager,
+    Driving the runtime (rather than constructing an Engine directly) routes
+    the turn through the lease, diff tracker, memory manager, session event
+    bus, and run_finished/turn_finished terminal events. The runtime exposes
+    ``memory_manager`` and ``approval_manager`` to the tool context, so the
+    ``remember`` tool and the default-mode approval flow work end to end.
+    """
+    session_id = f"bench_{scenario.name}{session_suffix}"
+    responses = (
+        list(model_responses) if model_responses is not None else list(scenario.model_responses)
+    )
+    return CodingRuntime(
         session_id=session_id,
-        activated_tools=activated_tools,
-        max_steps=20,
+        workspace_root=workspace_root,
+        model=ScriptedApiClient(responses),
+        storage_root=storage_root,
+        model_factory=lambda: ScriptedApiClient(list(responses)),
+        permission_mode=permission_mode or _permission_mode_for(scenario),
+        save_on_init=False,
     )
-    return _Harness(
-        engine=engine,
-        workspace=workspace,
-        approval_manager=approval_manager,
-        session_id=session_id,
-        activated_tools=activated_tools,
-    )
-
-
-class _FakeRuntime:
-    """Minimal runtime stub exposing a MemoryManager to memory tools."""
-
-    def __init__(self, memory_manager: MemoryManager | None) -> None:
-        self.memory_manager = memory_manager
 
 
 async def _run_turn_with_auto_approval(
-    harness: _Harness, prompt: str, timeout: float = 30.0
+    runtime: CodingRuntime, prompt: str, timeout: float = 30.0
 ) -> list[dict[str, Any]]:
     """Run a turn, granting any pending approval so the flow is non-blocking.
 
     Used by the default-mode approval scenario: the engine emits
     ``approval_required`` and then blocks waiting for resolution. We run the turn
-    in a task and, in parallel, poll the approval manager for a pending entry and
-    resolve it, which unblocks the turn.
+    in a task and, in parallel, poll the runtime's approval manager for a
+    pending entry and resolve it, which unblocks the turn.
     """
     events: list[dict[str, Any]] = []
 
     async def collect() -> None:
-        async for event in harness.engine.run_turn(prompt):
+        async for event in runtime.run_turn(prompt):
             events.append(event)
 
     task = asyncio.create_task(collect())
 
     async def grant() -> None:
-        # Wait until the engine submits an approval entry, then grant it once.
+        # Wait until the runtime submits an approval entry, then grant it once.
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             pending = (
-                harness.approval_manager.pending(harness.session_id)
-                if harness.approval_manager
+                runtime.approval_manager.pending(runtime.session_id)
+                if runtime.approval_manager
                 else None
             )
-            if pending is not None and harness.approval_manager is not None:
-                harness.approval_manager.resolve(harness.session_id, pending["approval_id"], "once")
+            if pending is not None and runtime.approval_manager is not None:
+                runtime.approval_manager.resolve(
+                    runtime.session_id, pending["approval_id"], "once"
+                )
                 return
             await asyncio.sleep(0.02)
         # No approval surfaced within the window; leave the turn to finish/timeout.
 
-    granters = []
-    if harness.approval_manager is not None:
+    granters: list[asyncio.Task[None]] = []
+    if runtime.approval_manager is not None:
         granters.append(asyncio.create_task(grant()))
 
     try:
@@ -180,15 +149,15 @@ async def run_scenario(scenario: Scenario) -> ScenarioResult:
         # Pin durable-memory storage inside the workspace (.coding/) so the
         # memory assertions can find persisted facts and cleanup is automatic.
         storage_root = workspace_root / ".coding"
-        harness = _build_harness(scenario, workspace_root, storage_root)
+        runtime = _build_runtime(scenario, workspace_root, storage_root)
 
         start_time = time.monotonic()
         events: list[dict[str, Any]] = []
         try:
             if scenario.expected_approval:
-                events = await _run_turn_with_auto_approval(harness, scenario.prompt)
+                events = await _run_turn_with_auto_approval(runtime, scenario.prompt)
             else:
-                async for event in harness.engine.run_turn(scenario.prompt):
+                async for event in runtime.run_turn(scenario.prompt):
                     events.append(event)
         except Exception:  # benchmark must not crash the suite
             pass
@@ -233,6 +202,37 @@ async def run_scenario(scenario: Scenario) -> ScenarioResult:
         ):
             passed = False
             detail = "memory not saved"
+
+        # Controlled edits drive the real runtime, which always emits
+        # run_finished and workspace_diff_ready terminal events. Asserting
+        # their presence verifies the lease + diff lifecycle end to end.
+        if scenario.category == "controlled_edit":
+            if not assert_run_finished(events) and not detail:
+                passed = False
+                detail = "run_finished event not emitted"
+            if not assert_diff_ready(events) and not detail:
+                passed = False
+                detail = "workspace_diff_ready event not emitted"
+
+        # memory_continuity: run a second session on the same workspace to
+        # verify the durable fact written in the first session is recalled
+        # into the memory context block of a fresh runtime.
+        if scenario.category == "memory_continuity" and scenario.memory_fact and not detail:
+            runtime2 = _build_runtime(
+                scenario,
+                workspace_root,
+                storage_root,
+                session_suffix="_recall",
+                model_responses=["<final>recalled</final>"],
+                permission_mode="auto",
+            )
+            runtime2.memory_manager.build_working_memory(
+                runtime2.session, runtime2.runtime_mode, runtime2.permission_mode
+            )
+            context = runtime2.memory_manager.get_context_block()
+            if scenario.memory_fact not in context:
+                passed = False
+                detail = "memory not recalled in second session"
 
         # Compute metrics
         tool_calls = sum(1 for e in events if e.get("type") == "tool_call")
@@ -280,11 +280,12 @@ async def run_benchmark() -> BenchmarkReport:
     return report
 
 
-def _write_reports(report: BenchmarkReport) -> tuple[Path, Path]:
+def _write_reports(report: BenchmarkReport) -> tuple[Path, Path, Path]:
     results_dir = Path("evals/coding/results")
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     results_dir.mkdir(parents=True, exist_ok=True)
     d = report.to_dict()
+    d["timestamp"] = timestamp
 
     json_path = results_dir / f"{timestamp}-report.json"
     json_path.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -303,7 +304,10 @@ def _write_reports(report: BenchmarkReport) -> tuple[Path, Path]:
         )
     md_path = results_dir / f"{timestamp}-report.md"
     md_path.write_text("\n".join(md_lines), encoding="utf-8")
-    return json_path, md_path
+
+    html_path = results_dir / f"{timestamp}-report.html"
+    generate_html_report(d, html_path)
+    return json_path, md_path, html_path
 
 
 def main() -> None:
@@ -318,8 +322,8 @@ def main() -> None:
         print(f"  {key}: {value}")
     print()
 
-    json_path, md_path = _write_reports(report)
-    print(f"Report saved to {json_path} and {md_path}")
+    json_path, md_path, html_path = _write_reports(report)
+    print(f"Report saved to {json_path}, {md_path}, and {html_path}")
 
 
 if __name__ == "__main__":

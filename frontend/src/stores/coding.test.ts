@@ -554,6 +554,12 @@ describe('coding store', () => {
     store.isThinking = true
 
     store.handleServerEvent({ type: 'final', content: '完成' } as never)
+    store.handleServerEvent({
+      type: 'run_finished',
+      status: 'completed',
+      duration_ms: 1234,
+      tool_steps: 5,
+    } as never)
     await new Promise((resolve) => setTimeout(resolve, 0))
 
     expect(fetchMock).toHaveBeenCalledWith(expect.any(URL))

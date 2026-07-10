@@ -196,7 +196,10 @@ export function applyCodingEvent(
     state.isThinking.value = false
     state.thinkingPhase.value = ''
     settleAllExecutionActivities(state.messages.value)
-    return { terminal: true }
+    return {} // NOT terminal -- wait for run_finished to refresh
+  }
+  if (event.type === 'run_finished') {
+    return { terminal: true } // NOW refresh runs/sessions
   }
   if (event.type === 'error') {
     state.errorMessage.value = event.message

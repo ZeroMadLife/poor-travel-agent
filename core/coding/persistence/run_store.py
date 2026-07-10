@@ -23,7 +23,7 @@ class RunStore:
         if session_id:
             self.evidence_root = root / "evidence" / session_id / "runs"
         else:
-            self.evidence_root = root  # backward compat: global runs/
+            self.evidence_root = root / "runs"  # backward compat: global runs/
         self.evidence_root.mkdir(parents=True, exist_ok=True)
 
     def start_run(self, run_id: str, session_id: str = "") -> Path:

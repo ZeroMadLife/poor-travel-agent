@@ -121,8 +121,8 @@ def test_run_store_builds_readable_timeline_from_trace(tmp_path: Path) -> None:
 
 def test_run_store_session_partitioned(tmp_path: Path) -> None:
     """Two sessions' runs live in separate partitions and never cross-list."""
-    store_a = RunStore(tmp_path / "runs", session_id="session_a")
-    store_b = RunStore(tmp_path / "runs", session_id="session_b")
+    store_a = RunStore(tmp_path, session_id="session_a")
+    store_b = RunStore(tmp_path, session_id="session_b")
 
     store_a.start_run("run_a1")
     store_a.append_trace("run_a1", {"type": "final", "content": "a done"})
@@ -135,8 +135,8 @@ def test_run_store_session_partitioned(tmp_path: Path) -> None:
     assert [run["run_id"] for run in store_b.list_runs()] == ["run_b1"]
 
     # The partitions are physically separate directories.
-    assert (tmp_path / "runs" / "evidence" / "session_a" / "runs" / "run_a1").is_dir()
-    assert (tmp_path / "runs" / "evidence" / "session_b" / "runs" / "run_b1").is_dir()
+    assert (tmp_path / "evidence" / "session_a" / "runs" / "run_a1").is_dir()
+    assert (tmp_path / "evidence" / "session_b" / "runs" / "run_b1").is_dir()
 
     # A run from the other session is not visible.
     import pytest
@@ -147,11 +147,11 @@ def test_run_store_session_partitioned(tmp_path: Path) -> None:
 
 def test_run_store_global_store_can_inspect_session_partition(tmp_path: Path) -> None:
     """A session-less store can read a specific session partition via session_id."""
-    scoped = RunStore(tmp_path / "runs", session_id="session_a")
+    scoped = RunStore(tmp_path, session_id="session_a")
     scoped.start_run("run_a1")
     scoped.append_trace("run_a1", {"type": "final", "content": "a done"})
 
-    global_store = RunStore(tmp_path / "runs")
+    global_store = RunStore(tmp_path)
     # Global store sees nothing by default.
     assert global_store.list_runs() == []
     # But can inspect session_a's partition by passing session_id.
@@ -162,13 +162,18 @@ def test_run_store_global_store_can_inspect_session_partition(tmp_path: Path) ->
 
 
 def test_run_store_backward_compat_global_when_no_session_id(tmp_path: Path) -> None:
-    """Without session_id the store uses the legacy flat root layout."""
+    """Without session_id the store uses the legacy global runs/ layout.
+
+    A session-less store keeps runs under ``root / "runs"`` so existing
+    deployments that read ``.coding/runs/<run_id>`` keep working.
+    """
     store = RunStore(tmp_path)
     store.start_run("run_x")
     store.append_trace("run_x", {"type": "final", "content": "done"})
 
-    # Trace lands directly under tmp_path/run_x, not under evidence/...
-    assert (tmp_path / "run_x" / "trace.jsonl").is_file()
+    # Trace lands under tmp_path/runs/run_x (the global runs/ directory), not
+    # under evidence/...
+    assert (tmp_path / "runs" / "run_x" / "trace.jsonl").is_file()
     assert [run["run_id"] for run in store.list_runs()] == ["run_x"]
 
 

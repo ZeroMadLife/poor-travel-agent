@@ -32,8 +32,11 @@ def remember(
 ) -> ToolResult:
     _ = workspace
     runtime = _require_context_attr(tool_context, "runtime")
+    run_id = getattr(runtime, "active_run_id", "") or ""
     fact = runtime.memory_manager.remember(
-        str(args["fact"]), topic=str(args.get("topic", "project-conventions"))
+        str(args["fact"]),
+        topic=str(args.get("topic", "project-conventions")),
+        source_ref=run_id,
     )
     return ToolResult(content=f"Remembered: {fact.content} (topic: {fact.topic})")
 
@@ -57,9 +60,16 @@ def dream(
     proposals = runtime.memory_manager.propose_dream()
     if not proposals:
         return ToolResult(content="No facts to consolidate.")
-    lines = ["Memory proposals (awaiting approval):"]
+    # Emit a proposal-ready event through the runtime's session event bus so the
+    # frontend can surface the approval UI.
+    pending = runtime.memory_manager.pending_proposal
+    if pending:
+        runtime.session_event_bus.emit("memory_proposal_ready", pending)
+    lines = ["Memory proposals generated (awaiting approval):"]
     for p in proposals:
         lines.append(f"- [{p.topic}] {p.content}")
+    lines.append(f"\nProposal ID: {runtime.memory_manager._proposal_id}")
+    lines.append("Use the memory proposal approve/reject API to proceed.")
     return ToolResult(content="\n".join(lines))
 
 

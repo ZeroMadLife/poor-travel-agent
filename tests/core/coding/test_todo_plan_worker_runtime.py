@@ -116,7 +116,7 @@ async def test_runtime_persists_session_events_and_run_trace(tmp_path: Path) -> 
     assert (tmp_path / ".coding" / "sessions" / "s-runtime.json").is_file()
     assert (tmp_path / ".coding" / "sessions" / "s-runtime.events.jsonl").is_file()
     # Session-partitioned runs live under evidence/<session_id>/runs.
-    run_dirs = list((tmp_path / ".coding" / "runs" / "evidence" / "s-runtime" / "runs").iterdir())
+    run_dirs = list((tmp_path / ".coding" / "evidence" / "s-runtime" / "runs").iterdir())
     assert run_dirs
     assert (run_dirs[0] / "trace.jsonl").is_file()
 

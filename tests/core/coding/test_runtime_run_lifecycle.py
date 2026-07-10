@@ -168,8 +168,8 @@ async def test_runs_are_partitioned_by_session(tmp_path: Path) -> None:
     assert len(b_runs) == 1
 
     # Physical partitioning under evidence/<session>/runs.
-    a_dir = storage / "runs" / "evidence" / "session_a" / "runs"
-    b_dir = storage / "runs" / "evidence" / "session_b" / "runs"
+    a_dir = storage / "evidence" / "session_a" / "runs"
+    b_dir = storage / "evidence" / "session_b" / "runs"
     assert a_dir.is_dir() and b_dir.is_dir()
     assert len(list(a_dir.iterdir())) == 1
     assert len(list(b_dir.iterdir())) == 1
@@ -180,7 +180,7 @@ def test_request_stop_emits_run_id(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path, FakeModel(["<final>noop</final>"]))
 
     runtime.active_run_id = "run_active"
-    runtime.request_stop()
+    ok = runtime.request_stop()
 
     # SessionEventBus persists a durable JSONL record carrying the run_id.
     events_path = runtime.session_event_bus.path
@@ -195,4 +195,87 @@ def test_request_stop_emits_run_id(tmp_path: Path) -> None:
     assert stop_records
     assert stop_records[0]["run_id"] == "run_active"
     assert stop_records[0]["session_id"] == "s-lifecycle"
+    assert runtime.stop_requested is True
+    # Unconditional stop (no run_id) is accepted and returns True.
+    assert ok is True
+
+
+async def test_run_turn_releases_lease_on_aclose(tmp_path: Path) -> None:
+    """Lease is released even when the generator is closed early via aclose().
+
+    This simulates a WebSocket disconnect: the consumer awaits one event then
+    closes the async generator. A GeneratorExit is thrown at the suspended
+    yield point inside the engine loop; the outer finally must release the
+    lease (active_run_id -> None) and persist session state.
+    """
+    # A model with many tool calls so the generator suspends mid-loop after the
+    # first event is yielded, giving us a point to call aclose().
+    runtime = _runtime(
+        tmp_path,
+        FakeModel(
+            [
+                '<tool>{"name":"read_file","args":{"path":"README.md"}}</tool>',
+                '<tool>{"name":"read_file","args":{"path":"README.md"}}</tool>',
+                "<final>done</final>",
+            ]
+        ),
+    )
+
+    gen = runtime.run_turn("读 README")
+    # Consume exactly one event, then close the generator. The generator is
+    # now suspended at a `yield event` inside the engine loop. (turn_started is
+    # emitted to the bus but not yielded; the first yielded event is
+    # model_requested.)
+    first = await gen.__anext__()
+    assert first["type"] == "model_requested"
+    assert first["run_id"]
+    # The lease is held while the turn is in flight.
+    assert runtime.active_run_id == first["run_id"]
+
+    # Close the generator early (mirrors a dropped WebSocket). This throws
+    # GeneratorExit at the suspended yield; the outer finally must run.
+    await gen.aclose()
+
+    # The lease is released even though the turn never completed.
+    assert runtime.active_run_id is None
+    assert runtime.stop_requested is False
+
+
+def test_request_stop_rejects_stale_run_id(tmp_path: Path) -> None:
+    """Stop for an old run_id doesn't affect a newer active run.
+
+    A late stop request carrying a stale run_id is rejected (returns False)
+    without flipping stop_requested or cancelling approvals/reviews.
+    """
+    runtime = _runtime(tmp_path, FakeModel(["<final>noop</final>"]))
+
+    runtime.active_run_id = "run_new"
+    ok = runtime.request_stop(run_id="run_old")
+
+    # Stale stop is rejected and has no side effects.
+    assert ok is False
+    assert runtime.stop_requested is False
+    # The active run is untouched.
+    assert runtime.active_run_id == "run_new"
+
+
+def test_request_stop_accepts_matching_run_id(tmp_path: Path) -> None:
+    """Stop with a run_id matching the active run is accepted."""
+    runtime = _runtime(tmp_path, FakeModel(["<final>noop</final>"]))
+
+    runtime.active_run_id = "run_active"
+    ok = runtime.request_stop(run_id="run_active")
+
+    assert ok is True
+    assert runtime.stop_requested is True
+
+
+def test_request_stop_accepts_no_run_id(tmp_path: Path) -> None:
+    """Stop without a run_id is applied unconditionally (backward compatible)."""
+    runtime = _runtime(tmp_path, FakeModel(["<final>noop</final>"]))
+
+    runtime.active_run_id = None
+    ok = runtime.request_stop()
+
+    assert ok is True
     assert runtime.stop_requested is True
