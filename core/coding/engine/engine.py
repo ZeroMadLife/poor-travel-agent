@@ -85,12 +85,16 @@ class Engine:
         self.max_steps = max_steps
 
     async def run_turn(
-        self, user_message: str, skill_prompt: str | None = None
+        self, user_message: str, skill_prompt: str | None = None, memory_block: str | None = None
     ) -> AsyncIterator[dict[str, Any]]:
         """Run one coding turn and yield streamable events.
 
         ``skill_prompt`` is an expanded skill instruction injected into the LLM
         prompt for this turn only; it is never written to ``self.history``.
+
+        ``memory_block`` is a rendered memory context (working + durable memory)
+        injected into the LLM prompt for this turn only; it is never written to
+        ``self.history``.
         """
         self.history.append({"role": "user", "content": user_message, "created_at": now()})
         tool_steps = 0
@@ -114,6 +118,7 @@ class Engine:
                 workspace_reminders=self.workspace_reminders,
                 deferred_tools=self._deferred_tool_names(),
                 skill_prompt=skill_prompt,
+                memory_block=memory_block,
             )
             if protocol_correction:
                 prompt = f"{prompt}\n\n<protocol-correction>\n{protocol_correction}\n</protocol-correction>"

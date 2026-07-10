@@ -221,6 +221,42 @@ class ToolSearchArgs(BaseModel):
         return value
 
 
+class RememberArgs(BaseModel):
+    """Arguments for remember."""
+
+    fact: str
+    topic: str = "project-conventions"
+
+    @field_validator("fact")
+    @classmethod
+    def fact_not_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("fact must not be empty")
+        return value
+
+    @field_validator("topic")
+    @classmethod
+    def topic_valid(cls, value: str) -> str:
+        if value not in {"project-conventions", "decisions"}:
+            raise ValueError("topic must be project-conventions or decisions")
+        return value
+
+
+class DreamArgs(BaseModel):
+    """Arguments for dream."""
+
+    topic: str | None = None
+
+    @field_validator("topic")
+    @classmethod
+    def topic_valid(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if value not in {"project-conventions", "decisions"}:
+            raise ValueError("topic must be project-conventions or decisions")
+        return value
+
+
 def first_error_message(exc: ValidationError) -> str:
     """Extract a compact validation message."""
     errors = exc.errors(include_url=False)

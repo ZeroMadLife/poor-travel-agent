@@ -27,6 +27,7 @@ from core.coding.engine.events import (
     WorkspaceDiffReadyEvent,
     event_to_dict,
 )
+from core.coding.memory import MemoryManager
 from core.coding.multiagent import WorkerManager
 from core.coding.persistence import CodingSessionStore, RunStore, SessionEventBus, TodoLedger
 from core.coding.plan_mode import PlanModeManager
@@ -122,6 +123,7 @@ class CodingRuntime:
             activated_tools=self.activated_tools,
         )
         self.skill_registry = SkillRegistry(root=self.workspace.root)
+        self.memory_manager = MemoryManager(self.storage_root, self.workspace.root)
         self.model_spec: str = ""
         if save_on_init:
             self._save_session()
@@ -352,6 +354,13 @@ class CodingRuntime:
         # Capture workspace state before the engine mutates any files so a
         # bounded diff artifact can be produced after the run completes.
         self.diff_tracker.snapshot_before_run()
+        # Build per-run working memory and assemble a combined memory context
+        # block (working + durable) injected into the LLM prompt for this turn
+        # only. It is never persisted to session history.
+        self.memory_manager.build_working_memory(
+            self.session, self.runtime_mode, self.permission_mode
+        )
+        memory_block = self.memory_manager.get_context_block()
         started = event_to_dict(TurnStartedEvent(run_id=run_id))
         self.run_store.append_trace(run_id, started)
         self.session_event_bus.emit("turn_started", started)
@@ -374,7 +383,9 @@ class CodingRuntime:
             max_steps=50,
         )
         try:
-            async for event in engine.run_turn(user_message, skill_prompt=skill_prompt):
+            async for event in engine.run_turn(
+                user_message, skill_prompt=skill_prompt, memory_block=memory_block
+            ):
                 event = {"run_id": run_id, **event}
                 # Skip persisting ephemeral text_delta events to avoid trace bloat;
                 # they are streamed to the client but not stored in the run trace.

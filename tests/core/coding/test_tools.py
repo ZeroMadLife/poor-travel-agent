@@ -148,6 +148,8 @@ def test_tool_registry_discovers_decorated_tools_with_stable_metadata(tmp_path: 
         "geocode",
         "search_nearby",
         "get_route",
+        "remember",
+        "dream",
     }
     assert tools["read_file"].category == "file"
     assert tools["run_shell"].category == "shell"
