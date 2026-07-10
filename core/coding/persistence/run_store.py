@@ -114,7 +114,14 @@ class RunStore:
             event for event in events if str(event.get("type", "")) not in {"turn_finished", "run_finished"}
         ]
         last = business_events[-1] if business_events else events[-1]
-        return {
+        # Extract changed_files from the workspace_diff_ready event (if any) so
+        # the run history list surfaces what the run touched at a glance.
+        changed_files: list[Any] = []
+        for event in events:
+            if event.get("type") == "workspace_diff_ready":
+                changed_files = event.get("changed_files", [])
+                break
+        summary = {
             "run_id": run_id,
             "status": _status_from_events(events),
             "event_count": len(events),
@@ -126,6 +133,8 @@ class RunStore:
             "started_at": str(first.get("created_at") or first.get("timestamp") or ""),
             "updated_at": str(last.get("created_at") or first.get("created_at") or ""),
         }
+        summary["changed_files"] = changed_files
+        return summary
 
     def _read_events(self, run_id: str, session_id: str = "") -> list[dict[str, Any]]:
         evidence_root = self._resolve_evidence_root(session_id)

@@ -20,6 +20,7 @@ from core.coding.engine.events import (
     ToolResultEvent,
     TurnFinishedEvent,
     TurnStartedEvent,
+    WorkspaceDiffReadyEvent,
     event_to_dict,
 )
 from core.coding.engine.helpers import (
@@ -52,6 +53,7 @@ __all__ = [
     "ToolResultEvent",
     "TurnFinishedEvent",
     "TurnStartedEvent",
+    "WorkspaceDiffReadyEvent",
     "build_tool_descriptions",
     "event_to_dict",
     "normalize_tool_payload",

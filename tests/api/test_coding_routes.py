@@ -505,11 +505,15 @@ def test_coding_run_history_lists_and_reads_traces(tmp_path: Path) -> None:
     assert list_response.status_code == 200
     assert run["status"] == "completed"
     assert run["tool_count"] == 1
-    assert run["last_event_type"] == "final"
+    # workspace_diff_ready is the last business event (run_finished/turn_finished
+    # are excluded from the business event set). The run only reads README.md so
+    # no files changed -> changed_files is empty.
+    assert run["last_event_type"] == "workspace_diff_ready"
+    assert run["changed_files"] == []
     assert detail_response.status_code == 200
     assert detail_response.json()["run_id"] == run["run_id"]
     assert [event["type"] for event in detail_response.json()["events"]][-3:] == [
-        "final",
+        "workspace_diff_ready",
         "run_finished",
         "turn_finished",
     ]
@@ -833,3 +837,66 @@ def test_create_coding_session_does_not_persist_empty_session(tmp_path: Path) ->
     assert response.status_code == 200
     session_ids = [item["session_id"] for item in response.json()["sessions"]]
     assert session_id not in session_ids
+
+
+def test_get_run_diff_returns_artifact(tmp_path: Path) -> None:
+    """GET /runs/{run_id}/diff returns the workspace diff artifact after a run."""
+    (tmp_path / "README.md").write_text("# Sage\n", encoding="utf-8")
+    client = TestClient(
+        create_app(
+            coding_model_factory=FakeWriteModel,
+            coding_workspace_root=tmp_path,
+            coding_storage_root=tmp_path / ".coding",
+        )
+    )
+    session_id = client.post(
+        "/api/v1/coding/session", json={"approval_policy": "auto"}
+    ).json()["session_id"]
+    # accept_edits auto-approves write_file so the turn completes without a
+    # manual approval round-trip.
+    client.patch(
+        f"/api/v1/coding/{session_id}/permission-mode", json={"mode": "accept_edits"}
+    )
+
+    # Run a turn that writes note.txt via FakeWriteModel.
+    with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
+        websocket.send_json({"content": "写一个 note"})
+        while True:
+            event = websocket.receive_json()
+            if event["type"] == "turn_finished":
+                break
+
+    run_id = event["run_id"]
+    assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "approved"
+
+    response = client.get(f"/api/v1/coding/{session_id}/runs/{run_id}/diff")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["run_id"] == run_id
+    assert data["file_count"] >= 1
+    paths = {change["path"] for change in data["changed_files"]}
+    assert "note.txt" in paths
+    note_change = next(c for c in data["changed_files"] if c["path"] == "note.txt")
+    assert note_change["status"] == "added"
+    assert note_change["after_hash"]
+    assert "approved" in note_change["diff"]
+
+
+def test_get_run_diff_404_for_unknown(tmp_path: Path) -> None:
+    """GET /runs/{run_id}/diff returns 404 for a run with no diff artifact."""
+    client = TestClient(
+        create_app(
+            coding_model_factory=FakeModel,
+            coding_workspace_root=tmp_path,
+            coding_storage_root=tmp_path / ".coding",
+        )
+    )
+    session_id = client.post("/api/v1/coding/session", json={}).json()["session_id"]
+
+    response = client.get(
+        f"/api/v1/coding/{session_id}/runs/run_does_not_exist/diff"
+    )
+
+    assert response.status_code == 404
+    assert "diff not found" in response.json()["detail"]

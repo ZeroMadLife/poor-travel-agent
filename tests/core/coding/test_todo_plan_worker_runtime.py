@@ -105,7 +105,14 @@ async def test_runtime_persists_session_events_and_run_trace(tmp_path: Path) -> 
 
     events = [event async for event in runtime.run_turn("读 README")]
 
-    assert [event["type"] for event in events][-3:] == ["final", "run_finished", "turn_finished"]
+    # The workspace diff is surfaced after the engine loop and before
+    # run_finished/turn_finished.
+    assert [event["type"] for event in events][-4:] == [
+        "final",
+        "workspace_diff_ready",
+        "run_finished",
+        "turn_finished",
+    ]
     assert (tmp_path / ".coding" / "sessions" / "s-runtime.json").is_file()
     assert (tmp_path / ".coding" / "sessions" / "s-runtime.events.jsonl").is_file()
     # Session-partitioned runs live under evidence/<session_id>/runs.

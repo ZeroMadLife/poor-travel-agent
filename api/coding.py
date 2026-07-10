@@ -354,6 +354,22 @@ async def get_coding_run(
         raise HTTPException(status_code=404, detail=f"Unknown run: {run_id}") from exc
 
 
+@router.get("/api/v1/coding/{session_id}/runs/{run_id}/diff")
+async def get_coding_run_diff(
+    session_id: str, run_id: str, request: Request
+) -> dict[str, Any]:
+    """Return the workspace diff artifact for a completed run."""
+    runtime = _require_runtime(request, session_id)
+    diff_path = runtime.run_store.evidence_root / run_id / "diff.json"
+    if not diff_path.is_file():
+        raise HTTPException(
+            status_code=404, detail="diff not found for this run"
+        )
+    import json
+
+    return json.loads(diff_path.read_text(encoding="utf-8"))
+
+
 @router.get("/api/v1/coding/models", response_model=CodingModelsResponse)
 async def list_coding_models(request: Request) -> CodingModelsResponse:
     """Return available models (simplified: deepseek v4 flash/pro only)."""

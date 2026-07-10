@@ -7,6 +7,7 @@ import type {
   CodingMcpServersResponse,
   CodingModelsResponse,
   CodingRunDetailResponse,
+  CodingRunDiff,
   CodingRunsResponse,
   CodingSessionMessagesResponse,
   CodingSessionResponse,
@@ -223,4 +224,15 @@ export async function fetchCodingRun(
   )
   if (!response.ok) throw new Error(`fetch run failed: ${response.status}`)
   return (await response.json()) as CodingRunDetailResponse
+}
+
+export async function fetchCodingRunDiff(
+  sessionId: string,
+  runId: string,
+): Promise<CodingRunDiff> {
+  const response = await fetch(
+    new URL(`/api/v1/coding/${sessionId}/runs/${runId}/diff`, API_BASE_URL),
+  )
+  if (!response.ok) throw new Error(`fetch run diff failed: ${response.status}`)
+  return (await response.json()) as CodingRunDiff
 }

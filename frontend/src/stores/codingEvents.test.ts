@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { ref } from 'vue'
-import { applyCodingEvent, type ChatMessage, type PlanReviewState } from './codingEvents'
+import {
+  applyCodingEvent,
+  type ChatMessage,
+  type DiffInfo,
+  type PlanReviewState,
+} from './codingEvents'
 import type { CodingApproval } from '../types/api'
 
 function state() {
@@ -16,6 +21,7 @@ function state() {
     planTopic: ref(''),
     planPath: ref(''),
     planReview: ref<PlanReviewState | null>(null),
+    lastDiffInfo: ref<DiffInfo | null>(null),
   }
 }
 
@@ -472,5 +478,43 @@ describe('codingEvents', () => {
 
     expect(current.runtimeMode.value).toBe('plan')
     expect(current.planReview.value).not.toBeNull()
+  })
+
+  it('stores diff info from workspace_diff_ready', () => {
+    const current = state()
+
+    applyCodingEvent(current, {
+      type: 'workspace_diff_ready',
+      run_id: 'run_abc',
+      changed_files: ['README.md', 'src/app.ts'],
+      file_count: 2,
+      truncated: false,
+    })
+
+    expect(current.lastDiffInfo.value).toEqual({
+      run_id: 'run_abc',
+      changed_files: ['README.md', 'src/app.ts'],
+      file_count: 2,
+      truncated: false,
+    })
+  })
+
+  it('handles workspace_diff_ready with missing optional fields', () => {
+    const current = state()
+
+    applyCodingEvent(current, {
+      type: 'workspace_diff_ready',
+      run_id: 'run_xyz',
+      changed_files: [],
+      file_count: 0,
+      truncated: false,
+    })
+
+    expect(current.lastDiffInfo.value).toEqual({
+      run_id: 'run_xyz',
+      changed_files: [],
+      file_count: 0,
+      truncated: false,
+    })
   })
 })

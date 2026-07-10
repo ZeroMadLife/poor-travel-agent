@@ -56,8 +56,9 @@ async def test_run_turn_emits_run_finished(tmp_path: Path) -> None:
     events = [event async for event in runtime.run_turn("读 README")]
 
     types = [event["type"] for event in events]
-    # Terminal events land in this order at the very end.
-    assert types[-3:] == ["final", "run_finished", "turn_finished"]
+    # Terminal events land in this order at the very end: the workspace diff is
+    # surfaced after the engine loop and before run_finished/turn_finished.
+    assert types[-4:] == ["final", "workspace_diff_ready", "run_finished", "turn_finished"]
 
     finished = events[-2]
     assert finished["type"] == "run_finished"

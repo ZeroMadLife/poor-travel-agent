@@ -244,6 +244,13 @@ export type CodingPlanReadyForReviewEvent = CodingEventMeta & {
   summary: string
 }
 
+export type CodingWorkspaceDiffReadyEvent = CodingEventMeta & {
+  type: 'workspace_diff_ready'
+  changed_files: string[]
+  file_count: number
+  truncated: boolean
+}
+
 export type CodingErrorEvent = CodingEventMeta & {
   type: 'error'
   message: string
@@ -265,6 +272,7 @@ export type CodingServerEvent =
   | CodingTextDeltaEvent
   | CodingRuntimeModeChangedEvent
   | CodingPlanReadyForReviewEvent
+  | CodingWorkspaceDiffReadyEvent
 
 export type CodingFileEntry = {
   name: string
@@ -337,6 +345,25 @@ export type CodingRunSummary = {
   last_event_type: string
   started_at: string
   updated_at: string
+  changed_files?: string[]
+}
+
+export type CodingFileDiff = {
+  path: string
+  status: 'added' | 'modified' | 'deleted'
+  before_hash: string
+  after_hash: string
+  diff: string
+  truncated: boolean
+  binary: boolean
+  ignored_sensitive: boolean
+}
+
+export type CodingRunDiff = {
+  run_id: string
+  changed_files: CodingFileDiff[]
+  file_count: number
+  truncated: boolean
 }
 
 export type CodingRunsResponse = {

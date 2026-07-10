@@ -10,6 +10,7 @@ import {
   fetchCodingMcpServers,
   fetchCodingModels,
   fetchCodingRun,
+  fetchCodingRunDiff,
   fetchCodingRuns,
   fetchCodingSessionMessages,
   fetchCodingSessions,
@@ -31,6 +32,7 @@ import type {
   CodingMcpServer,
   CodingModel,
   CodingRunDetailResponse,
+  CodingRunDiff,
   CodingRunSummary,
   CodingServerEvent,
   CodingSessionSummary,
@@ -39,7 +41,7 @@ import type {
   PermissionMode,
 } from '../types/api'
 import { applyCodingEvent } from './codingEvents'
-import type { ChatMessage, PlanReviewState } from './codingEvents'
+import type { ChatMessage, DiffInfo, PlanReviewState } from './codingEvents'
 import { CodingStream } from './codingStream'
 
 export type { ChatMessage, ToolActivity } from './codingEvents'
@@ -82,6 +84,9 @@ export const useCodingStore = defineStore('coding', () => {
   const planTopic = ref('')
   const planPath = ref('')
   const planReview = ref<PlanReviewState | null>(null)
+  const lastDiffInfo = ref<DiffInfo | null>(null)
+  const diffDrawerVisible = ref(false)
+  const currentDiffData = ref<CodingRunDiff | null>(null)
   const codingSessions = ref<CodingSessionSummary[]>([])
   const runs = ref<CodingRunSummary[]>([])
   const selectedRun = ref<CodingRunDetailResponse | null>(null)
@@ -158,6 +163,7 @@ export const useCodingStore = defineStore('coding', () => {
         planTopic,
         planPath,
         planReview,
+        lastDiffInfo,
       },
       event,
     )
@@ -404,6 +410,9 @@ export const useCodingStore = defineStore('coding', () => {
     planPath.value = ''
     runs.value = []
     selectedRun.value = null
+    lastDiffInfo.value = null
+    diffDrawerVisible.value = false
+    currentDiffData.value = null
     dirCache.clear()
     await Promise.all([loadGitStatus(), loadFiles('.', true), loadSessions(), loadRuns()])
     connectSocket()
@@ -428,6 +437,9 @@ export const useCodingStore = defineStore('coding', () => {
     planPath.value = ''
     runs.value = []
     selectedRun.value = null
+    lastDiffInfo.value = null
+    diffDrawerVisible.value = false
+    currentDiffData.value = null
     dirCache.clear()
     await Promise.all([loadGitStatus(), loadFiles('.', true), loadSessions(), loadRuns()])
     connectSocket()
@@ -452,6 +464,26 @@ export const useCodingStore = defineStore('coding', () => {
     } catch {
       selectedRun.value = null
     }
+  }
+
+  async function loadRunDiff(runId: string) {
+    if (!sessionId.value) return
+    try {
+      currentDiffData.value = await fetchCodingRunDiff(sessionId.value, runId)
+      diffDrawerVisible.value = true
+    } catch (e) {
+      errorMessage.value = String(e)
+    }
+  }
+
+  function openDiffDrawer() {
+    if (lastDiffInfo.value) {
+      void loadRunDiff(lastDiffInfo.value.run_id)
+    }
+  }
+
+  function closeDiffDrawer() {
+    diffDrawerVisible.value = false
   }
 
   async function loadGitStatus() {
@@ -551,6 +583,9 @@ export const useCodingStore = defineStore('coding', () => {
     planTopic,
     planPath,
     planReview,
+    lastDiffInfo,
+    diffDrawerVisible,
+    currentDiffData,
     codingSessions,
     runs,
     selectedRun,
@@ -580,6 +615,9 @@ export const useCodingStore = defineStore('coding', () => {
     loadSessions,
     loadRuns,
     loadRunDetail,
+    loadRunDiff,
+    openDiffDrawer,
+    closeDiffDrawer,
     loadGitStatus,
     loadFiles,
     refreshWorkspaceView,

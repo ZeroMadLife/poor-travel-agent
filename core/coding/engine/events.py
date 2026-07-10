@@ -152,6 +152,15 @@ class RunFinishedEvent(RunEventBase):
     tool_steps: int = 0
 
 
+class WorkspaceDiffReadyEvent(RunEventBase):
+    """Workspace diff artifact is ready after a run."""
+
+    type: Literal["workspace_diff_ready"] = "workspace_diff_ready"
+    changed_files: list[str] = Field(default_factory=list)
+    file_count: int = 0
+    truncated: bool = False
+
+
 RunEvent: TypeAlias = (
     TurnStartedEvent
     | ModelRequestedEvent
@@ -169,6 +178,7 @@ RunEvent: TypeAlias = (
     | TurnFinishedEvent
     | RuntimeModeChangedEvent
     | PlanReadyForReviewEvent
+    | WorkspaceDiffReadyEvent
     | RunFinishedEvent
 )
 

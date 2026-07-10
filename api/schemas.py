@@ -192,6 +192,7 @@ class CodingRunSummary(BaseModel):
     last_event_type: str
     started_at: str = ""
     updated_at: str = ""
+    changed_files: list[str] = Field(default_factory=list)
 
 
 class CodingRunsResponse(BaseModel):

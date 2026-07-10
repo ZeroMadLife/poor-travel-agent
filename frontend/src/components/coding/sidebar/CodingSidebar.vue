@@ -229,6 +229,9 @@ function runIcon(status: string) {
           </button>
           <div class="run-meta">
             {{ run.tool_count }} tools · {{ run.event_count }} events · {{ run.last_event_type }}
+            <span v-if="run.changed_files && run.changed_files.length > 0">
+              · {{ run.changed_files.length }} files changed
+            </span>
           </div>
         </div>
         <div v-if="store.selectedRun" class="run-detail">

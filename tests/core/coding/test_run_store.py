@@ -26,6 +26,7 @@ def test_run_store_lists_run_summaries_from_trace(tmp_path: Path) -> None:
             "last_event_type": "final",
             "started_at": "2026-07-08T10:00:00",
             "updated_at": "2026-07-08T10:00:00",
+            "changed_files": [],
         }
     ]
 

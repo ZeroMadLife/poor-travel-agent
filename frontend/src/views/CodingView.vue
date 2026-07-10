@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   CodingApprovalCard,
   CodingComposer,
+  CodingDiffDrawer,
   CodingExecutionLog,
   CodingFileTree,
   CodingGitBadge,
@@ -120,6 +121,14 @@ onBeforeUnmount(() => {
             @respond="store.respondApproval"
           />
           <CodingThinkingIndicator v-if="showThinkingIndicator" :phase="store.thinkingPhase" />
+          <div
+            v-if="store.lastDiffInfo && store.lastDiffInfo.file_count > 0"
+            class="diff-summary-bar"
+          >
+            <button class="diff-btn" type="button" @click="store.openDiffDrawer">
+              📝 查看变更 ({{ store.lastDiffInfo.file_count }} 个文件)
+            </button>
+          </div>
           <CodingPlanApproval v-if="store.planReview" />
           <p v-if="store.errorMessage" class="error-text">{{ store.errorMessage }}</p>
         </section>
@@ -138,6 +147,12 @@ onBeforeUnmount(() => {
       :topic="store.planTopic"
       :visible="true"
       @close="showPlanPreview = false"
+    />
+
+    <CodingDiffDrawer
+      :diff="store.currentDiffData"
+      :visible="store.diffDrawerVisible"
+      @close="store.closeDiffDrawer"
     />
   </div>
 </template>
@@ -297,6 +312,26 @@ onBeforeUnmount(() => {
 .error-text {
   color: #b91c1c;
   font-size: 13px;
+}
+
+.diff-summary-bar {
+  max-width: 760px;
+  margin: 0 0 12px;
+}
+
+.diff-btn {
+  padding: 6px 12px;
+  border: 1px solid #1e40af;
+  border-radius: 6px;
+  background: #eff6ff;
+  color: #1e40af;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.diff-btn:hover {
+  background: #dbeafe;
 }
 
 @media (max-width: 900px) {

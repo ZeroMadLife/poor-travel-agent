@@ -36,6 +36,13 @@ export type PlanReviewState = {
   summary: string
 }
 
+export type DiffInfo = {
+  run_id: string
+  changed_files: string[]
+  file_count: number
+  truncated: boolean
+}
+
 export type CodingEventState = {
   sessionId: Ref<string>
   messages: Ref<ChatMessage[]>
@@ -48,6 +55,7 @@ export type CodingEventState = {
   planTopic: Ref<string>
   planPath: Ref<string>
   planReview: Ref<PlanReviewState | null>
+  lastDiffInfo: Ref<DiffInfo | null>
 }
 
 export type CodingEventEffect = {
@@ -88,6 +96,15 @@ export function applyCodingEvent(
       review_id: event.review_id,
       plan_path: event.plan_path,
       summary: event.summary,
+    }
+    return {}
+  }
+  if (event.type === 'workspace_diff_ready') {
+    state.lastDiffInfo.value = {
+      run_id: event.run_id || '',
+      changed_files: event.changed_files || [],
+      file_count: event.file_count || 0,
+      truncated: event.truncated || false,
     }
     return {}
   }

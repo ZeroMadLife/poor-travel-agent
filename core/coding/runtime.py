@@ -9,7 +9,13 @@ from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, cast
 
-from core.coding.context import IGNORED_PATH_NAMES, ContextManager, WorkspaceContext, now
+from core.coding.context import (
+    IGNORED_PATH_NAMES,
+    ContextManager,
+    WorkspaceContext,
+    WorkspaceDiffTracker,
+    now,
+)
 from core.coding.engine.engine import Engine
 from core.coding.engine.events import (
     ErrorEvent,
@@ -18,6 +24,7 @@ from core.coding.engine.events import (
     RuntimeModeChangedEvent,
     TurnFinishedEvent,
     TurnStartedEvent,
+    WorkspaceDiffReadyEvent,
     event_to_dict,
 )
 from core.coding.multiagent import WorkerManager
@@ -57,6 +64,7 @@ class CodingRuntime:
         self.storage_root = Path(storage_root)
         self.session_store = CodingSessionStore(self.storage_root / "sessions")
         self.run_store = RunStore(self.storage_root / "runs", session_id=session_id)
+        self.diff_tracker = WorkspaceDiffTracker(self.workspace.root)
         self.session_event_bus = SessionEventBus(
             session_id=session_id,
             path=self.session_store.event_path(session_id),
@@ -341,6 +349,9 @@ class CodingRuntime:
         self.active_run_id = run_id
         run_start_time = time.monotonic()
         self.run_store.start_run(run_id, session_id=self.session_id)
+        # Capture workspace state before the engine mutates any files so a
+        # bounded diff artifact can be produced after the run completes.
+        self.diff_tracker.snapshot_before_run()
         started = event_to_dict(TurnStartedEvent(run_id=run_id))
         self.run_store.append_trace(run_id, started)
         self.session_event_bus.emit("turn_started", started)
@@ -422,6 +433,32 @@ class CodingRuntime:
         # client learns the run has ended and the lease is released. Note: these
         # run AFTER try/except but outside any finally block, so yielding here is
         # legal for an async generator (yield is forbidden inside finally).
+        # Produce a bounded workspace diff artifact from before/after snapshots
+        # and surface it as a workspace_diff_ready event before run_finished.
+        try:
+            diff = self.diff_tracker.snapshot_after_run(run_id)
+            self.diff_tracker.write_artifact(diff, self.run_store.evidence_root)
+            diff_event = event_to_dict(
+                WorkspaceDiffReadyEvent(
+                    run_id=run_id,
+                    changed_files=[f.path for f in diff.changed_files],
+                    file_count=diff.file_count,
+                    truncated=diff.truncated,
+                )
+            )
+            diff_event = {"run_id": run_id, **diff_event}
+            self.run_store.append_trace(run_id, diff_event)
+            self.session_event_bus.emit("workspace_diff_ready", diff_event)
+            yield diff_event
+        except Exception as exc:  # diff must never break the run
+            error_event = event_to_dict(
+                ErrorEvent(run_id=run_id, message=f"workspace diff failed: {exc}")
+            )
+            error_event = {"run_id": run_id, **error_event}
+            self.run_store.append_trace(run_id, error_event)
+            self.session_event_bus.emit("error", error_event)
+            yield error_event
+
         duration_ms = int((time.monotonic() - run_start_time) * 1000)
         status = self.run_store.run_status(run_id)
         tool_steps = self.run_store.run_tool_count(run_id)
