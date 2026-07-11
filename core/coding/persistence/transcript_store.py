@@ -8,7 +8,7 @@ import json
 import os
 import threading
 from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import cast
@@ -61,6 +61,7 @@ class TranscriptStore:
             if item.message_id in self._message_ids:
                 return False
 
+            transcript_existed = _entry_exists(directory_fd, _TRANSCRIPT_NAME)
             transcript_fd = _open_file(
                 directory_fd,
                 _TRANSCRIPT_NAME,
@@ -68,13 +69,15 @@ class TranscriptStore:
                 0o600,
             )
             try:
+                _reject_hardlink(transcript_fd, _TRANSCRIPT_NAME)
                 os.fchmod(transcript_fd, 0o600)
                 _write_all(transcript_fd, line)
                 os.fsync(transcript_fd)
+                if not transcript_existed:
+                    os.fsync(directory_fd)
             except Exception:
                 self._message_ids = {
-                    entry.message_id
-                    for entry in self._read_items(directory_fd, repair_tail=True)
+                    entry.message_id for entry in self._read_items(directory_fd, repair_tail=True)
                 }
                 raise
             finally:
@@ -94,21 +97,33 @@ class TranscriptStore:
     def _exclusive_directory(self) -> Iterator[int]:
         directory_fd = _open_directory(self._root, self._components, create=True)
         lock_fd = -1
+        acquired = False
         try:
+            lock_existed = _entry_exists(directory_fd, _LOCK_NAME)
             lock_fd = _open_file(
                 directory_fd,
                 _LOCK_NAME,
                 os.O_RDWR | os.O_CREAT | _FILE_FLAGS,
                 0o600,
             )
+            _reject_hardlink(lock_fd, _LOCK_NAME)
             os.fchmod(lock_fd, 0o600)
+            if not lock_existed:
+                os.fsync(lock_fd)
+                os.fsync(directory_fd)
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            acquired = True
             yield directory_fd
         finally:
-            if lock_fd >= 0:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
-                os.close(lock_fd)
-            os.close(directory_fd)
+            try:
+                if acquired:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                try:
+                    if lock_fd >= 0:
+                        os.close(lock_fd)
+                finally:
+                    os.close(directory_fd)
 
     def _read_items(self, directory_fd: int, *, repair_tail: bool) -> list[TranscriptItem]:
         try:
@@ -121,6 +136,7 @@ class TranscriptStore:
             return []
 
         try:
+            _reject_hardlink(transcript_fd, _TRANSCRIPT_NAME)
             os.fchmod(transcript_fd, 0o600)
             data = _read_all(transcript_fd)
             return self._parse_items(
@@ -179,7 +195,9 @@ class TranscriptStore:
     ) -> None:
         quarantine_fd = -1
         for suffix in range(1_000):
-            name = f"{_TRANSCRIPT_NAME}.torn" if suffix == 0 else f"{_TRANSCRIPT_NAME}.torn.{suffix}"
+            name = (
+                f"{_TRANSCRIPT_NAME}.torn" if suffix == 0 else f"{_TRANSCRIPT_NAME}.torn.{suffix}"
+            )
             try:
                 quarantine_fd = _open_file(
                     directory_fd,
@@ -198,6 +216,7 @@ class TranscriptStore:
             os.fsync(quarantine_fd)
         finally:
             os.close(quarantine_fd)
+        os.fsync(directory_fd)
         os.ftruncate(transcript_fd, valid_size)
         os.fsync(transcript_fd)
 
@@ -217,8 +236,14 @@ def _open_directory(root: Path, components: tuple[str, ...], *, create: bool) ->
     try:
         for component in components:
             if create:
-                with suppress(FileExistsError):
+                created = False
+                try:
                     os.mkdir(component, mode=0o700, dir_fd=directory_fd)
+                    created = True
+                except FileExistsError:
+                    pass
+                if created:
+                    os.fsync(directory_fd)
             try:
                 next_fd = os.open(component, _DIRECTORY_FLAGS, dir_fd=directory_fd)
             except OSError as exc:
@@ -240,6 +265,19 @@ def _open_file(directory_fd: int, name: str, flags: int, mode: int = 0o600) -> i
         if exc.errno == errno.ELOOP:
             raise ValueError(f"symlink file rejected: {name}") from exc
         raise
+
+
+def _entry_exists(directory_fd: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _reject_hardlink(fd: int, name: str) -> None:
+    if os.fstat(fd).st_nlink != 1:
+        raise ValueError(f"hardlink file rejected: {name}")
 
 
 def _read_all(fd: int) -> bytes:

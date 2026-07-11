@@ -86,6 +86,7 @@ class ToolResultStore:
             os.close(temp_fd)
             temp_fd = -1
             os.replace(temp_name, artifact_ref, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            os.fsync(directory_fd)
             temp_name = ""
         finally:
             if temp_fd >= 0:
@@ -139,8 +140,14 @@ def _open_directory(root: Path, components: tuple[str, ...]) -> int:
     directory_fd = os.open(root, _DIRECTORY_FLAGS)
     try:
         for component in components:
-            with suppress(FileExistsError):
+            created = False
+            try:
                 os.mkdir(component, mode=0o700, dir_fd=directory_fd)
+                created = True
+            except FileExistsError:
+                pass
+            if created:
+                os.fsync(directory_fd)
             try:
                 next_fd = os.open(component, _DIRECTORY_FLAGS, dir_fd=directory_fd)
             except OSError as exc:

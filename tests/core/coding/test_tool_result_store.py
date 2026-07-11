@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import stat
 
 import pytest
@@ -131,3 +132,42 @@ def test_artifact_is_durable_before_preview_failure(tmp_path, monkeypatch):
 
     assert (store.root / "call_1.txt").read_text(encoding="utf-8") == "complete result"
     assert list(store.root.iterdir()) == [store.root / "call_1.txt"]
+
+
+def test_archive_replaces_hardlink_without_mutating_outside_inode(tmp_path):
+    root = tmp_path / "trusted"
+    root.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("original", encoding="utf-8")
+    outside.chmod(0o640)
+    original_inode = outside.stat().st_ino
+    store = ToolResultStore(root, "s1", "run_1")
+    store.root.mkdir(parents=True)
+    artifact = store.root / "call_1.txt"
+    os.link(outside, artifact)
+
+    result = store.archive("call_1", "replacement")
+
+    assert result.artifact_path.read_text(encoding="utf-8") == "replacement"
+    assert result.artifact_path.stat().st_ino != original_inode
+    assert outside.read_text(encoding="utf-8") == "original"
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o640
+
+
+def test_archive_syncs_result_directory_after_replace(tmp_path, monkeypatch):
+    store = ToolResultStore(tmp_path, "s1", "run_1")
+    store.root.mkdir(parents=True)
+    real_fsync = os.fsync
+    directory_synced = False
+
+    def track_directory_sync(fd):
+        nonlocal directory_synced
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            directory_synced = True
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", track_directory_sync)
+
+    store.archive("call_1", "result")
+
+    assert directory_synced is True

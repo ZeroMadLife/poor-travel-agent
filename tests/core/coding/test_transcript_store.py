@@ -10,6 +10,10 @@ import pytest
 from core.coding.persistence.transcript_store import TranscriptItem, TranscriptStore
 
 
+def _fd_count():
+    return len(os.listdir("/dev/fd"))
+
+
 def test_transcript_append_is_idempotent(tmp_path):
     store = TranscriptStore(tmp_path, "s1")
     item = TranscriptItem(message_id="m1", role="user", content="hello")
@@ -185,3 +189,112 @@ def test_transcript_rejects_symlinked_file_before_outside_write(tmp_path):
         TranscriptStore(tmp_path, "s1")
 
     assert outside.read_text(encoding="utf-8") == ""
+
+
+def test_lock_acquisition_failure_does_not_unlock_or_leak_fds(tmp_path, monkeypatch):
+    import fcntl
+
+    real_flock = fcntl.flock
+    unlock_calls = 0
+
+    def fail_acquire(fd, operation):
+        nonlocal unlock_calls
+        if operation == fcntl.LOCK_EX:
+            raise OSError("lock failed")
+        if operation == fcntl.LOCK_UN:
+            unlock_calls += 1
+        real_flock(fd, operation)
+
+    monkeypatch.setattr(fcntl, "flock", fail_acquire)
+    before = _fd_count()
+
+    for _ in range(20):
+        with pytest.raises(OSError, match="lock failed"):
+            TranscriptStore(tmp_path, "s1")
+
+    assert _fd_count() == before
+    assert unlock_calls == 0
+
+
+def test_unlock_failure_still_closes_fds_and_releases_lock(tmp_path, monkeypatch):
+    import fcntl
+
+    real_flock = fcntl.flock
+
+    def fail_unlock(fd, operation):
+        if operation == fcntl.LOCK_UN:
+            raise OSError("unlock failed")
+        real_flock(fd, operation)
+
+    monkeypatch.setattr(fcntl, "flock", fail_unlock)
+    before = _fd_count()
+
+    with pytest.raises(OSError, match="unlock failed"):
+        TranscriptStore(tmp_path, "s1")
+
+    monkeypatch.setattr(fcntl, "flock", real_flock)
+    assert _fd_count() == before
+    lock_fd = os.open(tmp_path / "evidence" / "s1" / ".transcript.lock", os.O_RDWR)
+    try:
+        real_flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        real_flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
+
+
+def test_transcript_rejects_hardlink_before_chmod_or_write(tmp_path):
+    root = tmp_path / "trusted"
+    root.mkdir()
+    outside = tmp_path / "outside.jsonl"
+    item = TranscriptItem(message_id="m1", role="user", content="outside")
+    original = (json.dumps(item.__dict__) + "\n").encode()
+    outside.write_bytes(original)
+    outside.chmod(0o640)
+    path = root / "evidence" / "s1" / "transcript.jsonl"
+    path.parent.mkdir(parents=True)
+    os.link(outside, path)
+
+    with pytest.raises(ValueError, match="hardlink"):
+        TranscriptStore(root, "s1")
+
+    assert outside.read_bytes() == original
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o640
+
+
+def test_quarantine_directory_sync_failure_preserves_torn_transcript(tmp_path, monkeypatch):
+    store = TranscriptStore(tmp_path, "s1")
+    item = TranscriptItem(message_id="m1", role="user", content="hello")
+    original = (json.dumps(item.__dict__) + '\n{"message_id":').encode()
+    store.path.write_bytes(original)
+    real_fsync = os.fsync
+
+    def fail_directory_sync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("directory fsync failed")
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fail_directory_sync)
+
+    with pytest.raises(OSError, match="directory fsync failed"):
+        store.read_all()
+
+    assert store.path.read_bytes() == original
+
+
+def test_new_lock_and_transcript_entries_sync_containing_directory(tmp_path, monkeypatch):
+    root = tmp_path / "trusted"
+    root.mkdir()
+    real_fsync = os.fsync
+    directory_syncs = 0
+
+    def track_directory_sync(fd):
+        nonlocal directory_syncs
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            directory_syncs += 1
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", track_directory_sync)
+    store = TranscriptStore(root, "s1")
+    store.append(TranscriptItem(message_id="m1", role="user", content="hello"))
+
+    assert directory_syncs >= 2
