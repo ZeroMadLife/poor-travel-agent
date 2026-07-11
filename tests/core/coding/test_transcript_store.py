@@ -64,6 +64,19 @@ def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 
 
+def _track_atomic_open_fds(monkeypatch) -> dict[int, str]:
+    real_open = os.open
+    opened: dict[int, str] = {}
+
+    def tracked_open(path, *args, **kwargs):
+        file_fd = real_open(path, *args, **kwargs)
+        opened[file_fd] = str(path)
+        return file_fd
+
+    monkeypatch.setattr(atomic_export_module.os, "open", tracked_open)
+    return opened
+
+
 def _fd_count() -> int:
     return len(os.listdir("/dev/fd"))
 
@@ -247,6 +260,18 @@ def test_unknown_newer_schema_version_is_rejected_with_path(tmp_path):
     assert str(path) in str(exc_info.value)
     with sqlite3.connect(path) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+
+
+def test_negative_schema_version_is_rejected_with_path_and_version(tmp_path):
+    store = TranscriptStore(tmp_path, "s1")
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("PRAGMA user_version=-1")
+
+    with pytest.raises(TranscriptStoreError) as exc_info:
+        TranscriptStore(tmp_path, "s1")
+
+    assert str(store.path) in str(exc_info.value)
+    assert "-1" in str(exc_info.value)
 
 
 @pytest.mark.parametrize(
@@ -734,6 +759,158 @@ def test_backup_unlink_failure_after_commit_returns_new_export_and_keeps_backup(
     assert [item.message_id for item in store.read_all()] == ["m1", "m2"]
 
 
+def test_postcommit_target_and_lock_teardown_failures_do_not_change_success(tmp_path, monkeypatch):
+    store = TranscriptStore(tmp_path, "s1")
+    store.append(TranscriptItem(message_id="m1", role="user", content="first"))
+    export_path = store.export_jsonl()
+    store.append(TranscriptItem(message_id="m2", role="assistant", content="second"))
+    real_close = os.close
+    real_flock = atomic_export_module.fcntl.flock
+    opened = _track_atomic_open_fds(monkeypatch)
+    teardown_attempts: list[str] = []
+
+    def fail_selected_close(file_fd: int) -> None:
+        name = opened.get(file_fd, "")
+        real_close(file_fd)
+        if name == atomic_export_module.EXPORT_NAME:
+            teardown_attempts.append("target-close")
+            raise OSError("target close failed")
+        if name == atomic_export_module.LOCK_NAME:
+            teardown_attempts.append("lock-close")
+            raise OSError("lock close failed")
+
+    def fail_unlock(file_fd: int, operation: int) -> None:
+        real_flock(file_fd, operation)
+        if operation == atomic_export_module.fcntl.LOCK_UN:
+            teardown_attempts.append("unlock")
+            raise OSError("unlock failed")
+
+    monkeypatch.setattr(atomic_export_module.os, "close", fail_selected_close)
+    monkeypatch.setattr(atomic_export_module.fcntl, "flock", fail_unlock)
+
+    assert store.export_jsonl() == export_path
+
+    assert teardown_attempts == ["target-close", "unlock", "lock-close"]
+    assert b'"message_id": "m2"' in export_path.read_bytes()
+
+
+def test_precommit_temp_close_error_survives_target_close_error_and_cleans_name(
+    tmp_path, monkeypatch
+):
+    store = TranscriptStore(tmp_path, "s1")
+    store.append(TranscriptItem(message_id="m1", role="user", content="first"))
+    export_path = store.export_jsonl()
+    previous_export = export_path.read_bytes()
+    store.append(TranscriptItem(message_id="m2", role="assistant", content="second"))
+    real_close = os.close
+    real_unlink = os.unlink
+    opened = _track_atomic_open_fds(monkeypatch)
+    teardown_attempts: list[str] = []
+
+    def fail_selected_close(file_fd: int) -> None:
+        name = opened.get(file_fd, "")
+        real_close(file_fd)
+        if name.endswith(".tmp"):
+            teardown_attempts.append("temp-close")
+            raise OSError("temp close failed")
+        if name == atomic_export_module.EXPORT_NAME:
+            teardown_attempts.append("target-close")
+            raise OSError("target close failed")
+
+    def record_unlink(path, *, dir_fd=None):
+        if str(path).endswith(".tmp"):
+            teardown_attempts.append("temp-unlink")
+        real_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(atomic_export_module.os, "close", fail_selected_close)
+    monkeypatch.setattr(atomic_export_module.os, "unlink", record_unlink)
+
+    with pytest.raises(OSError, match="temp close failed"):
+        store.export_jsonl()
+
+    assert teardown_attempts == ["temp-close", "target-close", "temp-unlink"]
+    assert export_path.read_bytes() == previous_export
+
+
+def test_precommit_backup_close_error_attempts_all_fds_and_name_cleanup(tmp_path, monkeypatch):
+    store = TranscriptStore(tmp_path, "s1")
+    store.append(TranscriptItem(message_id="m1", role="user", content="first"))
+    export_path = store.export_jsonl()
+    previous_export = export_path.read_bytes()
+    store.append(TranscriptItem(message_id="m2", role="assistant", content="second"))
+    real_close = os.close
+    real_unlink = os.unlink
+    opened = _track_atomic_open_fds(monkeypatch)
+    teardown_attempts: list[str] = []
+
+    def fail_backup_close(file_fd: int) -> None:
+        name = opened.get(file_fd, "")
+        if name == atomic_export_module.EXPORT_NAME:
+            teardown_attempts.append("target-close")
+        if name.endswith(".bak"):
+            teardown_attempts.append("backup-close")
+        real_close(file_fd)
+        if name.endswith(".bak"):
+            raise OSError("backup close failed")
+
+    def fail_temp_unlink(path, *, dir_fd=None):
+        name = str(path)
+        if name.endswith(".tmp"):
+            teardown_attempts.append("temp-unlink")
+            raise OSError("temp unlink failed")
+        if name.endswith(".bak"):
+            teardown_attempts.append("backup-unlink")
+        real_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(atomic_export_module.os, "close", fail_backup_close)
+    monkeypatch.setattr(atomic_export_module.os, "unlink", fail_temp_unlink)
+
+    with pytest.raises(OSError, match="backup close failed"):
+        store.export_jsonl()
+
+    assert teardown_attempts == [
+        "backup-close",
+        "target-close",
+        "temp-unlink",
+        "backup-unlink",
+    ]
+    assert export_path.read_bytes() == previous_export
+
+
+def test_precommit_payload_error_survives_unlock_and_lock_close_errors(tmp_path, monkeypatch):
+    store = TranscriptStore(tmp_path, "s1")
+    store.append(TranscriptItem(message_id="m1", role="user", content="first"))
+    real_close = os.close
+    real_flock = atomic_export_module.fcntl.flock
+    opened = _track_atomic_open_fds(monkeypatch)
+    teardown_attempts: list[str] = []
+
+    def fail_payload(*args, **kwargs):
+        raise OSError("payload failed")
+
+    def fail_lock_close(file_fd: int) -> None:
+        name = opened.get(file_fd, "")
+        real_close(file_fd)
+        if name == atomic_export_module.LOCK_NAME:
+            teardown_attempts.append("lock-close")
+            raise OSError("lock close failed")
+
+    def fail_unlock(file_fd: int, operation: int) -> None:
+        real_flock(file_fd, operation)
+        if operation == atomic_export_module.fcntl.LOCK_UN:
+            teardown_attempts.append("unlock")
+            raise OSError("unlock failed")
+
+    monkeypatch.setattr(transcript_module.json, "dumps", fail_payload)
+    monkeypatch.setattr(atomic_export_module.os, "close", fail_lock_close)
+    monkeypatch.setattr(atomic_export_module.fcntl, "flock", fail_unlock)
+
+    with pytest.raises(OSError, match="payload failed"):
+        store.export_jsonl()
+
+    assert teardown_attempts == ["unlock", "lock-close"]
+
+
 def test_later_successful_export_preserves_prior_recovery_backup(tmp_path, monkeypatch):
     store = TranscriptStore(tmp_path, "s1")
     store.append(TranscriptItem(message_id="m1", role="user", content="first"))
@@ -859,9 +1036,11 @@ def test_second_export_blocks_while_first_has_active_durable_backup(tmp_path, mo
         second.join(timeout=10)
 
     assert failures == []
-    assert first_result == second_result == [
-        tmp_path / "evidence" / "s1" / "exports" / "transcript.jsonl"
-    ]
+    assert (
+        first_result
+        == second_result
+        == [tmp_path / "evidence" / "s1" / "exports" / "transcript.jsonl"]
+    )
 
 
 def test_export_lock_covers_snapshot_so_older_export_cannot_overwrite_newer_snapshot(
@@ -873,18 +1052,39 @@ def test_export_lock_covers_snapshot_so_older_export_cannot_overwrite_newer_snap
     stores[0].append(first)
     old_snapshot_encoded = threading.Event()
     release_old_export = threading.Event()
-    new_export_started = threading.Event()
+    new_lock_attempted = threading.Event()
+    new_lock_acquired = threading.Event()
+    allow_new_export = threading.Event()
+    new_snapshot_encoded = threading.Event()
+    new_export_done = threading.Event()
     failures: list[BaseException] = []
     real_dumps = json.dumps
+    real_flock = atomic_export_module.fcntl.flock
 
     def pause_old_snapshot(value, *args, **kwargs):
         if threading.current_thread().name == "old-snapshot-export":
             old_snapshot_encoded.set()
             if not release_old_export.wait(10):
                 raise RuntimeError("old snapshot release timed out")
+        if threading.current_thread().name == "new-snapshot-export":
+            new_snapshot_encoded.set()
         return real_dumps(value, *args, **kwargs)
 
+    def observe_new_lock_boundary(file_fd: int, operation: int) -> None:
+        if (
+            threading.current_thread().name == "new-snapshot-export"
+            and operation == atomic_export_module.fcntl.LOCK_EX
+        ):
+            new_lock_attempted.set()
+            real_flock(file_fd, operation)
+            new_lock_acquired.set()
+            if not allow_new_export.wait(10):
+                raise RuntimeError("new export release timed out")
+            return
+        real_flock(file_fd, operation)
+
     monkeypatch.setattr(transcript_module.json, "dumps", pause_old_snapshot)
+    monkeypatch.setattr(atomic_export_module.fcntl, "flock", observe_new_lock_boundary)
 
     def export_old_snapshot() -> None:
         try:
@@ -893,11 +1093,12 @@ def test_export_lock_covers_snapshot_so_older_export_cannot_overwrite_newer_snap
             failures.append(exc)
 
     def export_new_snapshot() -> None:
-        new_export_started.set()
         try:
             stores[1].export_jsonl()
         except BaseException as exc:  # pragma: no cover - asserted in parent thread
             failures.append(exc)
+        finally:
+            new_export_done.set()
 
     old_export = threading.Thread(target=export_old_snapshot, name="old-snapshot-export")
     new_export = threading.Thread(target=export_new_snapshot, name="new-snapshot-export")
@@ -905,18 +1106,28 @@ def test_export_lock_covers_snapshot_so_older_export_cannot_overwrite_newer_snap
     assert old_snapshot_encoded.wait(10)
     stores[1].append(second)
     new_export.start()
-    assert new_export_started.wait(2)
-    new_export.join(timeout=0.2)
-    new_export_was_blocked = new_export.is_alive()
+    assert new_lock_attempted.wait(10)
+    new_snapshot_was_encoded_before_lock = new_snapshot_encoded.is_set()
 
     try:
-        release_old_export.set()
+        if new_snapshot_was_encoded_before_lock:
+            assert new_lock_acquired.wait(10)
+            allow_new_export.set()
+            assert new_export_done.wait(10)
+            release_old_export.set()
+        else:
+            release_old_export.set()
+            assert new_lock_acquired.wait(10)
+            allow_new_export.set()
         old_export.join(timeout=10)
         new_export.join(timeout=10)
     finally:
         release_old_export.set()
+        allow_new_export.set()
 
-    assert new_export_was_blocked, "new exporter read its snapshot before acquiring the lock"
+    assert (
+        not new_snapshot_was_encoded_before_lock
+    ), "new exporter read its snapshot before acquiring the lock"
     assert not old_export.is_alive()
     assert not new_export.is_alive()
     assert failures == []
@@ -954,7 +1165,9 @@ def test_threaded_exporters_publish_complete_snapshot_without_recovery_loss(tmp_
     assert all(not thread.is_alive() for thread in threads)
     assert failures == []
     export_path = stores[0].path.parent / "exports" / "transcript.jsonl"
-    assert [TranscriptItem(**json.loads(line)) for line in export_path.read_text().splitlines()] == items
+    assert [
+        TranscriptItem(**json.loads(line)) for line in export_path.read_text().splitlines()
+    ] == items
     assert list(export_path.parent.glob(".transcript.jsonl.*.bak")) == []
 
 

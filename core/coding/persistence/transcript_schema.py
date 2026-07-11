@@ -44,10 +44,8 @@ class TranscriptSchemaError(TranscriptStoreError):
 def initialize_or_validate(connection: sqlite3.Connection, path: Path) -> None:
     """Create only an empty v0 database, otherwise validate exact schema v1."""
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-    if version > SCHEMA_VERSION:
-        raise TranscriptSchemaError(
-            f"unsupported transcript schema version {version} at {path}"
-        )
+    if version not in {0, SCHEMA_VERSION}:
+        raise TranscriptSchemaError(f"unsupported transcript schema version {version} at {path}")
     if version == 0:
         objects = _schema_objects(connection)
         if objects:

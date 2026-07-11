@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import logging
 import os
 import secrets
 import stat
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 
 EXPORT_NAME = "transcript.jsonl"
 LOCK_NAME = ".export.lock"
 
 _FILE_FLAGS = os.O_CLOEXEC | os.O_NOFOLLOW
+_LOGGER = logging.getLogger(__name__)
 
 
 def publish_jsonl(directory_fd: int, payload_factory: Callable[[], bytes]) -> None:
@@ -41,6 +43,8 @@ def _export_lock(directory_fd: int) -> Iterator[None]:
         raise
 
     acquired = False
+    body_succeeded = False
+    primary: BaseException | None = None
     try:
         _validate_file(lock_fd, LOCK_NAME)
         os.fchmod(lock_fd, 0o600)
@@ -50,12 +54,28 @@ def _export_lock(directory_fd: int) -> Iterator[None]:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
         acquired = True
         yield
+        body_succeeded = True
+    except BaseException as exc:
+        primary = exc
+        raise
     finally:
-        try:
-            if acquired:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        finally:
-            os.close(lock_fd)
+        teardown_errors: list[tuple[str, Exception]] = []
+        if acquired:
+            _attempt_teardown(
+                teardown_errors,
+                "export lock release",
+                lambda: fcntl.flock(lock_fd, fcntl.LOCK_UN),
+            )
+        _attempt_teardown(
+            teardown_errors,
+            "export lock file close",
+            lambda: os.close(lock_fd),
+        )
+        _resolve_teardown_errors(
+            teardown_errors,
+            committed=body_succeeded,
+            primary=primary,
+        )
 
 
 def _publish_locked(directory_fd: int, payload: bytes) -> None:
@@ -65,21 +85,25 @@ def _publish_locked(directory_fd: int, payload: bytes) -> None:
     backup_name = ""
     backup_fd = -1
     preserve_backup = False
+    committed = False
+    primary: BaseException | None = None
     try:
         temp_name, temp_fd = _open_unique_file(directory_fd, "tmp")
         os.fchmod(temp_fd, 0o600)
         _write_all(temp_fd, payload)
         os.fsync(temp_fd)
-        os.close(temp_fd)
+        completed_fd = temp_fd
         temp_fd = -1
+        os.close(completed_fd)
 
         if target_fd >= 0:
             backup_name, backup_fd = _open_unique_file(directory_fd, "bak")
             os.fchmod(backup_fd, 0o600)
             _copy_file(target_fd, backup_fd)
             os.fsync(backup_fd)
-            os.close(backup_fd)
+            completed_fd = backup_fd
             backup_fd = -1
+            os.close(completed_fd)
             os.fsync(directory_fd)
 
         replaced = False
@@ -93,6 +117,7 @@ def _publish_locked(directory_fd: int, payload: bytes) -> None:
             temp_name = ""
             replaced = True
             os.fsync(directory_fd)
+            committed = True
         except Exception as publish_error:
             if replaced:
                 try:
@@ -104,23 +129,47 @@ def _publish_locked(directory_fd: int, payload: bytes) -> None:
                 except Exception as rollback_error:
                     preserve_backup = bool(backup_name)
                     raise rollback_error from publish_error
-            backup_name = _best_effort_remove(directory_fd, backup_name)
-            preserve_backup = bool(backup_name)
             raise
-
-        backup_name = _best_effort_remove(directory_fd, backup_name)
-        preserve_backup = bool(backup_name)
+    except BaseException as exc:
+        primary = exc
+        raise
     finally:
+        teardown_errors: list[tuple[str, Exception]] = []
         if target_fd >= 0:
-            os.close(target_fd)
+            _attempt_teardown(
+                teardown_errors,
+                "export target close",
+                lambda: os.close(target_fd),
+            )
         if temp_fd >= 0:
-            os.close(temp_fd)
+            _attempt_teardown(
+                teardown_errors,
+                "export temp close",
+                lambda: os.close(temp_fd),
+            )
         if backup_fd >= 0:
-            os.close(backup_fd)
+            _attempt_teardown(
+                teardown_errors,
+                "export backup close",
+                lambda: os.close(backup_fd),
+            )
         if temp_name:
-            _best_effort_remove(directory_fd, temp_name)
+            _attempt_teardown(
+                teardown_errors,
+                "export temp cleanup",
+                lambda: _remove_name(directory_fd, temp_name),
+            )
         if backup_name and not preserve_backup:
-            _best_effort_remove(directory_fd, backup_name)
+            _attempt_teardown(
+                teardown_errors,
+                "export backup cleanup",
+                lambda: _remove_name(directory_fd, backup_name),
+            )
+        _resolve_teardown_errors(
+            teardown_errors,
+            committed=committed,
+            primary=primary,
+        )
 
 
 def _open_optional_target(directory_fd: int) -> int:
@@ -148,8 +197,14 @@ def _open_verified_file(
         raise
     try:
         _validate_file(file_fd, name)
-    except Exception:
-        os.close(file_fd)
+    except BaseException as exc:
+        teardown_errors: list[tuple[str, Exception]] = []
+        _attempt_teardown(
+            teardown_errors,
+            f"rejected file close ({name})",
+            lambda: os.close(file_fd),
+        )
+        _resolve_teardown_errors(teardown_errors, committed=False, primary=exc)
         raise
     return file_fd
 
@@ -193,35 +248,80 @@ def _write_all(file_fd: int, data: bytes) -> None:
         view = view[written:]
 
 
-def _best_effort_remove(directory_fd: int, name: str) -> str:
-    if not name:
-        return ""
+def _remove_name(directory_fd: int, name: str) -> None:
     try:
         os.unlink(name, dir_fd=directory_fd)
     except FileNotFoundError:
-        return ""
-    except OSError:
-        return name
-    with suppress(OSError):
-        os.fsync(directory_fd)
-    return ""
+        return
+    os.fsync(directory_fd)
 
 
 def _restore_target(directory_fd: int, source_fd: int) -> None:
     recovery_name, recovery_fd = _open_unique_file(directory_fd, "bak")
+    primary: BaseException | None = None
     try:
         os.fchmod(recovery_fd, 0o600)
         _copy_file(source_fd, recovery_fd)
         os.fsync(recovery_fd)
-    except Exception:
-        os.close(recovery_fd)
-        with suppress(FileNotFoundError):
-            os.unlink(recovery_name, dir_fd=directory_fd)
+        completed_fd = recovery_fd
+        recovery_fd = -1
+        os.close(completed_fd)
+        os.replace(
+            recovery_name,
+            EXPORT_NAME,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        recovery_name = ""
+    except BaseException as exc:
+        primary = exc
         raise
-    os.close(recovery_fd)
-    os.replace(
-        recovery_name,
-        EXPORT_NAME,
-        src_dir_fd=directory_fd,
-        dst_dir_fd=directory_fd,
-    )
+    finally:
+        teardown_errors: list[tuple[str, Exception]] = []
+        if recovery_fd >= 0:
+            _attempt_teardown(
+                teardown_errors,
+                "rollback recovery close",
+                lambda: os.close(recovery_fd),
+            )
+        if recovery_name:
+            _attempt_teardown(
+                teardown_errors,
+                "rollback recovery cleanup",
+                lambda: _remove_name(directory_fd, recovery_name),
+            )
+        _resolve_teardown_errors(
+            teardown_errors,
+            committed=False,
+            primary=primary,
+        )
+
+
+def _attempt_teardown(
+    errors: list[tuple[str, Exception]],
+    label: str,
+    action: Callable[[], None],
+) -> None:
+    try:
+        action()
+    except Exception as exc:
+        errors.append((label, exc))
+
+
+def _resolve_teardown_errors(
+    errors: list[tuple[str, Exception]],
+    *,
+    committed: bool,
+    primary: BaseException | None,
+) -> None:
+    if not errors:
+        return
+    for label, error in errors:
+        _LOGGER.warning(
+            "transcript export teardown failed during %s: %s",
+            label,
+            error,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+    if not committed and primary is None:
+        raise errors[0][1]
