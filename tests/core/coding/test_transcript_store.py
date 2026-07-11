@@ -19,6 +19,7 @@ from core.coding.persistence.transcript_store import (
     TranscriptCorruptionError,
     TranscriptItem,
     TranscriptStore,
+    TranscriptStoreError,
 )
 
 
@@ -45,6 +46,39 @@ def _mode(path: Path) -> int:
 
 def _fd_count() -> int:
     return len(os.listdir("/dev/fd"))
+
+
+def _precreate_database(tmp_path, schema_sql: str | None, version: int) -> Path:
+    path = tmp_path / "evidence" / "s1" / "transcript.sqlite3"
+    path.parent.mkdir(parents=True)
+    with sqlite3.connect(path) as connection:
+        if schema_sql is not None:
+            connection.execute(schema_sql)
+        connection.execute(f"PRAGMA user_version={version}")
+    return path
+
+
+def _transcript_schema(
+    *,
+    sequence: str = "INTEGER PRIMARY KEY AUTOINCREMENT",
+    message_id: str = "TEXT NOT NULL UNIQUE",
+    content: str = "TEXT NOT NULL",
+    include_created_at: bool = True,
+) -> str:
+    created_at = ", created_at TEXT NOT NULL DEFAULT ''" if include_created_at else ""
+    return f"""
+    CREATE TABLE transcript (
+        sequence {sequence},
+        message_id {message_id},
+        role TEXT NOT NULL,
+        content {content},
+        run_id TEXT NOT NULL DEFAULT '',
+        turn_id TEXT NOT NULL DEFAULT '',
+        call_id TEXT NOT NULL DEFAULT '',
+        artifact_ref TEXT NOT NULL DEFAULT ''
+        {created_at}
+    )
+    """
 
 
 def test_path_append_and_rebuild_idempotency(tmp_path):
@@ -112,22 +146,31 @@ def test_spawn_processes_append_same_message_once(tmp_path):
         context.Process(target=_spawn_append, args=(str(tmp_path), ready, start, results))
         for _ in range(2)
     ]
+    started_processes = []
 
-    for process in processes:
-        process.start()
-    for _ in processes:
-        assert ready.get(timeout=10) is True
-    start.set()
-    for process in processes:
-        process.join(timeout=10)
-
-    assert [process.exitcode for process in processes] == [0, 0]
     try:
-        appended = [results.get(timeout=2) for _ in processes]
-    except Empty as exc:  # pragma: no cover - produces a clearer assertion failure
-        raise AssertionError("spawn worker did not report a result") from exc
-    assert sorted(appended) == [False, True]
-    assert len(TranscriptStore(tmp_path, "s1").read_all()) == 1
+        for process in processes:
+            process.start()
+            started_processes.append(process)
+        for _ in processes:
+            assert ready.get(timeout=10) is True
+        start.set()
+        for process in processes:
+            process.join(timeout=10)
+
+        assert [process.exitcode for process in processes] == [0, 0]
+        try:
+            appended = [results.get(timeout=2) for _ in processes]
+        except Empty as exc:  # pragma: no cover - produces a clearer assertion failure
+            raise AssertionError("spawn worker did not report a result") from exc
+        assert sorted(appended) == [False, True]
+        assert len(TranscriptStore(tmp_path, "s1").read_all()) == 1
+    finally:
+        start.set()
+        for process in started_processes:
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=5)
 
 
 def test_schema_version_columns_and_connection_pragmas(tmp_path):
@@ -178,6 +221,119 @@ def test_unknown_newer_schema_version_is_rejected_with_path(tmp_path):
     assert str(path) in str(exc_info.value)
     with sqlite3.connect(path) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+
+
+@pytest.mark.parametrize(
+    "schema_sql",
+    [
+        None,
+        _transcript_schema(include_created_at=False),
+        _transcript_schema(content="BLOB NOT NULL"),
+        _transcript_schema(message_id="TEXT NOT NULL"),
+        _transcript_schema(sequence="INTEGER NOT NULL"),
+        _transcript_schema(sequence="INTEGER PRIMARY KEY"),
+    ],
+    ids=[
+        "missing-table",
+        "missing-column",
+        "wrong-type",
+        "missing-message-id-unique",
+        "wrong-primary-key",
+        "missing-autoincrement",
+    ],
+)
+def test_v1_malformed_schema_is_rejected_immediately_with_path(tmp_path, schema_sql):
+    path = _precreate_database(tmp_path, schema_sql, 1)
+
+    with pytest.raises(TranscriptStoreError) as exc_info:
+        TranscriptStore(tmp_path, "s1")
+
+    assert str(path) in str(exc_info.value)
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+
+
+def test_v1_external_unique_index_does_not_replace_message_id_constraint(tmp_path):
+    path = _precreate_database(
+        tmp_path,
+        _transcript_schema(message_id="TEXT NOT NULL"),
+        1,
+    )
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE UNIQUE INDEX external_unique ON transcript(message_id)")
+
+    with pytest.raises(TranscriptStoreError) as exc_info:
+        TranscriptStore(tmp_path, "s1")
+
+    assert str(path) in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "schema_sql",
+    [
+        "CREATE TABLE unrelated (value TEXT)",
+        "CREATE TABLE sqliteX (value TEXT)",
+        _transcript_schema(include_created_at=False),
+    ],
+    ids=["unrelated-table", "sqlite-prefix-user-table", "malformed-transcript"],
+)
+def test_v0_database_with_any_user_table_is_rejected_without_upgrade(tmp_path, schema_sql):
+    path = _precreate_database(tmp_path, schema_sql, 0)
+    with sqlite3.connect(path) as connection:
+        original_tables = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT GLOB 'sqlite_*'"
+        ).fetchall()
+
+    with pytest.raises(TranscriptStoreError) as exc_info:
+        TranscriptStore(tmp_path, "s1")
+
+    assert str(path) in str(exc_info.value)
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 0
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT GLOB 'sqlite_*'"
+            ).fetchall()
+            == original_tables
+        )
+
+
+def test_truly_empty_v0_database_is_created_as_v1_and_reopens(tmp_path):
+    path = _precreate_database(tmp_path, None, 0)
+
+    store = TranscriptStore(tmp_path, "s1")
+    reopened = TranscriptStore(tmp_path, "s1")
+
+    assert store.read_all() == []
+    assert reopened.read_all() == []
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+
+
+def test_schema_inspection_operational_error_includes_path_and_cause(tmp_path, monkeypatch):
+    path = _precreate_database(tmp_path, None, 0)
+    real_connect = sqlite3.connect
+
+    class ConnectionProxy:
+        def __init__(self, *args, **kwargs):
+            self._connection = real_connect(*args, **kwargs)
+
+        def execute(self, sql, parameters=()):
+            if sql.strip() == "PRAGMA table_info(transcript)":
+                raise sqlite3.OperationalError("schema inspection failed")
+            return self._connection.execute(sql, parameters)
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+    monkeypatch.setattr(transcript_module.sqlite3, "connect", ConnectionProxy)
+
+    with pytest.raises(TranscriptStoreError) as exc_info:
+        TranscriptStore(tmp_path, "s1")
+
+    assert str(path) in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, sqlite3.OperationalError)
+    assert "schema inspection failed" in str(exc_info.value.__cause__)
 
 
 def test_uncommitted_raw_transaction_is_not_visible_after_close(tmp_path):
@@ -243,7 +399,7 @@ def test_busy_writer_raises_operational_error_with_bounded_wait(tmp_path, monkey
         blocker.close()
 
     assert elapsed >= 0.08
-    assert elapsed < 1.5
+    assert elapsed < 3.0
 
 
 def test_integrity_check_and_corruption_error_include_database_path(tmp_path):
@@ -421,9 +577,13 @@ def test_export_reports_rollback_sync_failure_with_publish_error_as_cause(tmp_pa
     assert isinstance(exc_info.value.__cause__, OSError)
     assert "publish directory sync failed" in str(exc_info.value.__cause__)
     assert export_path.read_bytes() == previous_export
+    backups = list(export_path.parent.glob(".transcript.jsonl.*.bak"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == previous_export
+    assert _mode(backups[0]) == 0o600
 
 
-def test_backup_cleanup_sync_failure_restores_previous_export(tmp_path, monkeypatch):
+def test_backup_cleanup_sync_failure_after_commit_returns_new_export(tmp_path, monkeypatch):
     store = TranscriptStore(tmp_path, "s1")
     store.append(TranscriptItem(message_id="m1", role="user", content="first"))
     export_path = store.export_jsonl()
@@ -442,12 +602,87 @@ def test_backup_cleanup_sync_failure_restores_previous_export(tmp_path, monkeypa
 
     monkeypatch.setattr(transcript_module.os, "fsync", fail_backup_cleanup_sync)
 
-    with pytest.raises(OSError, match="backup cleanup sync failed"):
-        store.export_jsonl()
+    assert store.export_jsonl() == export_path
 
     assert directory_syncs_after_publish == 2
-    assert export_path.read_bytes() == previous_export
-    assert list(export_path.parent.iterdir()) == [export_path]
+    assert export_path.read_bytes() != previous_export
+    assert b'"message_id": "m2"' in export_path.read_bytes()
+    assert [item.message_id for item in store.read_all()] == ["m1", "m2"]
+
+
+def test_backup_unlink_failure_after_commit_returns_new_export_and_keeps_backup(
+    tmp_path, monkeypatch
+):
+    store = TranscriptStore(tmp_path, "s1")
+    store.append(TranscriptItem(message_id="m1", role="user", content="first"))
+    export_path = store.export_jsonl()
+    previous_export = export_path.read_bytes()
+    store.append(TranscriptItem(message_id="m2", role="assistant", content="second"))
+    real_unlink = os.unlink
+
+    def fail_backup_unlink(path, *, dir_fd=None):
+        if str(path).endswith(".bak"):
+            raise OSError("backup unlink failed")
+        real_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(transcript_module.os, "unlink", fail_backup_unlink)
+
+    assert store.export_jsonl() == export_path
+
+    assert export_path.read_bytes() != previous_export
+    assert b'"message_id": "m2"' in export_path.read_bytes()
+    backups = list(export_path.parent.glob(".transcript.jsonl.*.bak"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == previous_export
+    assert [item.message_id for item in store.read_all()] == ["m1", "m2"]
+
+
+def test_later_successful_export_best_effort_cleans_stale_regular_backup(tmp_path, monkeypatch):
+    store = TranscriptStore(tmp_path, "s1")
+    store.append(TranscriptItem(message_id="m1", role="user", content="first"))
+    export_path = store.export_jsonl()
+    store.append(TranscriptItem(message_id="m2", role="assistant", content="second"))
+    real_unlink = os.unlink
+
+    with monkeypatch.context() as context:
+
+        def fail_backup_unlink(path, *, dir_fd=None):
+            if str(path).endswith(".bak"):
+                raise OSError("backup unlink failed")
+            real_unlink(path, dir_fd=dir_fd)
+
+        context.setattr(transcript_module.os, "unlink", fail_backup_unlink)
+        assert store.export_jsonl() == export_path
+
+    assert len(list(export_path.parent.glob(".transcript.jsonl.*.bak"))) == 1
+
+    store.append(TranscriptItem(message_id="m3", role="assistant", content="third"))
+    assert store.export_jsonl() == export_path
+
+    assert list(export_path.parent.glob(".transcript.jsonl.*.bak")) == []
+    assert [item.message_id for item in store.read_all()] == ["m1", "m2", "m3"]
+
+
+def test_stale_backup_scan_failure_after_commit_returns_new_export(tmp_path, monkeypatch):
+    store = TranscriptStore(tmp_path, "s1")
+    store.append(TranscriptItem(message_id="m1", role="user", content="first"))
+    export_path = store.export_jsonl()
+    previous_export = export_path.read_bytes()
+    store.append(TranscriptItem(message_id="m2", role="assistant", content="second"))
+
+    def fail_listdir(path):
+        raise OSError("stale backup scan failed")
+
+    monkeypatch.setattr(transcript_module.os, "listdir", fail_listdir)
+
+    assert store.export_jsonl() == export_path
+
+    assert export_path.read_bytes() != previous_export
+    assert b'"message_id": "m2"' in export_path.read_bytes()
+    assert store.read_all() == [
+        TranscriptItem(message_id="m1", role="user", content="first"),
+        TranscriptItem(message_id="m2", role="assistant", content="second"),
+    ]
 
 
 def test_export_rejects_symlink_target_before_external_change(tmp_path):

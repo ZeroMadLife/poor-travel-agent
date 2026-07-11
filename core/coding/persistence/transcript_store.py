@@ -45,6 +45,10 @@ class TranscriptStoreError(RuntimeError):
     """Base error for transcript persistence failures."""
 
 
+class TranscriptSchemaError(TranscriptStoreError):
+    """Raised when an existing transcript schema is incompatible."""
+
+
 class TranscriptCorruptionError(TranscriptStoreError):
     """Raised when the canonical SQLite database cannot be read safely."""
 
@@ -208,13 +212,26 @@ class TranscriptStore:
                         raise TranscriptStoreError(
                             f"unsupported transcript schema version {version} at {self.path}"
                         )
-                    connection.execute(_SCHEMA_SQL)
+                    if version == 0:
+                        user_tables = _read_user_tables(connection)
+                        if user_tables:
+                            names = ", ".join(name for name, _ in user_tables)
+                            raise TranscriptSchemaError(
+                                f"refusing to initialize non-empty v0 transcript database "
+                                f"at {self.path}: user tables: {names}"
+                            )
+                        connection.execute(_SCHEMA_SQL)
+                    _validate_schema(connection, self.path)
                     if version == 0:
                         connection.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
                     connection.commit()
                 except Exception:
                     _rollback(connection)
                     raise
+        except sqlite3.OperationalError as exc:
+            raise TranscriptStoreError(
+                f"unable to initialize transcript schema at {self.path}: {exc}"
+            ) from exc
         except sqlite3.DatabaseError as exc:
             self._raise_if_corrupt(exc)
             raise
@@ -258,6 +275,69 @@ class TranscriptStore:
 
 def _read_items(connection: sqlite3.Connection) -> list[TranscriptItem]:
     return [TranscriptItem(*row) for row in connection.execute(_SELECT_SQL).fetchall()]
+
+
+def _read_user_tables(connection: sqlite3.Connection) -> list[tuple[str, str | None]]:
+    return connection.execute(
+        """
+        SELECT name, sql
+        FROM sqlite_master
+        WHERE type = 'table' AND name NOT GLOB 'sqlite_*'
+        ORDER BY name
+        """
+    ).fetchall()
+
+
+def _validate_schema(connection: sqlite3.Connection, path: Path) -> None:
+    user_tables = _read_user_tables(connection)
+    if len(user_tables) != 1 or user_tables[0][0] != "transcript":
+        names = ", ".join(name for name, _ in user_tables) or "none"
+        raise TranscriptSchemaError(
+            f"invalid transcript schema at {path}: expected only transcript table, found {names}"
+        )
+
+    create_sql = user_tables[0][1]
+    normalized_sql = " ".join((create_sql or "").upper().split())
+    if "SEQUENCE INTEGER PRIMARY KEY AUTOINCREMENT" not in normalized_sql:
+        raise TranscriptSchemaError(
+            f"invalid transcript schema at {path}: sequence must use AUTOINCREMENT"
+        )
+
+    columns = connection.execute("PRAGMA table_info(transcript)").fetchall()
+    actual_columns = [tuple(column[1:]) for column in columns]
+    expected_columns = [
+        ("sequence", "INTEGER", 0, None, 1),
+        ("message_id", "TEXT", 1, None, 0),
+        ("role", "TEXT", 1, None, 0),
+        ("content", "TEXT", 1, None, 0),
+        ("run_id", "TEXT", 1, "''", 0),
+        ("turn_id", "TEXT", 1, "''", 0),
+        ("call_id", "TEXT", 1, "''", 0),
+        ("artifact_ref", "TEXT", 1, "''", 0),
+        ("created_at", "TEXT", 1, "''", 0),
+    ]
+    if actual_columns != expected_columns:
+        raise TranscriptSchemaError(f"invalid transcript columns at {path}")
+
+    indexes = connection.execute("PRAGMA index_list(transcript)").fetchall()
+    unique_message_indexes = []
+    for index in indexes:
+        index_name = str(index[1])
+        index_columns = connection.execute(
+            "SELECT name FROM pragma_index_info(?) ORDER BY seqno",
+            (index_name,),
+        ).fetchall()
+        if (
+            int(index[2]) == 1
+            and str(index[3]) == "u"
+            and int(index[4]) == 0
+            and index_columns == [("message_id",)]
+        ):
+            unique_message_indexes.append(index_name)
+    if len(indexes) != 1 or len(unique_message_indexes) != 1:
+        raise TranscriptSchemaError(
+            f"invalid transcript indexes at {path}: message_id must be uniquely indexed"
+        )
 
 
 def _ensure_wal(connection: sqlite3.Connection, path: Path) -> None:
@@ -413,7 +493,6 @@ def _atomic_replace(directory_fd: int, name: str, payload: bytes) -> None:
     temp_fd = -1
     backup_name = ""
     backup_fd = -1
-    published = False
     preserve_backup = False
     try:
         temp_name, temp_fd = _open_unique_export_file(directory_fd, name, "tmp")
@@ -435,41 +514,31 @@ def _atomic_replace(directory_fd: int, name: str, payload: bytes) -> None:
             os.close(completed_fd)
             os.fsync(directory_fd)
 
+        replaced = False
         try:
             os.replace(temp_name, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
             temp_name = ""
-            published = True
+            replaced = True
             os.fsync(directory_fd)
-
-            if backup_name:
-                os.unlink(backup_name, dir_fd=directory_fd)
-                backup_name = ""
-                os.fsync(directory_fd)
         except Exception as publish_error:
-            try:
-                if published and target_fd >= 0:
-                    if backup_name:
-                        os.replace(
-                            backup_name,
-                            name,
-                            src_dir_fd=directory_fd,
-                            dst_dir_fd=directory_fd,
-                        )
-                    else:
+            if replaced:
+                try:
+                    if target_fd >= 0:
                         _restore_export_from_fd(directory_fd, name, target_fd)
-                    backup_name = ""
-                    published = False
+                    else:
+                        os.unlink(name, dir_fd=directory_fd)
                     os.fsync(directory_fd)
-                elif published:
-                    os.unlink(name, dir_fd=directory_fd)
-                    published = False
-                    os.fsync(directory_fd)
-            except Exception as rollback_error:
-                preserve_backup = bool(backup_name)
-                raise rollback_error from publish_error
+                except Exception as rollback_error:
+                    preserve_backup = bool(backup_name)
+                    raise rollback_error from publish_error
+            backup_name = _best_effort_remove(directory_fd, backup_name)
+            preserve_backup = bool(backup_name)
             raise
+
+        backup_name = _best_effort_remove(directory_fd, backup_name)
+        preserve_backup = bool(backup_name)
+        _cleanup_stale_backups(directory_fd, name)
     finally:
-        cleanup_changed = False
         if target_fd >= 0:
             os.close(target_fd)
         if temp_fd >= 0:
@@ -477,15 +546,9 @@ def _atomic_replace(directory_fd: int, name: str, payload: bytes) -> None:
         if backup_fd >= 0:
             os.close(backup_fd)
         if temp_name:
-            with suppress(FileNotFoundError):
-                os.unlink(temp_name, dir_fd=directory_fd)
-                cleanup_changed = True
+            _best_effort_remove(directory_fd, temp_name)
         if backup_name and not preserve_backup:
-            with suppress(FileNotFoundError):
-                os.unlink(backup_name, dir_fd=directory_fd)
-                cleanup_changed = True
-        if cleanup_changed:
-            os.fsync(directory_fd)
+            _best_effort_remove(directory_fd, backup_name)
 
 
 def _open_optional_export_target(directory_fd: int, name: str) -> int:
@@ -519,6 +582,44 @@ def _copy_file(source_fd: int, destination_fd: int) -> None:
     os.lseek(source_fd, 0, os.SEEK_SET)
     while chunk := os.read(source_fd, 64 * 1024):
         _write_all(destination_fd, chunk)
+
+
+def _best_effort_remove(directory_fd: int, name: str) -> str:
+    if not name:
+        return ""
+    try:
+        os.unlink(name, dir_fd=directory_fd)
+    except FileNotFoundError:
+        return ""
+    except OSError:
+        return name
+    with suppress(OSError):
+        os.fsync(directory_fd)
+    return ""
+
+
+def _cleanup_stale_backups(directory_fd: int, name: str) -> None:
+    prefix = f".{name}."
+    try:
+        candidates = os.listdir(directory_fd)
+    except OSError:
+        return
+    for candidate in candidates:
+        if not candidate.startswith(prefix) or not candidate.endswith(".bak"):
+            continue
+        try:
+            candidate_fd = _open_verified_file(
+                directory_fd,
+                candidate,
+                flags=os.O_RDONLY | os.O_NONBLOCK,
+            )
+        except (OSError, ValueError):
+            continue
+        try:
+            os.close(candidate_fd)
+        except OSError:
+            continue
+        _best_effort_remove(directory_fd, candidate)
 
 
 def _restore_export_from_fd(directory_fd: int, name: str, source_fd: int) -> None:
