@@ -1,26 +1,52 @@
-"""Canonical append-only transcript persistence."""
+"""Canonical SQLite transcript persistence with explicit audit export."""
 
 from __future__ import annotations
 
 import errno
-import fcntl
 import json
 import os
-import threading
+import secrets
+import sqlite3
+import stat
+import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import cast
 
+_SCHEMA_VERSION = 1
+_BUSY_TIMEOUT_MS = 5000
+_DATABASE_NAME = "transcript.sqlite3"
+_EXPORT_NAME = "transcript.jsonl"
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
 _FILE_FLAGS = os.O_CLOEXEC | os.O_NOFOLLOW
-_LOCK_NAME = ".transcript.lock"
-_TRANSCRIPT_NAME = "transcript.jsonl"
+_SIDECAR_SUFFIXES = ("-wal", "-shm")
+_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS transcript (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id TEXT NOT NULL UNIQUE,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    run_id TEXT NOT NULL DEFAULT '',
+    turn_id TEXT NOT NULL DEFAULT '',
+    call_id TEXT NOT NULL DEFAULT '',
+    artifact_ref TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT ''
+)
+"""
+_SELECT_SQL = """
+SELECT message_id, role, content, run_id, turn_id, call_id, artifact_ref, created_at
+FROM transcript
+ORDER BY sequence
+"""
 
 
-class TranscriptCorruptionError(RuntimeError):
-    """Raised when corruption appears before the repairable transcript tail."""
+class TranscriptStoreError(RuntimeError):
+    """Base error for transcript persistence failures."""
+
+
+class TranscriptCorruptionError(TranscriptStoreError):
+    """Raised when the canonical SQLite database cannot be read safely."""
 
 
 @dataclass(frozen=True)
@@ -38,219 +64,259 @@ class TranscriptItem:
 
 
 class TranscriptStore:
-    """Append transcript entries once and preserve all existing valid lines."""
+    """Persist a session transcript in SQLite under a server-controlled root.
+
+    The root is assumed to be trusted and unavailable to tools or other untrusted
+    same-user writers. ``O_NOFOLLOW`` and inode/link checks prevent accidental
+    traversal and common link attacks, but cannot eliminate same-user TOCTOU races
+    when an attacker can mutate the trusted directory concurrently.
+    """
 
     def __init__(self, root: Path, session_id: str) -> None:
         _validate_scope_id(session_id, "session")
         self._root = _trusted_root(root)
         self._components = ("evidence", session_id)
-        self.path = root.joinpath(*self._components, _TRANSCRIPT_NAME)
-        self._lock = threading.RLock()
-        with self._exclusive_directory() as directory_fd:
-            self._message_ids = {
-                item.message_id for item in self._read_items(directory_fd, repair_tail=True)
-            }
+        self.path = self._root.joinpath(*self._components, _DATABASE_NAME)
+
+        directory_fd = _open_directory(self._root, self._components)
+        try:
+            _prepare_database_file(directory_fd)
+        finally:
+            os.close(directory_fd)
+        self._initialize_schema()
+
+    @property
+    def schema_version(self) -> int:
+        """Return the schema version supported by this store."""
+        return _SCHEMA_VERSION
 
     def append(self, item: TranscriptItem) -> bool:
-        """Append ``item`` unless its message id was already persisted."""
-        line = (json.dumps(asdict(item), ensure_ascii=False, sort_keys=True) + "\n").encode()
-        with self._lock, self._exclusive_directory() as directory_fd:
-            self._message_ids = {
-                entry.message_id for entry in self._read_items(directory_fd, repair_tail=True)
-            }
-            if item.message_id in self._message_ids:
-                return False
-
-            transcript_existed = _entry_exists(directory_fd, _TRANSCRIPT_NAME)
-            transcript_fd = _open_file(
-                directory_fd,
-                _TRANSCRIPT_NAME,
-                os.O_WRONLY | os.O_APPEND | os.O_CREAT | _FILE_FLAGS,
-                0o600,
-            )
-            try:
-                _reject_hardlink(transcript_fd, _TRANSCRIPT_NAME)
-                os.fchmod(transcript_fd, 0o600)
-                _write_all(transcript_fd, line)
-                os.fsync(transcript_fd)
-                if not transcript_existed:
-                    os.fsync(directory_fd)
-            except Exception:
-                self._message_ids = {
-                    entry.message_id for entry in self._read_items(directory_fd, repair_tail=True)
-                }
-                raise
-            finally:
-                os.close(transcript_fd)
-
-            self._message_ids.add(item.message_id)
-            return True
+        """Insert ``item`` once by message id in a short transaction."""
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    cursor = connection.execute(
+                        """
+                        INSERT INTO transcript (
+                            message_id, role, content, run_id, turn_id, call_id,
+                            artifact_ref, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(message_id) DO NOTHING
+                        """,
+                        (
+                            item.message_id,
+                            item.role,
+                            item.content,
+                            item.run_id,
+                            item.turn_id,
+                            item.call_id,
+                            item.artifact_ref,
+                            item.created_at,
+                        ),
+                    )
+                    inserted = cursor.rowcount == 1
+                    connection.commit()
+                    return inserted
+                except Exception:
+                    _rollback(connection)
+                    raise
+        except sqlite3.DatabaseError as exc:
+            self._raise_if_corrupt(exc)
+            raise
 
     def read_all(self) -> list[TranscriptItem]:
-        """Read valid transcript lines, repairing a malformed final tail."""
-        with self._lock, self._exclusive_directory() as directory_fd:
-            items = self._read_items(directory_fd, repair_tail=True)
-            self._message_ids = {item.message_id for item in items}
-            return items
+        """Read transcript entries in their insertion sequence."""
+        try:
+            with self._connect() as connection:
+                return _read_items(connection)
+        except sqlite3.DatabaseError as exc:
+            self._raise_if_corrupt(exc)
+            raise
+
+    def export_jsonl(self) -> Path:
+        """Atomically replace the manual JSONL audit export from one snapshot."""
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN")
+                try:
+                    items = _read_items(connection)
+                    connection.commit()
+                except Exception:
+                    _rollback(connection)
+                    raise
+        except sqlite3.DatabaseError as exc:
+            self._raise_if_corrupt(exc)
+            raise
+
+        payload = "".join(
+            json.dumps(asdict(item), ensure_ascii=False, sort_keys=True) + "\n" for item in items
+        ).encode("utf-8")
+        directory_fd = _open_directory(self._root, (*self._components, "exports"))
+        try:
+            _atomic_replace(directory_fd, _EXPORT_NAME, payload)
+        finally:
+            os.close(directory_fd)
+        return self.path.parent / "exports" / _EXPORT_NAME
+
+    def check_integrity(self) -> bool:
+        """Return true for an intact database, raising on corruption."""
+        try:
+            with self._connect() as connection:
+                results = connection.execute("PRAGMA integrity_check").fetchall()
+        except sqlite3.DatabaseError as exc:
+            self._raise_if_corrupt(exc)
+            raise
+        if results != [("ok",)]:
+            details = "; ".join(str(row[0]) for row in results)
+            raise TranscriptCorruptionError(
+                f"transcript database failed integrity check at {self.path}: {details}"
+            )
+        return True
 
     @contextmanager
-    def _exclusive_directory(self) -> Iterator[int]:
-        directory_fd = _open_directory(self._root, self._components, create=True)
-        lock_fd = -1
-        acquired = False
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Open one configured connection and close it before returning."""
+        expected = self._verify_database_and_sidecars()
+        connection: sqlite3.Connection | None = None
         try:
-            lock_existed = _entry_exists(directory_fd, _LOCK_NAME)
-            lock_fd = _open_file(
-                directory_fd,
-                _LOCK_NAME,
-                os.O_RDWR | os.O_CREAT | _FILE_FLAGS,
-                0o600,
+            connection = sqlite3.connect(
+                self.path,
+                timeout=_BUSY_TIMEOUT_MS / 1000,
+                isolation_level=None,
             )
-            _reject_hardlink(lock_fd, _LOCK_NAME)
-            os.fchmod(lock_fd, 0o600)
-            if not lock_existed:
-                os.fsync(lock_fd)
-                os.fsync(directory_fd)
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            acquired = True
-            yield directory_fd
+            self._verify_connected_inode(expected)
+            connection.execute(f"PRAGMA busy_timeout={int(_BUSY_TIMEOUT_MS)}")
+            connection.execute("PRAGMA foreign_keys=ON")
+            _ensure_wal(connection, self.path)
+            connection.execute("PRAGMA synchronous=FULL")
+            yield connection
         finally:
             try:
-                if acquired:
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                if connection is not None:
+                    connection.close()
             finally:
+                self._verify_database_and_sidecars()
+
+    def _initialize_schema(self) -> None:
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
                 try:
-                    if lock_fd >= 0:
-                        os.close(lock_fd)
-                finally:
-                    os.close(directory_fd)
+                    version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+                    if version > _SCHEMA_VERSION:
+                        raise TranscriptStoreError(
+                            f"unsupported transcript schema version {version} at {self.path}"
+                        )
+                    connection.execute(_SCHEMA_SQL)
+                    if version == 0:
+                        connection.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+                    connection.commit()
+                except Exception:
+                    _rollback(connection)
+                    raise
+        except sqlite3.DatabaseError as exc:
+            self._raise_if_corrupt(exc)
+            raise
 
-    def _read_items(self, directory_fd: int, *, repair_tail: bool) -> list[TranscriptItem]:
+    def _verify_database_and_sidecars(self) -> tuple[int, int]:
+        directory_fd = _open_directory(self._root, self._components)
         try:
-            transcript_fd = _open_file(
-                directory_fd,
-                _TRANSCRIPT_NAME,
-                os.O_RDWR | _FILE_FLAGS,
-            )
-        except FileNotFoundError:
-            return []
-
-        try:
-            _reject_hardlink(transcript_fd, _TRANSCRIPT_NAME)
-            os.fchmod(transcript_fd, 0o600)
-            data = _read_all(transcript_fd)
-            return self._parse_items(
-                directory_fd,
-                transcript_fd,
-                data,
-                repair_tail=repair_tail,
-            )
-        finally:
-            os.close(transcript_fd)
-
-    def _parse_items(
-        self,
-        directory_fd: int,
-        transcript_fd: int,
-        data: bytes,
-        *,
-        repair_tail: bool,
-    ) -> list[TranscriptItem]:
-        lines = data.splitlines(keepends=True)
-        nonempty_indexes = [index for index, line in enumerate(lines) if line.strip()]
-        last_nonempty = nonempty_indexes[-1] if nonempty_indexes else -1
-        items: list[TranscriptItem] = []
-        offset = 0
-
-        for index, raw_line in enumerate(lines):
-            if not raw_line.strip():
-                offset += len(raw_line)
-                continue
+            database_fd = _open_verified_file(directory_fd, _DATABASE_NAME)
             try:
-                payload = cast(dict[str, str], json.loads(raw_line.decode("utf-8")))
-                if not isinstance(payload, dict):
-                    raise TypeError("transcript entry must be an object")
-                items.append(TranscriptItem(**payload))
-            except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
-                line_number = index + 1
-                if repair_tail and index == last_nonempty:
-                    self._repair_tail(directory_fd, transcript_fd, data[offset:], offset)
-                    return items
-                raise TranscriptCorruptionError(
-                    f"corrupt transcript {self.path} at line {line_number}"
-                ) from exc
-            offset += len(raw_line)
-        if data and not data.endswith(b"\n"):
-            os.lseek(transcript_fd, 0, os.SEEK_END)
-            _write_all(transcript_fd, b"\n")
-            os.fsync(transcript_fd)
-        return items
-
-    def _repair_tail(
-        self,
-        directory_fd: int,
-        transcript_fd: int,
-        damaged: bytes,
-        valid_size: int,
-    ) -> None:
-        quarantine_fd = -1
-        for suffix in range(1_000):
-            name = (
-                f"{_TRANSCRIPT_NAME}.torn" if suffix == 0 else f"{_TRANSCRIPT_NAME}.torn.{suffix}"
-            )
-            try:
-                quarantine_fd = _open_file(
-                    directory_fd,
-                    name,
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | _FILE_FLAGS,
-                    0o600,
-                )
-                break
-            except FileExistsError:
-                continue
-        if quarantine_fd < 0:
-            raise OSError("unable to allocate transcript tail quarantine")
-        try:
-            os.fchmod(quarantine_fd, 0o600)
-            _write_all(quarantine_fd, damaged)
-            os.fsync(quarantine_fd)
+                metadata = os.fstat(database_fd)
+                os.fchmod(database_fd, 0o600)
+                expected = (metadata.st_dev, metadata.st_ino)
+            finally:
+                os.close(database_fd)
+            for suffix in _SIDECAR_SUFFIXES:
+                _secure_optional_file(directory_fd, _DATABASE_NAME + suffix)
+            return expected
         finally:
-            os.close(quarantine_fd)
-        os.fsync(directory_fd)
-        os.ftruncate(transcript_fd, valid_size)
-        os.fsync(transcript_fd)
+            os.close(directory_fd)
+
+    def _verify_connected_inode(self, expected: tuple[int, int]) -> None:
+        directory_fd = _open_directory(self._root, self._components)
+        try:
+            database_fd = _open_verified_file(directory_fd, _DATABASE_NAME)
+            try:
+                metadata = os.fstat(database_fd)
+                actual = (metadata.st_dev, metadata.st_ino)
+            finally:
+                os.close(database_fd)
+        finally:
+            os.close(directory_fd)
+        if actual != expected:
+            raise ValueError(f"transcript database changed while opening: {self.path}")
+
+    def _raise_if_corrupt(self, exc: sqlite3.DatabaseError) -> None:
+        if type(exc) is sqlite3.DatabaseError:
+            raise TranscriptCorruptionError(
+                f"corrupt transcript database at {self.path}: {exc}"
+            ) from exc
+
+
+def _read_items(connection: sqlite3.Connection) -> list[TranscriptItem]:
+    return [TranscriptItem(*row) for row in connection.execute(_SELECT_SQL).fetchall()]
+
+
+def _ensure_wal(connection: sqlite3.Connection, path: Path) -> None:
+    deadline = time.monotonic() + (_BUSY_TIMEOUT_MS / 1000)
+    while True:
+        try:
+            journal_mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()
+            if journal_mode is not None and str(journal_mode[0]).lower() == "wal":
+                return
+            raise TranscriptStoreError(f"unable to enable WAL for transcript database {path}")
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
+                raise
+            remaining = deadline - time.monotonic()
+            time.sleep(min(0.01, max(0.0, remaining)))
+
+
+def _rollback(connection: sqlite3.Connection) -> None:
+    if connection.in_transaction:
+        connection.rollback()
 
 
 def _trusted_root(root: Path) -> Path:
     root.mkdir(parents=True, exist_ok=True)
-    if root.is_symlink():
+    metadata = root.lstat()
+    if stat.S_ISLNK(metadata.st_mode):
         raise ValueError(f"trusted root must not be a symlink: {root}")
-    resolved = root.resolve(strict=True)
-    if not resolved.is_dir():
+    if not stat.S_ISDIR(metadata.st_mode):
         raise ValueError(f"trusted root is not a directory: {root}")
+    resolved = root.resolve(strict=True)
+    root_fd = os.open(resolved, _DIRECTORY_FLAGS)
+    os.close(root_fd)
     return resolved
 
 
-def _open_directory(root: Path, components: tuple[str, ...], *, create: bool) -> int:
+def _open_directory(root: Path, components: tuple[str, ...]) -> int:
     directory_fd = os.open(root, _DIRECTORY_FLAGS)
     try:
         for component in components:
-            if create:
-                created = False
-                try:
-                    os.mkdir(component, mode=0o700, dir_fd=directory_fd)
-                    created = True
-                except FileExistsError:
-                    pass
-                if created:
-                    os.fsync(directory_fd)
+            created = False
+            try:
+                os.mkdir(component, mode=0o700, dir_fd=directory_fd)
+                created = True
+            except FileExistsError:
+                pass
+            if created:
+                os.fsync(directory_fd)
             try:
                 next_fd = os.open(component, _DIRECTORY_FLAGS, dir_fd=directory_fd)
             except OSError as exc:
                 if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
                     raise ValueError(f"symlink path component rejected: {component}") from exc
                 raise
-            os.close(directory_fd)
+            try:
+                os.fchmod(next_fd, 0o700)
+                os.close(directory_fd)
+            except Exception:
+                os.close(next_fd)
+                raise
             directory_fd = next_fd
         return directory_fd
     except Exception:
@@ -258,40 +324,108 @@ def _open_directory(root: Path, components: tuple[str, ...], *, create: bool) ->
         raise
 
 
-def _open_file(directory_fd: int, name: str, flags: int, mode: int = 0o600) -> int:
+def _prepare_database_file(directory_fd: int) -> None:
+    created = False
     try:
-        return os.open(name, flags, mode, dir_fd=directory_fd)
+        database_fd = os.open(
+            _DATABASE_NAME,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | _FILE_FLAGS,
+            0o600,
+            dir_fd=directory_fd,
+        )
+        created = True
+    except FileExistsError:
+        database_fd = _open_verified_file(directory_fd, _DATABASE_NAME)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ValueError(f"symlink file rejected: {_DATABASE_NAME}") from exc
+        raise
+    try:
+        _validate_file(database_fd, _DATABASE_NAME)
+        os.fchmod(database_fd, 0o600)
+        if created:
+            os.fsync(database_fd)
+    finally:
+        os.close(database_fd)
+    if created:
+        os.fsync(directory_fd)
+    for suffix in _SIDECAR_SUFFIXES:
+        _secure_optional_file(directory_fd, _DATABASE_NAME + suffix)
+
+
+def _open_verified_file(directory_fd: int, name: str) -> int:
+    try:
+        file_fd = os.open(name, os.O_RDWR | _FILE_FLAGS, dir_fd=directory_fd)
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             raise ValueError(f"symlink file rejected: {name}") from exc
         raise
-
-
-def _entry_exists(directory_fd: int, name: str) -> bool:
     try:
-        os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        _validate_file(file_fd, name)
+    except Exception:
+        os.close(file_fd)
+        raise
+    return file_fd
+
+
+def _secure_optional_file(directory_fd: int, name: str) -> None:
+    try:
+        file_fd = _open_verified_file(directory_fd, name)
     except FileNotFoundError:
-        return False
-    return True
+        return
+    try:
+        os.fchmod(file_fd, 0o600)
+    finally:
+        os.close(file_fd)
 
 
-def _reject_hardlink(fd: int, name: str) -> None:
-    if os.fstat(fd).st_nlink != 1:
+def _validate_file(file_fd: int, name: str) -> None:
+    metadata = os.fstat(file_fd)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError(f"non-regular file rejected: {name}")
+    if metadata.st_nlink != 1:
         raise ValueError(f"hardlink file rejected: {name}")
 
 
-def _read_all(fd: int) -> bytes:
-    os.lseek(fd, 0, os.SEEK_SET)
-    chunks: list[bytes] = []
-    while chunk := os.read(fd, 64 * 1024):
-        chunks.append(chunk)
-    return b"".join(chunks)
+def _atomic_replace(directory_fd: int, name: str, payload: bytes) -> None:
+    temp_name = ""
+    temp_fd = -1
+    try:
+        for _ in range(100):
+            temp_name = f".{name}.{secrets.token_hex(8)}.tmp"
+            try:
+                temp_fd = os.open(
+                    temp_name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | _FILE_FLAGS,
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+                break
+            except FileExistsError:
+                continue
+        if temp_fd < 0:
+            raise OSError("unable to allocate transcript export temporary file")
+        os.fchmod(temp_fd, 0o600)
+        _write_all(temp_fd, payload)
+        os.fsync(temp_fd)
+        completed_fd = temp_fd
+        temp_fd = -1
+        os.close(completed_fd)
+        os.replace(temp_name, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        temp_name = ""
+        os.fsync(directory_fd)
+    finally:
+        if temp_fd >= 0:
+            os.close(temp_fd)
+        if temp_name:
+            with suppress(FileNotFoundError):
+                os.unlink(temp_name, dir_fd=directory_fd)
 
 
-def _write_all(fd: int, data: bytes) -> None:
+def _write_all(file_fd: int, data: bytes) -> None:
     view = memoryview(data)
     while view:
-        written = os.write(fd, view)
+        written = os.write(file_fd, view)
         if written == 0:
             raise OSError("short write")
         view = view[written:]
