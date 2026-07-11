@@ -3,7 +3,12 @@
 from datetime import date
 from pathlib import Path
 
-from core.coding.context import SYSTEM_PROMPT_DYNAMIC_BOUNDARY, CompactManager, ContextManager
+from core.coding.context import (
+    DEFAULT_SYSTEM_PROMPT,
+    SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+    CompactManager,
+    ContextManager,
+)
 from core.coding.runtime import CodingRuntime
 
 
@@ -18,8 +23,8 @@ class FakeModel:
         return "<final>done</final>"
 
 
-def test_context_manager_keeps_prompt_under_budget() -> None:
-    """ContextManager reduces old history to keep the prompt within budget."""
+def test_context_manager_preserves_safety_sections_when_prompt_is_over_budget() -> None:
+    """ContextManager preserves system/current text and reports unresolved overflow."""
     history = [
         {"role": "user", "content": "old question " + ("x" * 80)},
         {"role": "assistant", "content": "old answer " + ("y" * 80)},
@@ -32,9 +37,13 @@ def test_context_manager_keeps_prompt_under_budget() -> None:
         tools=["read_file: read a file", "search: search files"],
     )
 
-    assert len(prompt) <= 600
+    assert DEFAULT_SYSTEM_PROMPT in prompt
     assert "current request must remain visible" in prompt
-    assert metadata["prompt_over_budget"] is False
+    assert metadata["prompt_over_budget"] is True
+    assert (
+        metadata["sections"]["prefix"]["rendered_chars"]
+        == metadata["sections"]["prefix"]["raw_chars"]
+    )
     assert (
         metadata["sections"]["history"]["rendered_chars"]
         < metadata["sections"]["history"]["raw_chars"]
