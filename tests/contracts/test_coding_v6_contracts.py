@@ -9,15 +9,31 @@ def load_contracts() -> dict[str, dict[str, list[str]]]:
     return json.loads(CONTRACTS_PATH.read_text(encoding="utf-8"))
 
 
-def test_context_usage_updated_requires_session_id() -> None:
+def test_context_usage_updated_required_fields_are_frozen() -> None:
     contracts = load_contracts()
 
-    assert "session_id" in contracts["context_usage_updated"]["required"]
+    assert contracts["context_usage_updated"]["required"] == [
+        "session_id",
+        "run_id",
+        "used_tokens",
+        "model_limit_tokens",
+        "output_reserve_tokens",
+        "effective_limit_tokens",
+        "usage_ratio",
+        "level",
+        "estimated",
+        "compactable",
+    ]
 
 
-def test_memory_proposal_ready_requires_proposal_revision_identity() -> None:
+def test_memory_proposal_ready_required_fields_are_frozen() -> None:
     contracts = load_contracts()
 
-    required = contracts["memory_proposal_ready"]["required"]
-    assert "proposal_id" in required
-    assert "base_revision" in required
+    assert contracts["memory_proposal_ready"]["required"] == [
+        "session_id",
+        "run_id",
+        "reflection_id",
+        "proposal_id",
+        "candidate_count",
+        "base_revision",
+    ]
