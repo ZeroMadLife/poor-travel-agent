@@ -88,6 +88,32 @@ async def test_only_one_active_run_per_session(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_multiple_coordinators_share_one_persistent_run_lease(tmp_path: Path) -> None:
+    first = RunCoordinator(SessionEventJournal(tmp_path, "session-1"))
+    second = RunCoordinator(SessionEventJournal(tmp_path, "session-1"))
+    release = asyncio.Event()
+
+    async def blocked():
+        await release.wait()
+        if False:
+            yield RunEvent(kind="tool", status="running", payload={})
+
+    results = await asyncio.gather(
+        first.start_run("run-1", blocked()),
+        second.start_run("run-2", blocked()),
+        return_exceptions=True,
+    )
+
+    tasks = [result for result in results if isinstance(result, asyncio.Task)]
+    conflicts = [result for result in results if isinstance(result, ActiveRunConflictError)]
+    assert len(tasks) == 1
+    assert len(conflicts) == 1
+    release.set()
+    await tasks[0]
+    assert SessionEventJournal(tmp_path, "session-1").active_run_id() is None
+
+
+@pytest.mark.asyncio
 async def test_cancel_token_cancels_task_and_persists_one_terminal(tmp_path: Path) -> None:
     coordinator = RunCoordinator(SessionEventJournal(tmp_path, "session-1"))
     entered = asyncio.Event()
@@ -238,6 +264,7 @@ async def test_cancel_waits_for_inflight_append_before_terminal(
 @pytest.mark.asyncio
 async def test_restart_marks_unfinished_run_interrupted_and_retryable(tmp_path: Path) -> None:
     journal = SessionEventJournal(tmp_path, "session-1")
+    journal.acquire_run_lease("abandoned")
     journal.append(
         run_id="abandoned", kind="system", status="running", payload={"event": "run_started"}
     )

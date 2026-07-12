@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _DATABASE_NAME = "timeline.sqlite3"
 _MAX_PAYLOAD_BYTES = 1024 * 1024
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
@@ -53,6 +53,13 @@ _TERMINAL_INDEX_SQL = """
 CREATE UNIQUE INDEX session_events_terminal_idx ON session_events(run_id)
 WHERE kind = 'terminal'
 """
+_LEASE_SQL = """
+CREATE TABLE active_run_lease (
+    lease_key INTEGER PRIMARY KEY CHECK (lease_key = 1),
+    run_id TEXT NOT NULL UNIQUE,
+    acquired_at TEXT NOT NULL
+)
+"""
 
 
 class SessionEventJournalError(RuntimeError):
@@ -61,6 +68,14 @@ class SessionEventJournalError(RuntimeError):
 
 class SessionEventJournalCorruptionError(SessionEventJournalError):
     """The journal path, database, schema, or stored data is unsafe."""
+
+
+class SessionRunLeaseConflictError(SessionEventJournalError):
+    """Another coordinator owns the session's persistent run lease."""
+
+    def __init__(self, active_run_id: str) -> None:
+        self.active_run_id = active_run_id
+        super().__init__(f"session already has active run {active_run_id}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,29 +165,131 @@ class SessionEventJournal:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                row = connection.execute(
-                    "SELECT * FROM session_events WHERE run_id = ? "
-                    "AND kind = 'terminal' "
-                    "ORDER BY sequence LIMIT 1",
-                    (values["run_id"],),
-                ).fetchone()
-                if row is not None:
-                    connection.commit()
-                    return _event_from_row(row, self.session_id)
-                stored = self._insert(connection, **values)
+                stored = self._terminal_in_transaction(connection, values)
                 connection.commit()
                 return stored
+            except Exception:
+                connection.rollback()
+                raise
+
+    def append_terminal_and_release(
+        self,
+        *,
+        run_id: str,
+        status: str,
+        payload: Mapping[str, Any],
+        event_id: str | None = None,
+        timestamp: str | None = None,
+    ) -> SessionEvent:
+        """Persist one terminal and release its run lease in one transaction."""
+        if status not in TERMINAL_STATUSES:
+            raise ValueError("status must be terminal")
+        values = _validated_event_input(
+            run_id=run_id,
+            kind="terminal",
+            status=status,
+            payload=payload,
+            event_id=event_id,
+            timestamp=timestamp,
+        )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                stored = self._terminal_in_transaction(connection, values)
+                connection.execute(
+                    "DELETE FROM active_run_lease WHERE lease_key = 1 AND run_id = ?",
+                    (values["run_id"],),
+                )
+                connection.commit()
+                return stored
+            except Exception:
+                connection.rollback()
+                raise
+
+    def acquire_run_lease(self, run_id: str) -> None:
+        """Atomically acquire this session's singleton persistent run lease."""
+        validated_run = _validate_identifier("run_id", run_id)
+        acquired_at = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                terminal = connection.execute(
+                    "SELECT 1 FROM session_events WHERE run_id = ? AND kind = 'terminal'",
+                    (validated_run,),
+                ).fetchone()
+                if terminal is not None:
+                    raise SessionEventJournalError(f"run {validated_run} is already terminal")
+                connection.execute(
+                    "INSERT INTO active_run_lease (lease_key, run_id, acquired_at) "
+                    "VALUES (1, ?, ?)",
+                    (validated_run, acquired_at),
+                )
+                connection.commit()
             except sqlite3.IntegrityError as exc:
                 connection.rollback()
-                with self._connect() as retry:
-                    row = retry.execute(
-                        "SELECT * FROM session_events WHERE run_id = ? "
-                        "AND kind = 'terminal'",
-                        (values["run_id"],),
-                    ).fetchone()
-                    if row is None:
-                        raise SessionEventJournalError("terminal event conflict") from exc
-                    return _event_from_row(row, self.session_id)
+                row = connection.execute(
+                    "SELECT run_id FROM active_run_lease WHERE lease_key = 1"
+                ).fetchone()
+                active = str(row[0]) if row is not None else "unknown"
+                raise SessionRunLeaseConflictError(active) from exc
+            except Exception:
+                connection.rollback()
+                raise
+
+    def release_run_lease(self, run_id: str) -> bool:
+        """Release a matching lease, used when startup fails before task ownership."""
+        validated_run = _validate_identifier("run_id", run_id)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                "DELETE FROM active_run_lease WHERE lease_key = 1 AND run_id = ?",
+                (validated_run,),
+            )
+            connection.commit()
+            return cursor.rowcount == 1
+
+    def active_run_id(self) -> str | None:
+        """Return the run currently holding the persistent session lease."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT run_id FROM active_run_lease WHERE lease_key = 1"
+            ).fetchone()
+        return str(row[0]) if row is not None else None
+
+    def recover_run_lease(self) -> SessionEvent | None:
+        """Atomically interrupt and release a lease abandoned by a prior process."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT run_id FROM active_run_lease WHERE lease_key = 1"
+                ).fetchone()
+                if row is None:
+                    connection.commit()
+                    return None
+                run_id = str(row[0])
+                existing = connection.execute(
+                    "SELECT * FROM session_events WHERE run_id = ? AND kind = 'terminal'",
+                    (run_id,),
+                ).fetchone()
+                if existing is None:
+                    values = _validated_event_input(
+                        run_id=run_id,
+                        kind="terminal",
+                        status="interrupted",
+                        payload={"event": "run_interrupted", "retryable": True},
+                        event_id=None,
+                        timestamp=None,
+                    )
+                    stored = self._insert(connection, **values)
+                else:
+                    stored = None
+                connection.execute("DELETE FROM active_run_lease WHERE lease_key = 1")
+                connection.commit()
+                return stored
+            except Exception:
+                connection.rollback()
+                raise
 
     def replay(self, *, after: int = 0, limit: int = 100) -> ReplayPage:
         """Return events after a sequence cursor in ascending order."""
@@ -229,6 +346,18 @@ class SessionEventJournal:
             raise SessionEventJournalError("inserted event could not be read")
         return _event_from_row(row, self.session_id)
 
+    def _terminal_in_transaction(
+        self, connection: sqlite3.Connection, values: dict[str, str]
+    ) -> SessionEvent:
+        row = connection.execute(
+            "SELECT * FROM session_events WHERE run_id = ? AND kind = 'terminal' "
+            "ORDER BY sequence LIMIT 1",
+            (values["run_id"],),
+        ).fetchone()
+        if row is not None:
+            return _event_from_row(row, self.session_id)
+        return self._insert(connection, **values)
+
     def _initialize(self) -> None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -239,6 +368,11 @@ class SessionEventJournal:
                     connection.execute(_EVENTS_SQL)
                     connection.execute(_RUN_INDEX_SQL)
                     connection.execute(_TERMINAL_INDEX_SQL)
+                    connection.execute(_LEASE_SQL)
+                    connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                elif version == 1:
+                    _validate_schema(connection, self.path, require_lease=False)
+                    connection.execute(_LEASE_SQL)
                     connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                 elif version != SCHEMA_VERSION:
                     raise SessionEventJournalError(
@@ -321,8 +455,7 @@ def _validated_event_input(
         raise ValueError(f"invalid kind: {kind!r}")
     if status not in _STATUSES:
         raise ValueError(f"invalid status: {status!r}")
-    if kind == "terminal" and status not in TERMINAL_STATUSES:
-        raise ValueError("terminal kind requires a terminal status")
+    _validate_kind_status(kind, status)
     if not isinstance(payload, dict):
         raise TypeError("payload must be a JSON object")
     if not _strict_json_value(payload):
@@ -335,15 +468,10 @@ def _validated_event_input(
         raise ValueError("payload must contain strict JSON values") from exc
     if len(payload_json.encode("utf-8")) > _MAX_PAYLOAD_BYTES:
         raise ValueError("payload exceeds maximum size")
-    actual_event_id = event_id or str(uuid.uuid4())
+    actual_event_id = str(uuid.uuid4()) if event_id is None else event_id
     _validate_identifier("event_id", actual_event_id)
-    actual_timestamp = timestamp or datetime.now(UTC).isoformat()
-    try:
-        parsed = datetime.fromisoformat(actual_timestamp)
-    except ValueError as exc:
-        raise ValueError("timestamp must be ISO-8601") from exc
-    if parsed.tzinfo is None:
-        raise ValueError("timestamp must include a timezone")
+    actual_timestamp = datetime.now(UTC).isoformat() if timestamp is None else timestamp
+    _validate_timestamp(actual_timestamp)
     return {
         "run_id": validated_run,
         "kind": kind,
@@ -352,6 +480,24 @@ def _validated_event_input(
         "event_id": actual_event_id,
         "timestamp": actual_timestamp,
     }
+
+
+def _validate_timestamp(value: str) -> None:
+    if not isinstance(value, str) or not value:
+        raise ValueError("timestamp must be a non-empty ISO-8601 value")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError("timestamp must be ISO-8601") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp must include a timezone")
+
+
+def _validate_kind_status(kind: str, status: str) -> None:
+    if kind == "terminal" and status not in TERMINAL_STATUSES:
+        raise ValueError("terminal kind requires a terminal status")
+    if kind != "terminal" and status in {"cancelled", "interrupted"}:
+        raise ValueError("cancelled or interrupted status requires terminal kind")
 
 
 def _validate_identifier(field: str, value: str) -> str:
@@ -382,6 +528,13 @@ def _event_from_row(row: sqlite3.Row, session_id: str) -> SessionEvent:
     status = str(row["status"])
     if kind not in _KINDS or status not in _STATUSES:
         raise SessionEventJournalCorruptionError("stored kind or status is invalid")
+    try:
+        _validate_kind_status(kind, status)
+        _validate_timestamp(str(row["timestamp"]))
+    except ValueError as exc:
+        raise SessionEventJournalCorruptionError(
+            "stored timestamp or kind/status combination is invalid"
+        ) from exc
     return SessionEvent(
         event_id=event_id,
         session_id=session_id,
@@ -435,7 +588,9 @@ def _schema_objects(connection: sqlite3.Connection) -> list[tuple[str, str, str 
     ).fetchall()
 
 
-def _validate_schema(connection: sqlite3.Connection, path: Path) -> None:
+def _validate_schema(
+    connection: sqlite3.Connection, path: Path, *, require_lease: bool = True
+) -> None:
     expected_columns = [
         "sequence", "event_id", "session_id", "run_id", "kind", "status", "timestamp",
         "payload_json",
@@ -449,6 +604,8 @@ def _validate_schema(connection: sqlite3.Connection, path: Path) -> None:
         ("table", "session_events"),
         ("table", "sqlite_sequence"),
     }
+    if require_lease:
+        expected_objects.add(("table", "active_run_lease"))
     actual_objects = {(kind, name) for kind, name, _ in _schema_objects(connection)}
     if actual_objects != expected_objects:
         raise SessionEventJournalError(f"unexpected session event schema objects at {path}")
@@ -459,6 +616,10 @@ def _validate_schema(connection: sqlite3.Connection, path: Path) -> None:
         _RUN_INDEX_SQL
     ):
         raise SessionEventJournalError(f"non-canonical session event run index at {path}")
+    if require_lease and _normalize_sql(
+        object_sql[("table", "active_run_lease")]
+    ) != _normalize_sql(_LEASE_SQL):
+        raise SessionEventJournalError(f"non-canonical active run lease schema at {path}")
     run_columns = [row[2] for row in connection.execute("PRAGMA index_info(session_events_run_idx)")]
     if run_columns != ["run_id", "sequence"]:
         raise SessionEventJournalError(f"invalid session event run index at {path}")

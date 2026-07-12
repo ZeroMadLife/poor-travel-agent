@@ -12,6 +12,7 @@ from core.coding.persistence.session_event_journal import (
     TERMINAL_STATUSES,
     SessionEvent,
     SessionEventJournal,
+    SessionRunLeaseConflictError,
 )
 
 
@@ -59,12 +60,20 @@ class RunCoordinator:
                 raise ActiveRunConflictError(
                     f"session already has active run {self._active_run_id}"
                 )
-            await self._persist(
-                run_id=run_id,
-                event=RunEvent(
-                    kind="system", status="running", payload={"event": "run_started"}
-                ),
-            )
+            try:
+                await asyncio.to_thread(self.journal.acquire_run_lease, run_id)
+            except SessionRunLeaseConflictError as exc:
+                raise ActiveRunConflictError(str(exc)) from exc
+            try:
+                await self._persist(
+                    run_id=run_id,
+                    event=RunEvent(
+                        kind="system", status="running", payload={"event": "run_started"}
+                    ),
+                )
+            except BaseException:
+                await asyncio.to_thread(self.journal.release_run_lease, run_id)
+                raise
             self._active_run_id = run_id
             task = asyncio.create_task(
                 self._consume(run_id, event_stream), name=f"sage-run-{run_id}"
@@ -120,8 +129,13 @@ class RunCoordinator:
 
     async def recover_interrupted_runs(self) -> tuple[str, ...]:
         """Close abandoned starts as retryable interruptions without resuming them."""
-        run_ids = await asyncio.to_thread(self.journal.unfinished_run_ids)
         recovered: list[str] = []
+        async with self._publish_lock:
+            lease_event = await asyncio.to_thread(self.journal.recover_run_lease)
+            if lease_event is not None:
+                self._broadcast(lease_event)
+                recovered.append(lease_event.run_id)
+        run_ids = await asyncio.to_thread(self.journal.unfinished_run_ids)
         for run_id in run_ids:
             event = RunEvent(
                 kind="terminal",
@@ -190,7 +204,7 @@ class RunCoordinator:
                 if event.status not in TERMINAL_STATUSES:
                     raise ValueError("terminal event requires a terminal status")
                 stored = await asyncio.to_thread(
-                    self.journal.append_terminal_once,
+                    self.journal.append_terminal_and_release,
                     run_id=run_id,
                     status=event.status,
                     payload=event.payload,
@@ -207,11 +221,14 @@ class RunCoordinator:
                     event_id=event.event_id,
                     timestamp=event.timestamp,
                 )
-            if stored.event_id not in self._published_event_ids:
-                self._published_event_ids.add(stored.event_id)
-                for queue in tuple(self._subscribers):
-                    queue.put_nowait(stored)
+            self._broadcast(stored)
             return stored
+
+    def _broadcast(self, stored: SessionEvent) -> None:
+        if stored.event_id not in self._published_event_ids:
+            self._published_event_ids.add(stored.event_id)
+            for queue in tuple(self._subscribers):
+                queue.put_nowait(stored)
 
 
 def _coerce_event(raw_event: RunEvent | Mapping[str, Any]) -> RunEvent:

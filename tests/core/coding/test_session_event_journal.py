@@ -13,6 +13,7 @@ from core.coding.persistence.session_event_journal import (
     SessionEventJournal,
     SessionEventJournalCorruptionError,
     SessionEventJournalError,
+    SessionRunLeaseConflictError,
 )
 
 
@@ -94,6 +95,15 @@ def test_append_rejects_invalid_fields(tmp_path: Path, field: str, value: object
         SessionEventJournal(tmp_path, "../escape")
 
 
+@pytest.mark.parametrize(("field", "value"), [("event_id", ""), ("timestamp", "")])
+def test_explicit_empty_generated_fields_are_rejected(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    journal = SessionEventJournal(tmp_path, "session-1")
+    with pytest.raises(ValueError, match=field):
+        _append(journal, **{field: value})
+
+
 def test_schema_tampering_fails_closed_without_rebuild(tmp_path: Path) -> None:
     journal = SessionEventJournal(tmp_path, "session-1")
     _append(journal)
@@ -161,6 +171,41 @@ def test_corrupt_json_payload_is_detected_on_replay(tmp_path: Path) -> None:
         journal.replay(after=0, limit=10)
 
 
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("timestamp", "2026-07-12T10:00:00"),
+        ("status", "interrupted"),
+    ],
+)
+def test_replay_rejects_tampered_nonterminal_rows(
+    tmp_path: Path, column: str, value: str
+) -> None:
+    journal = SessionEventJournal(tmp_path, "session-1")
+    event = _append(journal)
+    with sqlite3.connect(journal.path) as connection:
+        connection.execute(
+            f"UPDATE session_events SET {column} = ? WHERE event_id = ?",
+            (value, event.event_id),
+        )
+
+    with pytest.raises(SessionEventJournalCorruptionError, match="timestamp|kind|status"):
+        journal.replay(after=0, limit=10)
+
+
+def test_replay_rejects_tampered_terminal_status_pair(tmp_path: Path) -> None:
+    journal = SessionEventJournal(tmp_path, "session-1")
+    event = journal.append_terminal_once(run_id="run-1", status="completed", payload={})
+    with sqlite3.connect(journal.path) as connection:
+        connection.execute(
+            "UPDATE session_events SET status = 'running' WHERE event_id = ?",
+            (event.event_id,),
+        )
+
+    with pytest.raises(SessionEventJournalCorruptionError, match="kind|status"):
+        journal.replay(after=0, limit=10)
+
+
 def test_terminal_append_is_atomic_and_idempotent(tmp_path: Path) -> None:
     journal = SessionEventJournal(tmp_path, "session-1")
     first = journal.append_terminal_once(
@@ -183,3 +228,61 @@ def test_unlinked_open_wal_inode_is_a_normal_sqlite_lifecycle(tmp_path: Path) ->
         journal_module._validate_optional_file(file_fd, path.name)
     finally:
         os.close(file_fd)
+
+
+def test_run_lease_is_persistent_atomic_and_terminal_releases_it(tmp_path: Path) -> None:
+    first = SessionEventJournal(tmp_path, "session-1")
+    first.acquire_run_lease("run-1")
+
+    reopened = SessionEventJournal(tmp_path, "session-1")
+    assert reopened.active_run_id() == "run-1"
+    with pytest.raises(SessionRunLeaseConflictError, match="run-1"):
+        reopened.acquire_run_lease("run-2")
+
+    terminal = reopened.append_terminal_and_release(
+        run_id="run-1", status="completed", payload={"answer": "done"}
+    )
+    assert terminal.kind == "terminal"
+    assert reopened.active_run_id() is None
+
+
+def test_recover_run_lease_marks_interrupted_and_releases_atomically(tmp_path: Path) -> None:
+    first = SessionEventJournal(tmp_path, "session-1")
+    first.acquire_run_lease("abandoned")
+
+    reopened = SessionEventJournal(tmp_path, "session-1")
+    recovered = reopened.recover_run_lease()
+
+    assert recovered is not None
+    assert recovered.run_id == "abandoned"
+    assert recovered.status == "interrupted"
+    assert recovered.payload == {"event": "run_interrupted", "retryable": True}
+    assert reopened.active_run_id() is None
+    assert reopened.recover_run_lease() is None
+
+
+def test_v1_journal_migrates_to_persistent_lease_schema(tmp_path: Path) -> None:
+    root = tmp_path / "evidence" / "session-1"
+    root.mkdir(parents=True)
+    path = root / "timeline.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute(journal_module._EVENTS_SQL)
+        connection.execute(journal_module._RUN_INDEX_SQL)
+        connection.execute(journal_module._TERMINAL_INDEX_SQL)
+        connection.execute("PRAGMA user_version=1")
+        connection.execute(
+            "INSERT INTO session_events "
+            "(event_id, session_id, run_id, kind, status, timestamp, payload_json) "
+            "VALUES ('event-1', 'session-1', 'run-1', 'user', 'completed', "
+            "'2026-07-12T10:00:00+08:00', '{}')"
+        )
+
+    migrated = SessionEventJournal(tmp_path, "session-1")
+
+    assert [item.event_id for item in migrated.replay(after=0, limit=10).items] == ["event-1"]
+    assert migrated.active_run_id() is None
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute(
+            "SELECT name FROM sqlite_schema WHERE name = 'active_run_lease'"
+        ).fetchone() == ("active_run_lease",)
