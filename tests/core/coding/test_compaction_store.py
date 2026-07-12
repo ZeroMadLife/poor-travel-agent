@@ -88,6 +88,41 @@ def test_store_records_failed_attempt_and_rejects_completion(tmp_path) -> None:
         store.complete("s1", "cmp-1", _result())
 
 
+def test_failed_attempt_roundtrips_a_trusted_previous_checkpoint(tmp_path) -> None:
+    store = CompactionStore(tmp_path, checkpoint_anchor_key=_ANCHOR_KEY)
+    store.begin("s1", "cmp-prev", {"trigger": "auto"})
+    store.complete("s1", "cmp-prev", _result("cmp-prev"))
+    store.begin("s1", "cmp-next", {"trigger": "auto"})
+    failed = CompactionResult(
+        applied=False,
+        projected_history=[],
+        checkpoint=_checkpoint("cmp-prev"),
+        before_tokens=100,
+        after_tokens=100,
+        archived_items=0,
+        reason="summarizer_failed",
+        compaction_id="cmp-next",
+        trigger="auto",
+    )
+
+    persisted = store.fail("s1", "cmp-next", failed)
+
+    assert persisted["result"]["checkpoint"]["compaction_id"] == "cmp-prev"
+    assert store.load("s1", "cmp-next") == persisted
+
+
+def test_failed_attempt_rejects_untrusted_previous_checkpoint(tmp_path) -> None:
+    store = CompactionStore(tmp_path, checkpoint_anchor_key=_ANCHOR_KEY)
+    store.begin("s1", "cmp-next", {"trigger": "auto"})
+    failed = CompactionResult(
+        applied=False, projected_history=[], checkpoint=_checkpoint("cmp-missing"),
+        before_tokens=100, after_tokens=100, archived_items=0,
+        reason="summarizer_failed", compaction_id="cmp-next", trigger="auto",
+    )
+    with pytest.raises(ValueError, match="not trusted"):
+        store.fail("s1", "cmp-next", failed)
+
+
 @pytest.mark.parametrize("bad", ["", ".", "..", "../x", "x/y", "x\\y"])
 def test_store_rejects_unsafe_ids(tmp_path, bad: str) -> None:
     store = CompactionStore(tmp_path)
@@ -236,8 +271,37 @@ def test_checkpoint_anchor_rejects_self_consistent_payload_replacement(tmp_path)
     assert store.load_latest_checkpoint("s1") is None
 
 
+def test_checkpoint_anchor_binds_outer_session_identity(tmp_path) -> None:
+    store = CompactionStore(tmp_path, checkpoint_anchor_key=_ANCHOR_KEY)
+    store.begin("s1", "cmp-1", {"trigger": "auto"})
+    store.complete("s1", "cmp-1", _result())
+    source = tmp_path / "evidence" / "s1" / "compactions" / "cmp-1.json"
+    payload = json.loads(source.read_text())
+    payload["session_id"] = "s2"
+    target = tmp_path / "evidence" / "s2" / "compactions" / "cmp-1.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps(payload))
+    with pytest.raises(CompactionCorruptionError):
+        store.load("s2", "cmp-1")
+
+
+def test_store_rejects_duplicate_keys_and_non_finite_numbers(tmp_path) -> None:
+    store = CompactionStore(tmp_path)
+    store.begin("s1", "cmp-1", {})
+    path = tmp_path / "evidence" / "s1" / "compactions" / "cmp-1.json"
+    path.write_text('{"schema_version":1,"schema_version":1}')
+    with pytest.raises(CompactionCorruptionError):
+        store.load("s1", "cmp-1")
+    path.write_text('{"schema_version":1,"session_id":"s1","compaction_id":"cmp-1",'
+                    '"status":"started","metadata":{"x":NaN},"created_at":"x",'
+                    '"updated_at":"x"}')
+    with pytest.raises(CompactionCorruptionError):
+        store.load("s1", "cmp-1")
+
+
 def test_unconfigured_checkpoint_anchor_fails_closed(tmp_path) -> None:
     store = CompactionStore(tmp_path)
+    assert store.checkpoint_resume_enabled is False
     store.begin("s1", "cmp-1", {"trigger": "auto"})
     store.complete("s1", "cmp-1", _result())
     assert store.verify_checkpoint("s1", _checkpoint()) is False

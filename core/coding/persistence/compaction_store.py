@@ -57,6 +57,11 @@ class CompactionStore:
             raise ValueError("checkpoint_anchor_key must contain at least 32 bytes")
         self._checkpoint_anchor_key = checkpoint_anchor_key
 
+    @property
+    def checkpoint_resume_enabled(self) -> bool:
+        """Whether completed checkpoints can be authenticated for resume."""
+        return self._checkpoint_anchor_key is not None
+
     def begin(
         self,
         session_id: str,
@@ -107,7 +112,7 @@ class CompactionStore:
             "result": _serialize_result(result),
             "checkpoint": _serialize_checkpoint(selected),
             "evidence": _json_object(evidence or {}, "evidence"),
-            "checkpoint_anchor": self._checkpoint_anchor(selected),
+            "checkpoint_anchor": self._checkpoint_anchor(session_id, compaction_id, selected),
         }
         return self._transition(session_id, compaction_id, "completed", terminal)
 
@@ -121,18 +126,38 @@ class CompactionStore:
             raise ValueError("failed compaction result must not be applied")
         if result.compaction_id != compaction_id:
             raise ValueError("compaction_id does not match attempt")
+        previous_anchor: str | None = None
+        if result.checkpoint is not None:
+            previous = result.checkpoint
+            if previous.compaction_id == compaction_id:
+                raise ValueError("previous checkpoint must come from an earlier attempt")
+            if not self.verify_checkpoint(session_id, previous):
+                raise ValueError("previous checkpoint is not trusted")
+            previous_anchor = self._checkpoint_anchor(
+                session_id, previous.compaction_id, previous
+            )
         return self._transition(
             session_id,
             compaction_id,
             "failed",
-            {"result": _serialize_result(result)},
+            {
+                "result": _serialize_result(result),
+                **(
+                    {"previous_checkpoint_anchor": previous_anchor}
+                    if previous_anchor is not None
+                    else {}
+                ),
+            },
         )
 
     def load(self, session_id: str, compaction_id: str) -> dict[str, Any] | None:
         _validate_id(session_id, "session")
         _validate_id(compaction_id, "compaction")
         with self._locked_directory(session_id, compaction_id) as directory_fd:
-            return self._read_optional(directory_fd, session_id, compaction_id)
+            artifact = self._read_optional(directory_fd, session_id, compaction_id)
+            if artifact is not None:
+                self._require_verified_artifact(session_id, compaction_id, artifact)
+            return artifact
 
     def load_latest_attempt(self, session_id: str) -> dict[str, Any] | None:
         _validate_id(session_id, "session")
@@ -147,6 +172,7 @@ class CompactionStore:
                     continue
                 artifact = self._read_optional(directory_fd, session_id, compaction_id)
                 if artifact is not None:
+                    self._require_verified_artifact(session_id, compaction_id, artifact)
                     candidates.append(artifact)
             if not candidates:
                 return None
@@ -208,7 +234,7 @@ class CompactionStore:
             ).hexdigest()
             if not checkpoint.evidence_hash or checkpoint.summary_hash != expected_summary_hash:
                 return False
-            expected_anchor = self._checkpoint_anchor(checkpoint)
+            expected_anchor = self._checkpoint_anchor(session_id, checkpoint.compaction_id, checkpoint)
             stored_anchor = artifact.get("checkpoint_anchor")
             if not isinstance(stored_anchor, str) or not hmac.compare_digest(
                 stored_anchor, expected_anchor
@@ -255,14 +281,60 @@ class CompactionStore:
             self._publish(directory_fd, compaction_id, artifact)
             return artifact
 
-    def _checkpoint_anchor(self, checkpoint: CompactionCheckpoint) -> str:
+    def _require_verified_completed(
+        self, session_id: str, compaction_id: str, artifact: dict[str, Any]
+    ) -> None:
+        if self._checkpoint_anchor_key is None:
+            return
+        try:
+            checkpoint = _deserialize_checkpoint(artifact["checkpoint"])
+        except (KeyError, CompactionStoreError, ValidationError, TypeError, ValueError) as exc:
+            raise CompactionCorruptionError("completed checkpoint is invalid") from exc
+        expected = self._checkpoint_anchor(session_id, compaction_id, checkpoint)
+        stored = artifact.get("checkpoint_anchor")
+        if not isinstance(stored, str) or not hmac.compare_digest(stored, expected):
+            raise CompactionCorruptionError("checkpoint anchor verification failed")
+
+    def _require_verified_artifact(
+        self, session_id: str, compaction_id: str, artifact: dict[str, Any]
+    ) -> None:
+        if self._checkpoint_anchor_key is None:
+            return
+        if artifact.get("status") == "completed":
+            self._require_verified_completed(session_id, compaction_id, artifact)
+            return
+        if artifact.get("status") != "failed":
+            return
+        result = artifact.get("result")
+        checkpoint_value = result.get("checkpoint") if isinstance(result, dict) else None
+        if checkpoint_value is None:
+            return
+        checkpoint = _deserialize_checkpoint(checkpoint_value)
+        if checkpoint.compaction_id == compaction_id:
+            raise CompactionCorruptionError("failed attempt checkpoint identity is invalid")
+        expected = self._checkpoint_anchor(session_id, checkpoint.compaction_id, checkpoint)
+        stored = artifact.get("previous_checkpoint_anchor")
+        if not isinstance(stored, str) or not hmac.compare_digest(stored, expected):
+            raise CompactionCorruptionError("previous checkpoint anchor verification failed")
+        if not self.verify_checkpoint(session_id, checkpoint):
+            raise CompactionCorruptionError("previous checkpoint source is not trusted")
+
+    def _checkpoint_anchor(
+        self, session_id: str, compaction_id: str, checkpoint: CompactionCheckpoint
+    ) -> str:
         if self._checkpoint_anchor_key is None:
             return ""
         payload = json.dumps(
-            _serialize_checkpoint(checkpoint),
+            {
+                "domain": "sage.compaction.checkpoint.v1",
+                "session_id": session_id,
+                "compaction_id": compaction_id,
+                "checkpoint": _serialize_checkpoint(checkpoint),
+            },
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
+            allow_nan=False,
         ).encode()
         return hmac.new(self._checkpoint_anchor_key, payload, hashlib.sha256).hexdigest()
 
@@ -300,8 +372,8 @@ class CompactionStore:
                     raise CompactionCorruptionError("compaction artifact exceeds size limit")
                 chunks.append(chunk)
             try:
-                value = json.loads(b"".join(chunks).decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                value = _strict_json_loads(b"".join(chunks).decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
                 raise CompactionCorruptionError("compaction artifact is invalid JSON") from exc
             if not isinstance(value, dict):
                 raise CompactionCorruptionError("compaction artifact must be a JSON object")
@@ -319,6 +391,7 @@ class CompactionStore:
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
+            allow_nan=False,
         ).encode("utf-8")
         temp_name = ""
         temp_fd = -1
@@ -471,8 +544,10 @@ def _json_object(value: Mapping[str, Any], label: str) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise TypeError(f"{label} must be a mapping")
     try:
-        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        decoded = json.loads(encoded)
+        encoded = json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+        decoded = _strict_json_loads(encoded)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{label} must be JSON-safe") from exc
     if not isinstance(decoded, dict):
@@ -491,6 +566,23 @@ def _serialize_checkpoint(checkpoint: CompactionCheckpoint) -> dict[str, Any]:
         "evidence_hash": checkpoint.evidence_hash,
         "prefix_hash": checkpoint.prefix_hash,
     }
+
+
+def _strict_json_loads(value: str) -> Any:
+    return json.loads(value, object_pairs_hook=_unique_object, parse_constant=_reject_constant)
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = item
+    return result
+
+
+def _reject_constant(value: str) -> Any:
+    raise ValueError(f"non-finite JSON constant: {value}")
 
 
 def _serialize_result(result: CompactionResult) -> dict[str, Any]:
@@ -551,6 +643,9 @@ def _validate_artifact(value: dict[str, Any], session_id: str, compaction_id: st
         required.update({"result", "checkpoint", "evidence", "checkpoint_anchor"})
     elif status == "failed":
         required.add("result")
+        result = value.get("result")
+        if isinstance(result, dict) and result.get("checkpoint") is not None:
+            required.add("previous_checkpoint_anchor")
     elif status != "started":
         raise CompactionCorruptionError("compaction artifact status is invalid")
     if set(value) != required:
@@ -561,6 +656,10 @@ def _validate_artifact(value: dict[str, Any], session_id: str, compaction_id: st
     _required_str(value["updated_at"], "updated_at")
     if status in {"completed", "failed"}:
         _validate_result(value["result"], compaction_id, applied=status == "completed")
+    if status == "failed" and "previous_checkpoint_anchor" in value:
+        anchor = value["previous_checkpoint_anchor"]
+        if not isinstance(anchor, str) or not re.fullmatch(r"[0-9a-f]{64}", anchor):
+            raise CompactionCorruptionError("previous checkpoint anchor is invalid")
     if status == "completed":
         checkpoint = _deserialize_checkpoint(value["checkpoint"])
         if checkpoint.compaction_id != compaction_id:
@@ -600,7 +699,9 @@ def _validate_result(value: object, compaction_id: str, *, applied: bool) -> Non
     if applied and not isinstance(value["checkpoint"], dict):
         raise CompactionCorruptionError("completed result checkpoint is missing")
     if not applied and value["checkpoint"] is not None:
-        raise CompactionCorruptionError("failed result checkpoint must be empty")
+        checkpoint = _deserialize_checkpoint(value["checkpoint"])
+        if checkpoint.compaction_id == compaction_id:
+            raise CompactionCorruptionError("failed result checkpoint must be previous")
 
 
 def _required_str(value: object, label: str, *, allow_empty: bool = False) -> str:

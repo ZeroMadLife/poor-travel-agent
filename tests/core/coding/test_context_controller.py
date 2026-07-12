@@ -282,6 +282,19 @@ async def test_current_message_id_is_removed_from_controller_history() -> None:
     assert [item["message_id"] for item in prepared.projected_history] == ["m-old"]
 
 
+def test_before_model_request_applies_same_current_message_identity_filter() -> None:
+    controller = ContextController(
+        session_id="s1", policy=_policy(), counter=LengthCounter(),
+        projector=ContextProjector(), compactor=RecordingCompactor(_result([])),
+        renderer=RecordingRenderer(),
+    )
+    prepared = controller.before_model_request(
+        [{"role": "user", "content": "current", "message_id": "m-current"}],
+        user_message="current", run_id="run-1", current_message_id="m-current",
+    )
+    assert prepared.projected_history == []
+
+
 async def test_manual_compact_rejects_an_active_run() -> None:
     history: list[dict[str, Any]] = []
     controller = ContextController(
@@ -437,6 +450,27 @@ async def test_structured_summarizer_times_out_without_leaking_model_error() -> 
         )
 
 
+async def test_structured_summarizer_timeout_is_a_hard_deadline() -> None:
+    class CancellationResistantModel:
+        async def complete(self, prompt: str, *, max_tokens: int) -> str:
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                await asyncio.sleep(10)
+            return "{}"
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    with pytest.raises(TimeoutError, match="timed out"):
+        await StructuredSummarizer(
+            CancellationResistantModel(), timeout_seconds=0.01
+        ).summarize(
+            archived_history=[], previous_summary=None, focus="", max_tokens=1,
+            source_transcript_range=(0, 0), repair_feedback=None,
+        )
+    assert loop.time() - started < 0.2
+
+
 async def test_structured_summarizer_propagates_cancellation() -> None:
     class CancelModel:
         async def complete(self, prompt: str, *, max_tokens: int) -> str:
@@ -476,3 +510,32 @@ async def test_structured_summarizer_rejects_oversized_raw_output() -> None:
             archived_history=[], previous_summary=None, focus="", max_tokens=20_000,
             source_transcript_range=(0, 0), repair_feedback=None,
         )
+
+
+async def test_structured_summarizer_supports_max_completion_tokens_provider() -> None:
+    class CompletionTokensModel:
+        def __init__(self) -> None:
+            self.received: int | None = None
+
+        async def complete(self, prompt: str, *, max_completion_tokens: int) -> str:
+            self.received = max_completion_tokens
+            return json.dumps(_summary_payload())
+
+    model = CompletionTokensModel()
+    result = await StructuredSummarizer(model).summarize(
+        archived_history=[], previous_summary=None, focus="", max_tokens=123,
+        source_transcript_range=(0, 0), repair_feedback=None,
+    )
+    assert result == _summary_payload()
+    assert model.received == 123
+
+
+async def test_structured_summarizer_caps_combined_request_input() -> None:
+    model = CompleteModel("{}")
+    with pytest.raises(ValueError, match="request"):
+        await StructuredSummarizer(model).summarize(
+            archived_history=[], previous_summary=None,
+            focus="f" * 1_100_000, max_tokens=100,
+            source_transcript_range=(0, 0), repair_feedback="r" * 1_100_000,
+        )
+    assert model.prompts == []

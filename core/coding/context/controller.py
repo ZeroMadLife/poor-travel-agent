@@ -172,9 +172,11 @@ class ContextController:
         *,
         user_message: str | None = None,
         run_id: str = "",
+        current_message_id: str | None = None,
     ) -> PreparedContext:
         current = self.current_user_message if user_message is None else user_message
-        projected, usage = self._project_and_count(history, current)
+        prior = self._prior_history(history, current_message_id)
+        projected, usage = self._project_and_count(prior, current)
         self.last_usage = usage
         return PreparedContext.create(
             projected_history=projected,

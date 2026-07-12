@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import re
 from collections.abc import Mapping
+from contextlib import suppress
 from typing import Any
 
 from core.coding.context.summary import CompactionSummary
@@ -15,6 +17,7 @@ _INSTRUCTION = "Return exactly one JSON object matching the compaction summary s
 _MAX_ARCHIVED_BYTES = 1024 * 1024
 _MAX_RAW_OUTPUT_BYTES = 256 * 1024
 _MAX_SUMMARY_TOKENS = 100_000
+_MAX_REQUEST_BYTES = 2 * 1024 * 1024
 
 
 class StructuredSummarizer:
@@ -68,12 +71,19 @@ class StructuredSummarizer:
             separators=(",", ":"),
             default=str,
         )
+        if len(payload.encode("utf-8")) > _MAX_REQUEST_BYTES:
+            raise ValueError("structured summary request exceeds the size limit")
+        task = asyncio.create_task(
+            self._invoke(f"{_INSTRUCTION}\n{payload}", max_tokens=max_tokens)
+        )
         try:
-            raw = await asyncio.wait_for(
-                self._invoke(f"{_INSTRUCTION}\n{payload}", max_tokens=max_tokens),
-                timeout=self.timeout_seconds,
-            )
+            done, _ = await asyncio.wait({task}, timeout=self.timeout_seconds)
+            if not done:
+                _cancel_without_waiting(task)
+                raise TimeoutError("structured summarization timed out")
+            raw = task.result()
         except asyncio.CancelledError:
+            _cancel_without_waiting(task)
             raise
         except TimeoutError:
             raise TimeoutError("structured summarization timed out") from None
@@ -87,12 +97,23 @@ class StructuredSummarizer:
     async def _invoke(self, prompt: str, *, max_tokens: int) -> str:
         complete = getattr(self.model, "complete", None)
         ainvoke = getattr(self.model, "ainvoke", None)
-        if callable(complete):
-            response = await complete(prompt, max_tokens=max_tokens)
-        elif callable(ainvoke):
-            response = await ainvoke(prompt, max_tokens=max_tokens)
-        else:
+        provider = complete if callable(complete) else ainvoke
+        if not callable(provider):
             raise TypeError("model has no supported async completion method")
+        parameters: Mapping[str, inspect.Parameter]
+        try:
+            parameters = inspect.signature(provider).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        kwargs: dict[str, Any] = {}
+        if "max_tokens" in parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        ):
+            kwargs["max_tokens"] = max_tokens
+        elif "max_completion_tokens" in parameters:
+            kwargs["max_completion_tokens"] = max_tokens
+        response = await provider(prompt, **kwargs)
         content = getattr(response, "content", response)
         if not isinstance(content, str):
             raise TypeError("model response content must be text")
@@ -111,6 +132,16 @@ def _parse_single_object(raw: str) -> Mapping[str, Any]:
     if candidate[end:].strip() or not isinstance(value, dict):
         raise ValueError("summary must contain exactly one JSON object")
     return value
+
+
+def _cancel_without_waiting(task: asyncio.Task[str]) -> None:
+    task.cancel()
+
+    def consume_result(done: asyncio.Task[str]) -> None:
+        with suppress(asyncio.CancelledError, Exception):
+            done.exception()
+
+    task.add_done_callback(consume_result)
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
