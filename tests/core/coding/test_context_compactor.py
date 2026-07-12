@@ -14,7 +14,11 @@ import pytest
 from pydantic import ValidationError
 
 from core.coding.context.budget import ContextPolicy, TokenCount, TokenCounter
-from core.coding.context.compact import CompactionPolicy, CompactManager
+from core.coding.context.compact import (
+    CompactionBusyError,
+    CompactionPolicy,
+    CompactManager,
+)
 from core.coding.context.summary import CompactionCheckpoint, CompactionSummary
 
 
@@ -73,6 +77,14 @@ class ExplodingCounter(TokenCounter):
         return TokenCount(tokens=100, estimated=False)
 
 
+class ValueErrorCounter(ExplodingCounter):
+    def count(self, text: str) -> TokenCount:
+        self.calls += 1
+        if self.calls > 1:
+            raise ValueError("secret token failure")
+        return TokenCount(tokens=100, estimated=False)
+
+
 class ConcurrentSummarizer:
     def __init__(self) -> None:
         self.active = 0
@@ -98,6 +110,11 @@ class ConcurrentSummarizer:
 class BrokenInvalidator:
     def invalidate_system_prompt(self) -> None:
         raise RuntimeError("cache secret")
+
+
+class CancellingInvalidator:
+    def invalidate_system_prompt(self) -> None:
+        raise asyncio.CancelledError
 
 
 def _policy() -> ContextPolicy:
@@ -165,11 +182,20 @@ def _checkpoint() -> CompactionCheckpoint:
     )
 
 
+def _trusted_checkpoint(session_id: str, checkpoint: CompactionCheckpoint) -> bool:
+    return session_id == "test" and bool(checkpoint.compaction_id)
+
+
 async def test_compactor_preserves_recent_three_complete_turns() -> None:
     history = _history()
     summarizer = QueueSummarizer(_summary((0, 8), source_run_ids=["run-0", "run-1", "run-2"]))
 
-    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
+    result = await CompactManager(
+        summarizer=summarizer,
+        policy=_policy(),
+        checkpoint_verifier=_trusted_checkpoint,
+    ).compact(
+        session_id="test",
         history=history,
         trigger="auto",
     )
@@ -192,7 +218,7 @@ async def test_compactor_keeps_up_to_twelve_complete_turns_within_tail_budget() 
         compaction_policy=CompactionPolicy(minimum_savings_ratio=0.0),
     )
 
-    result = await manager.compact(history=history)
+    result = await manager.compact(session_id="test", history=history)
 
     assert result.applied is True
     assert result.archived_items == 6
@@ -208,7 +234,7 @@ async def test_compactor_tail_budget_never_splits_a_turn() -> None:
         compaction_policy=CompactionPolicy(tail_budget_ratio=0.20),
     )
 
-    result = await manager.compact(history=history)
+    result = await manager.compact(session_id="test", history=history)
 
     assert result.applied is True
     assert result.archived_items == 15
@@ -226,7 +252,7 @@ async def test_tail_budget_uses_effective_compaction_budget() -> None:
         compaction_policy=CompactionPolicy(minimum_savings_ratio=0.0),
     )
 
-    result = await manager.compact(history=history)
+    result = await manager.compact(session_id="test", history=history)
 
     assert result.applied is True
     assert result.projected_history[1:] == history[-9:]
@@ -240,9 +266,11 @@ async def test_schema_validation_error_is_repaired_once() -> None:
     }
     summarizer = QueueSummarizer(invalid, _summary((0, 8)))
 
-    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
-        history=_history()
-    )
+    result = await CompactManager(
+        summarizer=summarizer,
+        policy=_policy(),
+        checkpoint_verifier=_trusted_checkpoint,
+    ).compact(session_id="test", history=_history())
 
     assert result.applied is True
     assert len(summarizer.calls) == 2
@@ -255,7 +283,9 @@ async def test_todo_evidence_requires_exact_identifier_match() -> None:
     invalid = _summary((0, 8), active_todos=["todo-2"])
     summarizer = QueueSummarizer(invalid, invalid)
 
-    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(history=history)
+    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
+        session_id="test", history=history
+    )
 
     assert result.applied is False
     assert result.reason == "summary_quality_invalid"
@@ -269,9 +299,11 @@ async def test_file_evidence_rejects_path_prefix_match() -> None:
     )
     summarizer = QueueSummarizer(invalid, invalid)
 
-    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
-        history=_history()
-    )
+    result = await CompactManager(
+        summarizer=summarizer,
+        policy=_policy(),
+        checkpoint_verifier=_trusted_checkpoint,
+    ).compact(session_id="test", history=_history())
 
     assert result.applied is False
     assert result.reason == "summary_quality_invalid"
@@ -294,7 +326,7 @@ async def test_explicit_transcript_range_must_match_archived_item_count() -> Non
     summarizer = QueueSummarizer(_summary((0, 9)))
 
     result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
-        history=_history(), transcript_range=(0, 9)
+        session_id="test", history=_history(), transcript_range=(0, 9)
     )
 
     assert result.applied is False
@@ -308,7 +340,9 @@ async def test_real_contiguous_sequences_define_transcript_range() -> None:
         item["sequence"] = sequence
     summarizer = QueueSummarizer(_summary((100, 108)))
 
-    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(history=history)
+    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
+        session_id="test", history=history
+    )
 
     assert result.applied is True
     assert result.checkpoint is not None
@@ -325,7 +359,9 @@ async def test_invalid_real_sequences_do_not_fall_back(
         item["sequence"] = sequence
     summarizer = QueueSummarizer(_summary((0, 8)))
 
-    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(history=history)
+    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
+        session_id="test", history=history
+    )
 
     assert result.applied is False
     assert result.reason in {
@@ -339,9 +375,11 @@ async def test_damaged_previous_checkpoint_hash_is_rejected() -> None:
     damaged = replace(_checkpoint(), summary_hash="tampered")
     summarizer = QueueSummarizer(_summary((45, 53)))
 
-    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
-        history=_history(), previous_checkpoint=damaged
-    )
+    result = await CompactManager(
+        summarizer=summarizer,
+        policy=_policy(),
+        checkpoint_verifier=_trusted_checkpoint,
+    ).compact(session_id="test", history=_history(), previous_checkpoint=damaged)
 
     assert result.applied is False
     assert result.reason == "invalid_previous_checkpoint"
@@ -349,13 +387,35 @@ async def test_damaged_previous_checkpoint_hash_is_rejected() -> None:
     assert summarizer.calls == []
 
 
+@pytest.mark.parametrize("verifier", [None, lambda session_id, checkpoint: False])
+async def test_previous_checkpoint_requires_external_trust(
+    verifier: Any,
+) -> None:
+    summarizer = QueueSummarizer(_summary((45, 53)))
+    manager = CompactManager(
+        summarizer=summarizer,
+        policy=_policy(),
+        checkpoint_verifier=verifier,
+    )
+
+    result = await manager.compact(
+        session_id="test", history=_history(), previous_checkpoint=_checkpoint()
+    )
+
+    assert result.applied is False
+    assert result.reason == "invalid_previous_checkpoint"
+    assert summarizer.calls == []
+
+
 async def test_previous_checkpoint_metadata_must_match_its_summary_range() -> None:
     damaged = replace(_checkpoint(), transcript_end=53)
     summarizer = QueueSummarizer(_summary((54, 62)))
 
-    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
-        history=_history(), previous_checkpoint=damaged
-    )
+    result = await CompactManager(
+        summarizer=summarizer,
+        policy=_policy(),
+        checkpoint_verifier=_trusted_checkpoint,
+    ).compact(session_id="test", history=_history(), previous_checkpoint=damaged)
 
     assert result.applied is False
     assert result.reason == "invalid_previous_checkpoint"
@@ -366,9 +426,11 @@ async def test_system_prefix_is_preserved_and_old_summary_is_removed() -> None:
     prefix = {"role": "system", "content": "project safety policy", "marker": 7}
     stale = {"role": "system", "kind": "compact_summary", "content": "stale"}
     history: list[dict[str, Any]] = [prefix, stale, *_history()]
-    summarizer = QueueSummarizer(_summary((0, 8)))
+    summarizer = QueueSummarizer(_summary((1, 9)))
 
-    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(history=history)
+    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
+        session_id="test", history=history
+    )
 
     assert result.applied is True
     assert result.projected_history[0] == prefix
@@ -382,9 +444,11 @@ async def test_previous_summary_and_checkpoint_summary_are_deep_copies() -> None
     response = _summary((45, 53))
     summarizer = QueueSummarizer(response)
 
-    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
-        history=_history(), previous_checkpoint=previous
-    )
+    result = await CompactManager(
+        summarizer=summarizer,
+        policy=_policy(),
+        checkpoint_verifier=_trusted_checkpoint,
+    ).compact(session_id="test", history=_history(), previous_checkpoint=previous)
 
     assert result.applied is True
     assert summarizer.calls[0]["previous_summary"] == previous.summary
@@ -403,7 +467,7 @@ async def test_post_split_exception_returns_stable_failure_metadata() -> None:
         counter=ExplodingCounter(),
     )
 
-    result = await manager.compact(history=history, trigger="auto")
+    result = await manager.compact(session_id="test", history=history, trigger="auto")
 
     assert result.applied is False
     assert result.projected_history == history
@@ -418,7 +482,34 @@ async def test_cancelled_summarizer_propagates_cancellation() -> None:
     manager = CompactManager(summarizer=QueueSummarizer(asyncio.CancelledError()), policy=_policy())
 
     with pytest.raises(asyncio.CancelledError):
-        await manager.compact(history=_history())
+        await manager.compact(session_id="test", history=_history())
+
+
+async def test_cancelled_attempt_does_not_change_session_circuit_state() -> None:
+    history = _history(turns=4, verbose=False)
+    ineffective = _summary((0, 2), goal="request 0" * 100)
+    summarizer = QueueSummarizer(
+        ineffective,
+        asyncio.CancelledError(),
+        ineffective,
+    )
+    manager = CompactManager(summarizer=summarizer, policy=_policy())
+
+    first = await manager.compact(session_id="state", history=history, trigger="auto")
+    with pytest.raises(asyncio.CancelledError):
+        await manager.compact(session_id="state", history=history, trigger="manual")
+    second = await manager.compact(session_id="state", history=history, trigger="auto")
+    blocked = await manager.compact(session_id="state", history=history, trigger="auto")
+
+    assert first.reason == second.reason == "ineffective_summary"
+    assert blocked.reason == "auto_compaction_circuit_open"
+
+
+async def test_session_id_is_required_and_non_empty() -> None:
+    manager = CompactManager(summarizer=QueueSummarizer(_summary((0, 8))), policy=_policy())
+
+    with pytest.raises(ValueError, match="session_id"):
+        await manager.compact(session_id="", history=_history())
 
 
 async def test_provider_failure_starts_session_cooldown_and_manual_bypasses() -> None:
@@ -449,16 +540,20 @@ async def test_provider_failure_starts_session_cooldown_and_manual_bypasses() ->
     assert len(summarizer.calls) == 3
 
 
-async def test_same_session_compactions_are_serialized() -> None:
+async def test_same_session_compactions_fail_fast_when_busy() -> None:
     summarizer = ConcurrentSummarizer()
     manager = CompactManager(summarizer=summarizer, policy=_policy())
 
-    first, second = await asyncio.gather(
-        manager.compact(history=_history(), session_id="same"),
-        manager.compact(history=_history(), session_id="same"),
-    )
+    first_task = asyncio.create_task(manager.compact(history=_history(), session_id="same"))
+    await asyncio.sleep(0)
+    with pytest.raises(CompactionBusyError):
+        await manager.compact(history=_history(), session_id="same")
+    busy = await manager.compact(history=_history(), session_id="same", trigger="auto")
+    first = await first_task
 
-    assert first.applied is second.applied is True
+    assert first.applied is True
+    assert busy.reason == "compaction_busy"
+    assert busy.retryable is True
     assert summarizer.max_active == 1
 
 
@@ -478,7 +573,7 @@ async def test_different_session_compactions_do_not_share_lock() -> None:
 async def test_cache_invalidation_is_best_effort_after_success() -> None:
     result = await CompactManager(
         summarizer=QueueSummarizer(_summary((0, 8))), policy=_policy()
-    ).compact(history=_history(), context_manager=BrokenInvalidator())
+    ).compact(session_id="test", history=_history(), context_manager=BrokenInvalidator())
 
     assert result.applied is True
     assert result.reason == ""
@@ -486,11 +581,17 @@ async def test_cache_invalidation_is_best_effort_after_success() -> None:
 
 async def test_checkpoint_hash_chain_binds_prior_evidence_and_summary() -> None:
     first_manager = CompactManager(summarizer=QueueSummarizer(_summary((0, 8))), policy=_policy())
-    first = await first_manager.compact(history=_history())
+    first = await first_manager.compact(session_id="test", history=_history())
     assert first.checkpoint is not None
-    second_manager = CompactManager(summarizer=QueueSummarizer(_summary((9, 17))), policy=_policy())
+    second_manager = CompactManager(
+        summarizer=QueueSummarizer(_summary((9, 17))),
+        policy=_policy(),
+        checkpoint_verifier=_trusted_checkpoint,
+    )
 
-    second = await second_manager.compact(history=_history(), previous_checkpoint=first.checkpoint)
+    second = await second_manager.compact(
+        session_id="test", history=_history(), previous_checkpoint=first.checkpoint
+    )
 
     assert second.applied is True
     assert second.checkpoint is not None
@@ -510,8 +611,8 @@ async def test_terminal_quality_failure_starts_cooldown() -> None:
     summarizer = QueueSummarizer(invalid, invalid)
     manager = CompactManager(summarizer=summarizer, policy=_policy(), monotonic=lambda: 10.0)
 
-    failed = await manager.compact(history=_history(), trigger="auto")
-    cooled = await manager.compact(history=_history(), trigger="auto")
+    failed = await manager.compact(session_id="test", history=_history(), trigger="auto")
+    cooled = await manager.compact(session_id="test", history=_history(), trigger="auto")
 
     assert failed.reason == "summary_quality_invalid"
     assert failed.retryable is True
@@ -531,11 +632,205 @@ async def test_summary_render_exception_is_contained(
 
     result = await CompactManager(
         summarizer=QueueSummarizer(_summary((0, 8))), policy=_policy()
-    ).compact(history=history)
+    ).compact(session_id="test", history=history)
 
     assert result.applied is False
     assert result.projected_history == history
     assert result.reason == "compaction_failed"
+
+
+async def test_explicit_range_maps_full_source_history_to_archived_span() -> None:
+    summarizer = QueueSummarizer(_summary((100, 108)))
+
+    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
+        session_id="test", history=_history(), transcript_range=(100, 117)
+    )
+
+    assert result.applied is True
+    assert result.checkpoint is not None
+    assert (result.checkpoint.transcript_start, result.checkpoint.transcript_end) == (
+        100,
+        108,
+    )
+
+
+async def test_old_summary_does_not_consume_canonical_range_position() -> None:
+    stale = {"role": "system", "kind": "compact_summary", "content": "stale"}
+    history = [stale, *_history()]
+    summarizer = QueueSummarizer(_summary((100, 108)))
+
+    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
+        session_id="test", history=history, transcript_range=(100, 117)
+    )
+
+    assert result.applied is True
+    assert result.checkpoint is not None
+    assert result.checkpoint.transcript_start == 100
+
+
+async def test_explicit_range_cross_checks_item_sequences() -> None:
+    history = _history()
+    for sequence, item in enumerate(history, start=100):
+        item["sequence"] = sequence
+    history[5]["sequence"] = 999
+    summarizer = QueueSummarizer(_summary((100, 108)))
+
+    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
+        session_id="test", history=history, transcript_range=(100, 117)
+    )
+
+    assert result.reason == "non_contiguous_transcript_range"
+    assert summarizer.calls == []
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "args", "summary_field", "denial"),
+    [
+        (
+            "read_file",
+            {"path": "src/file-0.py"},
+            {"files_read": ["src/file-0.py"]},
+            {"status": "denied", "policy_reason": "outside workspace"},
+        ),
+        (
+            "write_file",
+            {"path": "src/file-0.py"},
+            {"files_modified": ["src/file-0.py"]},
+            {"ok": False},
+        ),
+        (
+            "run_shell",
+            {"command": "pytest tests/x.py"},
+            {"tests": ["pytest tests/x.py"]},
+            {"security_event_type": "command_denied"},
+        ),
+    ],
+)
+async def test_denied_tool_result_cannot_support_structured_evidence(
+    tool_name: str,
+    args: dict[str, str],
+    summary_field: dict[str, list[str]],
+    denial: dict[str, object],
+) -> None:
+    history = _history()
+    history[1].update(name=tool_name, args=args, **denial)
+    invalid = CompactionSummary.model_validate(
+        {
+            "goal": "finish",
+            "source_transcript_range": [0, 8],
+            **summary_field,
+        }
+    )
+    summarizer = QueueSummarizer(invalid, invalid)
+
+    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
+        session_id="test", history=history
+    )
+
+    assert result.applied is False
+    assert result.reason == "summary_quality_invalid"
+
+
+async def test_turn_id_is_not_todo_evidence() -> None:
+    history = _history()
+    history[0]["turn_id"] = "todo_7"
+    invalid = _summary((0, 8), active_todos=["todo_7"])
+    summarizer = QueueSummarizer(invalid, invalid)
+
+    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
+        session_id="test", history=history
+    )
+
+    assert result.reason == "summary_quality_invalid"
+
+
+async def test_denied_tool_run_id_is_not_source_evidence() -> None:
+    history = _history()
+    history[1].update(status="failed", run_id="denied-run")
+    invalid = _summary((0, 8), source_run_ids=["denied-run"])
+    summarizer = QueueSummarizer(invalid, invalid)
+
+    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
+        session_id="test", history=history
+    )
+
+    assert result.reason == "summary_quality_invalid"
+
+
+async def test_mid_history_system_item_is_protected_not_archived() -> None:
+    protected = {"role": "system", "content": "mid-session safety", "marker": 9}
+    history = _history()
+    history.insert(4, protected)
+    summarizer = QueueSummarizer(_summary((0, 9)))
+
+    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
+        session_id="test", history=history
+    )
+
+    assert result.applied is True
+    assert protected in result.projected_history
+    assert protected not in summarizer.calls[0]["archived_history"]
+
+
+async def test_unsupported_control_role_is_protected() -> None:
+    protected = {"role": "control", "content": "approval boundary"}
+    history = _history()
+    history.insert(4, protected)
+    summarizer = QueueSummarizer(_summary((0, 9)))
+
+    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
+        session_id="test", history=history
+    )
+
+    assert result.applied is True
+    assert protected in result.projected_history
+    assert protected not in summarizer.calls[0]["archived_history"]
+
+
+async def test_callback_cancellation_is_best_effort_after_commit() -> None:
+    result = await CompactManager(
+        summarizer=QueueSummarizer(_summary((0, 8))), policy=_policy()
+    ).compact(session_id="test", history=_history(), context_manager=CancellingInvalidator())
+
+    assert result.applied is True
+    assert result.checkpoint is not None
+
+
+async def test_auto_postprocessing_failure_starts_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_render(self: CompactionSummary) -> str:
+        raise RuntimeError("render secret")
+
+    monkeypatch.setattr(CompactionSummary, "render_for_prompt", fail_render)
+    manager = CompactManager(
+        summarizer=QueueSummarizer(_summary((0, 8)), _summary((0, 8))),
+        policy=_policy(),
+        monotonic=lambda: 20.0,
+    )
+
+    failed = await manager.compact(session_id="test", history=_history(), trigger="auto")
+    cooled = await manager.compact(session_id="test", history=_history(), trigger="auto")
+
+    assert failed.reason == "compaction_failed"
+    assert failed.cooldown_until == 80.0
+    assert cooled.reason == "cooldown_active"
+
+
+async def test_auto_postprocessing_value_error_starts_cooldown() -> None:
+    manager = CompactManager(
+        summarizer=QueueSummarizer(_summary((0, 2))),
+        policy=_policy(),
+        counter=ValueErrorCounter(),
+        monotonic=lambda: 30.0,
+    )
+
+    failed = await manager.compact(session_id="test", history=_history(turns=4), trigger="auto")
+    cooled = await manager.compact(session_id="test", history=_history(turns=4), trigger="auto")
+
+    assert failed.reason == "compaction_failed"
+    assert failed.cooldown_until == 90.0
+    assert cooled.reason == "cooldown_active"
 
 
 async def test_compactor_never_changes_source_history() -> None:
@@ -543,7 +838,9 @@ async def test_compactor_never_changes_source_history() -> None:
     original = deepcopy(history)
     summarizer = QueueSummarizer(_summary((0, 8)))
 
-    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(history=history)
+    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
+        session_id="test", history=history
+    )
 
     assert history == original
     result.projected_history[-1]["content"] = "changed projection"
@@ -554,10 +851,15 @@ async def test_compactor_updates_previous_summary_iteratively() -> None:
     previous = _checkpoint()
     summarizer = QueueSummarizer(_summary((45, 53)))
 
-    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
+    result = await CompactManager(
+        summarizer=summarizer,
+        policy=_policy(),
+        checkpoint_verifier=_trusted_checkpoint,
+    ).compact(
+        session_id="test",
         history=_history(),
         previous_checkpoint=previous,
-        transcript_range=(45, 53),
+        transcript_range=(45, 62),
     )
 
     assert result.applied is True
@@ -573,7 +875,12 @@ async def test_invalid_summary_keeps_previous_checkpoint() -> None:
     summarizer = QueueSummarizer(_summary((900, 999)), _summary((900, 999)))
     history = _history()
 
-    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
+    result = await CompactManager(
+        summarizer=summarizer,
+        policy=_policy(),
+        checkpoint_verifier=_trusted_checkpoint,
+    ).compact(
+        session_id="test",
         history=history,
         previous_checkpoint=previous,
     )
@@ -591,8 +898,12 @@ async def test_summary_missing_todo_id_is_repaired_once() -> None:
         _summary((0, 8), active_todos=["todo-2"]),
     )
 
+    history = _history()
+    history[7]["name"] = "todo_update"
+    history[7]["args"] = {"todo_id": "todo-2"}
     result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
-        history=_history()
+        session_id="test",
+        history=history,
     )
 
     assert result.applied is True
@@ -605,7 +916,12 @@ async def test_summary_failure_preserves_original_context() -> None:
     history = _history()
     summarizer = QueueSummarizer(RuntimeError("provider unavailable"))
 
-    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
+    result = await CompactManager(
+        summarizer=summarizer,
+        policy=_policy(),
+        checkpoint_verifier=_trusted_checkpoint,
+    ).compact(
+        session_id="test",
         history=history,
         previous_checkpoint=previous,
     )
@@ -621,7 +937,9 @@ async def test_ineffective_summary_is_not_applied() -> None:
     history = _history(turns=4, verbose=False)
     summarizer = QueueSummarizer(_summary((0, 2), goal="request 0" * 100))
 
-    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(history=history)
+    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
+        session_id="test", history=history
+    )
 
     assert result.applied is False
     assert result.projected_history == history
@@ -637,10 +955,10 @@ async def test_second_ineffective_result_opens_circuit() -> None:
     )
     manager = CompactManager(summarizer=summarizer, policy=_policy())
 
-    first = await manager.compact(history=history, trigger="auto")
-    second = await manager.compact(history=history, trigger="auto")
-    blocked = await manager.compact(history=history, trigger="auto")
-    manual = await manager.compact(history=history, trigger="manual")
+    first = await manager.compact(session_id="test", history=history, trigger="auto")
+    second = await manager.compact(session_id="test", history=history, trigger="auto")
+    blocked = await manager.compact(session_id="test", history=history, trigger="auto")
+    manual = await manager.compact(session_id="test", history=history, trigger="manual")
 
     assert first.reason == second.reason == "ineffective_summary"
     assert blocked.applied is False
@@ -659,9 +977,9 @@ async def test_success_resets_failure_counter() -> None:
     )
     manager = CompactManager(summarizer=summarizer, policy=_policy())
 
-    first = await manager.compact(history=short, trigger="auto")
-    success = await manager.compact(history=long, trigger="auto")
-    after_reset = await manager.compact(history=short, trigger="auto")
+    first = await manager.compact(session_id="test", history=short, trigger="auto")
+    success = await manager.compact(session_id="test", history=long, trigger="auto")
+    after_reset = await manager.compact(session_id="test", history=short, trigger="auto")
 
     assert first.reason == after_reset.reason == "ineffective_summary"
     assert success.applied is True

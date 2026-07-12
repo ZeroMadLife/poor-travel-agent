@@ -1,6 +1,12 @@
 """Context, prompt-budget, and workspace public API."""
 
-from core.coding.context.compact import CompactionPolicy, CompactManager, Summarizer
+from core.coding.context.compact import (
+    CheckpointVerifier,
+    CompactionBusyError,
+    CompactionPolicy,
+    CompactManager,
+    Summarizer,
+)
 from core.coding.context.manager import (
     DEFAULT_SYSTEM_PROMPT,
     SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
@@ -36,7 +42,9 @@ __all__ = [
     "MAX_DIFF_FILES",
     "MAX_FILE_SIZE",
     "SYSTEM_PROMPT_DYNAMIC_BOUNDARY",
+    "CheckpointVerifier",
     "CompactManager",
+    "CompactionBusyError",
     "CompactionCheckpoint",
     "CompactionPolicy",
     "CompactionResult",

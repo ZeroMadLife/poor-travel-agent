@@ -95,7 +95,7 @@ async def test_compact_manager_summarizes_old_turns_and_keeps_recent_turns() -> 
         for offset in range(2)
     ]
 
-    result = await _compact_manager().compact(history)
+    result = await _compact_manager().compact(history, session_id="test")
 
     assert result.applied is True
     assert result.projected_history[0]["role"] == "system"
@@ -222,7 +222,7 @@ async def test_compact_manager_invalidates_context_cache_after_compaction() -> N
         for offset in range(2)
     ]
 
-    result = await _compact_manager().compact(history, context_manager=manager)
+    result = await _compact_manager().compact(history, session_id="test", context_manager=manager)
     manager.build_system_prompt_once(["read_file: read a file"])
 
     assert result.applied is True

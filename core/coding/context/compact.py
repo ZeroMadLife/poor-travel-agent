@@ -6,8 +6,10 @@ import asyncio
 import hashlib
 import json
 import posixpath
+import re
 import time
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -41,6 +43,14 @@ class CacheInvalidator(Protocol):
     def invalidate_system_prompt(self) -> None: ...
 
 
+class CheckpointVerifier(Protocol):
+    def __call__(self, session_id: str, checkpoint: CompactionCheckpoint) -> bool: ...
+
+
+class CompactionBusyError(RuntimeError):
+    """A manual compaction was requested while the session was already compacting."""
+
+
 @dataclass(frozen=True)
 class CompactionPolicy:
     min_recent_turns: int = 3
@@ -70,6 +80,7 @@ class _SessionState:
     ineffective_results: int = 0
     auto_circuit_open: bool = False
     cooldown_until: float | None = None
+    in_progress: bool = False
 
 
 class CompactManager:
@@ -81,53 +92,76 @@ class CompactManager:
         counter: TokenCounter | None = None,
         compaction_policy: CompactionPolicy | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        checkpoint_verifier: CheckpointVerifier | None = None,
     ) -> None:
         self.summarizer = summarizer
         self.policy = policy
         self.counter = counter or TokenCounter()
         self.compaction_policy = compaction_policy or CompactionPolicy()
         self.monotonic = monotonic
-        self._locks: dict[str, asyncio.Lock] = {}
+        self.checkpoint_verifier = checkpoint_verifier
         self._states: dict[str, _SessionState] = {}
 
     async def compact(
         self,
         history: list[dict[str, Any]],
         *,
+        session_id: str,
         trigger: str = "manual",
         focus: str = "",
         previous_checkpoint: CompactionCheckpoint | None = None,
         transcript_range: tuple[int, int] | None = None,
         context_manager: CacheInvalidator | None = None,
-        session_id: str = "default",
     ) -> CompactionResult:
-        lock = self._locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ValueError("session_id must be non-empty")
+        compaction_id = f"compact-{uuid4().hex}"
+        original = deepcopy(history)
+        before_tokens = self._safe_count(original)
+        state = self._states.setdefault(session_id, _SessionState())
+        if state.in_progress:
+            if trigger == "manual":
+                raise CompactionBusyError("compaction already in progress")
+            return self._unchanged(
+                original,
+                previous_checkpoint,
+                before_tokens,
+                "compaction_busy",
+                compaction_id,
+                trigger,
+                retryable=True,
+            )
+        state.in_progress = True
+        try:
             return await self._compact_locked(
-                history=history,
+                original=original,
+                before_tokens=before_tokens,
+                compaction_id=compaction_id,
                 trigger=trigger,
                 focus=focus,
                 previous_checkpoint=previous_checkpoint,
                 transcript_range=transcript_range,
                 context_manager=context_manager,
                 session_id=session_id,
+                state=state,
             )
+        finally:
+            state.in_progress = False
 
     async def _compact_locked(
         self,
         *,
-        history: list[dict[str, Any]],
+        original: list[dict[str, Any]],
+        before_tokens: int,
+        compaction_id: str,
         trigger: str,
         focus: str,
         previous_checkpoint: CompactionCheckpoint | None,
         transcript_range: tuple[int, int] | None,
         context_manager: CacheInvalidator | None,
         session_id: str,
+        state: _SessionState,
     ) -> CompactionResult:
-        compaction_id = f"compact-{uuid4().hex}"
-        original = deepcopy(history)
-        state = self._states.setdefault(session_id, _SessionState())
-        before_tokens = self._safe_count(original)
         current_time = self.monotonic()
         if trigger == "auto":
             if state.cooldown_until is not None and current_time < state.cooldown_until:
@@ -152,7 +186,7 @@ class CompactManager:
                 )
 
         try:
-            prefix, archived, tail = self._split_history(original)
+            protected, archived, tail, canonical = self._split_history(original)
             if not archived:
                 return self._unchanged(
                     original,
@@ -163,9 +197,9 @@ class CompactManager:
                     trigger,
                 )
             archived_range = self._resolve_transcript_range(
-                archived, transcript_range, previous_checkpoint
+                archived, canonical, transcript_range, previous_checkpoint
             )
-            previous_summary = self._validated_previous_summary(previous_checkpoint)
+            previous_summary = self._validated_previous_summary(previous_checkpoint, session_id)
             evidence_hash = self._evidence_hash(archived)
             max_tokens = max(
                 1,
@@ -198,7 +232,7 @@ class CompactManager:
                 "content": rendered_summary,
                 "created_at": now(),
             }
-            projected = [*deepcopy(prefix), summary_item, *deepcopy(tail)]
+            projected = [*deepcopy(protected), summary_item, *deepcopy(tail)]
             after_tokens = self._count_history(projected)
             savings_ratio = (before_tokens - after_tokens) / before_tokens
             if savings_ratio < self.compaction_policy.minimum_savings_ratio:
@@ -232,12 +266,8 @@ class CompactManager:
             state.auto_circuit_open = False
             state.cooldown_until = None
             if context_manager is not None:
-                try:
+                with suppress(BaseException):
                     context_manager.invalidate_system_prompt()
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    pass
             return CompactionResult(
                 applied=True,
                 projected_history=projected,
@@ -251,15 +281,14 @@ class CompactManager:
         except asyncio.CancelledError:
             raise
         except ValueError as exc:
-            reason = (
-                str(exc)
-                if str(exc)
-                in {
-                    "invalid_transcript_range",
-                    "non_contiguous_transcript_range",
-                    "invalid_previous_checkpoint",
-                }
-                else "compaction_failed"
+            known_reason = str(exc) in {
+                "invalid_transcript_range",
+                "non_contiguous_transcript_range",
+                "invalid_previous_checkpoint",
+            }
+            reason = str(exc) if known_reason else "compaction_failed"
+            value_error_cooldown: float | None = (
+                self._start_cooldown(state) if trigger == "auto" and not known_reason else None
             )
             return self._unchanged(
                 original,
@@ -268,8 +297,13 @@ class CompactManager:
                 reason,
                 compaction_id,
                 trigger,
+                retryable=trigger == "auto" and not known_reason,
+                cooldown_until=value_error_cooldown,
             )
         except Exception:
+            exception_cooldown: float | None = (
+                self._start_cooldown(state) if trigger == "auto" else None
+            )
             return self._unchanged(
                 original,
                 previous_checkpoint,
@@ -277,6 +311,8 @@ class CompactManager:
                 "compaction_failed",
                 compaction_id,
                 trigger,
+                retryable=trigger == "auto",
+                cooldown_until=exception_cooldown,
             )
 
     async def _produce_summary(
@@ -321,18 +357,26 @@ class CompactManager:
 
     def _split_history(
         self, history: list[dict[str, Any]]
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    ) -> tuple[
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+    ]:
         filtered = [item for item in history if item.get("kind") != "compact_summary"]
         turns: list[list[dict[str, Any]]] = []
-        prefix: list[dict[str, Any]] = []
+        protected: list[dict[str, Any]] = []
         current: list[dict[str, Any]] | None = None
         for item in filtered:
-            if item.get("role") == "user":
+            role = item.get("role")
+            if role == "system" or role not in {"user", "assistant", "tool"}:
+                protected.append(item)
+            elif role == "user":
                 if current is not None:
                     turns.append(current)
                 current = [item]
             elif current is None:
-                prefix.append(item)
+                protected.append(item)
             else:
                 current.append(item)
         if current is not None:
@@ -352,17 +396,21 @@ class CompactManager:
         archived_turns = turns[:-keep] if keep else turns
         tail_turns = turns[-keep:] if keep else []
         return (
-            prefix,
+            protected,
             [item for turn in archived_turns for item in turn],
             [item for turn in tail_turns for item in turn],
+            filtered,
         )
 
     @staticmethod
     def _resolve_transcript_range(
         archived: list[dict[str, Any]],
+        canonical: list[dict[str, Any]],
         supplied: tuple[int, int] | None,
         previous: CompactionCheckpoint | None,
     ) -> tuple[int, int]:
+        positions = {id(item): index for index, item in enumerate(canonical)}
+        archived_positions = [positions[id(item)] for item in archived]
         if supplied is not None:
             if (
                 len(supplied) != 2
@@ -372,12 +420,21 @@ class CompactManager:
                 or not isinstance(supplied[1], int)
                 or supplied[0] < 0
                 or supplied[1] < supplied[0]
-                or supplied[1] - supplied[0] + 1 != len(archived)
+                or supplied[1] - supplied[0] + 1 != len(canonical)
             ):
                 raise ValueError("invalid_transcript_range")
-            resolved = supplied
+            source_start = supplied[0]
+            mapped = [source_start + index for index in range(len(canonical))]
+            for index, item in enumerate(canonical):
+                sequence = item.get("sequence")
+                if sequence is not None and (
+                    isinstance(sequence, bool)
+                    or not isinstance(sequence, int)
+                    or sequence != mapped[index]
+                ):
+                    raise ValueError("non_contiguous_transcript_range")
         else:
-            sequences = [item.get("sequence") for item in archived]
+            sequences = [item.get("sequence") for item in canonical]
             has_real_sequence = any(value is not None for value in sequences)
             if has_real_sequence:
                 if not all(
@@ -393,20 +450,28 @@ class CompactManager:
                     raise ValueError("invalid_transcript_range")
                 if numeric != list(range(numeric[0], numeric[0] + len(numeric))):
                     raise ValueError("non_contiguous_transcript_range")
-                resolved = (numeric[0], numeric[-1])
+                source_start = numeric[0]
+                mapped = numeric
             else:
-                start = previous.transcript_end + 1 if previous is not None else 0
-                resolved = (start, start + len(archived) - 1)
-        if previous is not None and resolved[0] != previous.transcript_end + 1:
+                source_start = previous.transcript_end + 1 if previous is not None else 0
+                mapped = [source_start + index for index in range(len(canonical))]
+        if previous is not None and source_start != previous.transcript_end + 1:
             raise ValueError("non_contiguous_transcript_range")
-        return resolved
+        return (mapped[archived_positions[0]], mapped[archived_positions[-1]])
 
-    @classmethod
     def _validated_previous_summary(
-        cls, checkpoint: CompactionCheckpoint | None
+        self, checkpoint: CompactionCheckpoint | None, session_id: str
     ) -> CompactionSummary | None:
         if checkpoint is None:
             return None
+        if self.checkpoint_verifier is None:
+            raise ValueError("invalid_previous_checkpoint")
+        try:
+            trusted = self.checkpoint_verifier(session_id, checkpoint)
+        except Exception:
+            trusted = False
+        if not trusted:
+            raise ValueError("invalid_previous_checkpoint")
         if (
             checkpoint.transcript_start < 0
             or checkpoint.transcript_end < checkpoint.transcript_start
@@ -414,7 +479,7 @@ class CompactManager:
             != (checkpoint.transcript_start, checkpoint.transcript_end)
         ):
             raise ValueError("invalid_previous_checkpoint")
-        expected = cls._summary_hash(
+        expected = self._summary_hash(
             checkpoint.previous_summary_hash,
             checkpoint.evidence_hash,
             checkpoint.summary.render_for_prompt(),
@@ -422,6 +487,19 @@ class CompactManager:
         if not checkpoint.evidence_hash or expected != checkpoint.summary_hash:
             raise ValueError("invalid_previous_checkpoint")
         return checkpoint.summary.model_copy(deep=True)
+
+    @staticmethod
+    def _successful_tool(item: Mapping[str, Any]) -> bool:
+        if item.get("role") != "tool":
+            return False
+        status = str(item.get("status", "")).lower()
+        if status in {"error", "failed", "denied", "cancelled"}:
+            return False
+        if item.get("is_error") or item.get("ok") is False:
+            return False
+        if "policy_reason" in item:
+            return False
+        return "security_event_type" not in item
 
     @staticmethod
     def _normalize_path(value: str) -> str:
@@ -443,12 +521,25 @@ class CompactManager:
         artifacts: set[str] = set()
         run_ids: set[str] = set()
         for item in archived:
+            if not cls._successful_tool(item):
+                continue
+            run_id = item.get("run_id")
+            if isinstance(run_id, str):
+                run_ids.add(run_id)
             raw_args = item.get("args")
             args: Mapping[str, Any] = raw_args if isinstance(raw_args, Mapping) else {}
-            for value in (item.get("todo_id"), item.get("turn_id"), args.get("todo_id")):
-                if isinstance(value, str):
-                    todo_ids.add(value)
             name = item.get("name")
+            if name == "todo_update":
+                todo_id = args.get("todo_id")
+                if isinstance(todo_id, str):
+                    todo_ids.add(todo_id)
+            elif name in {"todo_add", "todo_list"}:
+                todo_id = item.get("todo_id")
+                if isinstance(todo_id, str):
+                    todo_ids.add(todo_id)
+                content = item.get("content")
+                if isinstance(content, str):
+                    todo_ids.update(re.findall(r"\btodo_\d+\b", content))
             path = args.get("path")
             if isinstance(path, str) and name in {"read_file", "search", "list_files"}:
                 files_read.add(cls._normalize_path(path))
@@ -463,9 +554,6 @@ class CompactManager:
             artifact = item.get("artifact_ref")
             if isinstance(artifact, str):
                 artifacts.add(artifact)
-            run_id = item.get("run_id")
-            if isinstance(run_id, str):
-                run_ids.add(run_id)
 
         checks = (
             (summary.active_todos, todo_ids, False),
