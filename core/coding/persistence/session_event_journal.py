@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 _DATABASE_NAME = "timeline.sqlite3"
 _MAX_PAYLOAD_BYTES = 1024 * 1024
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
@@ -65,11 +65,21 @@ CREATE TABLE active_run_lease (
     acquired_at TEXT NOT NULL
 )
 """
+_LEASE_V3_SQL = """
+CREATE TABLE active_run_lease (
+    lease_key INTEGER PRIMARY KEY CHECK (lease_key = 1),
+    run_id TEXT NOT NULL UNIQUE,
+    owner_id TEXT NOT NULL,
+    fencing_token INTEGER NOT NULL,
+    acquired_at TEXT NOT NULL
+)
+"""
 _LEASE_SQL = """
 CREATE TABLE active_run_lease (
     lease_key INTEGER PRIMARY KEY CHECK (lease_key = 1),
     run_id TEXT NOT NULL UNIQUE,
     owner_id TEXT NOT NULL,
+    owner_pid INTEGER NOT NULL,
     fencing_token INTEGER NOT NULL,
     acquired_at TEXT NOT NULL
 )
@@ -102,6 +112,10 @@ class SessionRunLeaseConflictError(SessionEventJournalError):
         super().__init__(f"session already has active run {active_run_id}")
 
 
+class SessionRunLeaseLostError(SessionEventJournalError):
+    """The run owner or fencing token no longer owns the active lease."""
+
+
 @dataclass(frozen=True, slots=True)
 class SessionEvent:
     event_id: str
@@ -119,6 +133,12 @@ class ReplayPage:
     items: tuple[SessionEvent, ...]
     next_cursor: int
     has_more: bool
+
+
+@dataclass(frozen=True, slots=True)
+class BeginRunResult:
+    event: SessionEvent
+    fencing_token: int
 
 
 class SessionEventJournal:
@@ -153,6 +173,8 @@ class SessionEventJournal:
         payload: Mapping[str, Any],
         event_id: str | None = None,
         timestamp: str | None = None,
+        lease_owner_id: str | None = None,
+        fencing_token: int | None = None,
     ) -> SessionEvent:
         """Commit an event and return only after it is durable."""
         values = _validated_event_input(
@@ -166,6 +188,12 @@ class SessionEventJournal:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                _assert_run_lease(
+                    connection,
+                    run_id=run_id,
+                    owner_id=lease_owner_id,
+                    fencing_token=fencing_token,
+                )
                 stored = self._insert(connection, **values)
                 connection.commit()
                 return stored
@@ -211,6 +239,8 @@ class SessionEventJournal:
         payload: Mapping[str, Any],
         event_id: str | None = None,
         timestamp: str | None = None,
+        lease_owner_id: str | None = None,
+        fencing_token: int | None = None,
     ) -> SessionEvent:
         """Persist one terminal and release its run lease in one transaction."""
         if status not in TERMINAL_STATUSES:
@@ -226,6 +256,12 @@ class SessionEventJournal:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                _assert_run_lease(
+                    connection,
+                    run_id=run_id,
+                    owner_id=lease_owner_id,
+                    fencing_token=fencing_token,
+                )
                 stored = self._terminal_in_transaction(connection, values)
                 connection.execute(
                     "DELETE FROM active_run_lease WHERE lease_key = 1 AND run_id = ?",
@@ -237,7 +273,9 @@ class SessionEventJournal:
                 connection.rollback()
                 raise
 
-    def acquire_run_lease(self, run_id: str, *, owner_id: str = "legacy") -> None:
+    def acquire_run_lease(
+        self, run_id: str, *, owner_id: str = "legacy", owner_pid: int = -1
+    ) -> None:
         """Atomically acquire this session's singleton persistent run lease."""
         validated_run = _validate_identifier("run_id", run_id)
         validated_owner = _validate_identifier("owner_id", owner_id)
@@ -254,9 +292,9 @@ class SessionEventJournal:
                 token = _allocate_fencing_token(connection)
                 connection.execute(
                     "INSERT INTO active_run_lease "
-                    "(lease_key, run_id, owner_id, fencing_token, acquired_at) "
-                    "VALUES (1, ?, ?, ?, ?)",
-                    (validated_run, validated_owner, token, acquired_at),
+                    "(lease_key, run_id, owner_id, owner_pid, fencing_token, acquired_at) "
+                    "VALUES (1, ?, ?, ?, ?, ?)",
+                    (validated_run, validated_owner, owner_pid, token, acquired_at),
                 )
                 connection.commit()
             except sqlite3.IntegrityError as exc:
@@ -270,7 +308,9 @@ class SessionEventJournal:
                 connection.rollback()
                 raise
 
-    def begin_run(self, run_id: str, *, owner_id: str = "legacy") -> SessionEvent:
+    def begin_run(
+        self, run_id: str, *, owner_id: str = "legacy", owner_pid: int = -1
+    ) -> BeginRunResult:
         """Acquire the singleton lease and persist run_started atomically."""
         validated_run = _validate_identifier("run_id", run_id)
         validated_owner = _validate_identifier("owner_id", owner_id)
@@ -300,13 +340,13 @@ class SessionEventJournal:
                 token = _allocate_fencing_token(connection)
                 connection.execute(
                     "INSERT INTO active_run_lease "
-                    "(lease_key, run_id, owner_id, fencing_token, acquired_at) "
-                    "VALUES (1, ?, ?, ?, ?)",
-                    (validated_run, validated_owner, token, acquired_at),
+                    "(lease_key, run_id, owner_id, owner_pid, fencing_token, acquired_at) "
+                    "VALUES (1, ?, ?, ?, ?, ?)",
+                    (validated_run, validated_owner, owner_pid, token, acquired_at),
                 )
                 stored = self._insert(connection, **values)
                 connection.commit()
-                return stored
+                return BeginRunResult(event=stored, fencing_token=token)
             except Exception:
                 connection.rollback()
                 raise
@@ -338,13 +378,16 @@ class SessionEventJournal:
             try:
                 owner = _validate_identifier("recovery_owner_id", recovery_owner_id)
                 row = connection.execute(
-                    "SELECT run_id, owner_id FROM active_run_lease WHERE lease_key = 1"
+                    "SELECT run_id, owner_id, owner_pid FROM active_run_lease WHERE lease_key = 1"
                 ).fetchone()
                 if row is None:
                     connection.commit()
                     return None
                 run_id = str(row[0])
                 if str(row[1]) == owner:
+                    connection.commit()
+                    return None
+                if _pid_is_alive(int(row[2])):
                     connection.commit()
                     return None
                 existing = connection.execute(
@@ -481,8 +524,8 @@ class SessionEventJournal:
                     if existing is not None:
                         connection.execute(
                             "INSERT INTO active_run_lease "
-                            "(lease_key, run_id, owner_id, fencing_token, acquired_at) "
-                            "VALUES (1, ?, 'legacy', 1, ?)",
+                            "(lease_key, run_id, owner_id, owner_pid, fencing_token, acquired_at) "
+                            "VALUES (1, ?, 'legacy', -1, 1, ?)",
                             (str(existing[0]), str(existing[1])),
                         )
                         next_token = 2
@@ -490,6 +533,22 @@ class SessionEventJournal:
                         "INSERT INTO run_fence_state (state_key, next_token) VALUES (1, ?)",
                         (next_token,),
                     )
+                    connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                elif version == 3:
+                    _validate_schema(connection, self.path, lease_version=3)
+                    existing = connection.execute(
+                        "SELECT run_id, owner_id, fencing_token, acquired_at "
+                        "FROM active_run_lease WHERE lease_key = 1"
+                    ).fetchone()
+                    connection.execute("DROP TABLE active_run_lease")
+                    connection.execute(_LEASE_SQL)
+                    if existing is not None:
+                        connection.execute(
+                            "INSERT INTO active_run_lease "
+                            "(lease_key, run_id, owner_id, owner_pid, fencing_token, acquired_at) "
+                            "VALUES (1, ?, ?, -1, ?, ?)",
+                            tuple(existing),
+                        )
                     connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                 elif version != SCHEMA_VERSION:
                     raise SessionEventJournalError(
@@ -716,7 +775,7 @@ def _schema_objects(connection: sqlite3.Connection) -> list[tuple[str, str, str 
 
 
 def _validate_schema(
-    connection: sqlite3.Connection, path: Path, *, lease_version: int = 3
+    connection: sqlite3.Connection, path: Path, *, lease_version: int = 4
 ) -> None:
     expected_columns = [
         "sequence", "event_id", "session_id", "run_id", "kind", "status", "timestamp",
@@ -733,7 +792,7 @@ def _validate_schema(
     }
     if lease_version:
         expected_objects.add(("table", "active_run_lease"))
-    if lease_version == 3:
+    if lease_version >= 3:
         expected_objects.add(("table", "run_fence_state"))
     objects = _schema_objects(connection)
     allowed_internal = {("table", "sqlite_stat1"), ("table", "sqlite_stat4")}
@@ -749,12 +808,16 @@ def _validate_schema(
         _RUN_INDEX_SQL
     ):
         raise SessionEventJournalError(f"non-canonical session event run index at {path}")
-    expected_lease_sql = _LEASE_SQL if lease_version == 3 else _LEASE_V2_SQL
+    expected_lease_sql = {
+        2: _LEASE_V2_SQL,
+        3: _LEASE_V3_SQL,
+        4: _LEASE_SQL,
+    }.get(lease_version, _LEASE_SQL)
     if lease_version and _normalize_sql(
         object_sql[("table", "active_run_lease")]
     ) != _normalize_sql(expected_lease_sql):
         raise SessionEventJournalError(f"non-canonical active run lease schema at {path}")
-    if lease_version == 3 and _normalize_sql(
+    if lease_version >= 3 and _normalize_sql(
         object_sql[("table", "run_fence_state")]
     ) != _normalize_sql(_FENCE_SQL):
         raise SessionEventJournalError(f"non-canonical run fence schema at {path}")
@@ -787,12 +850,47 @@ def _allocate_fencing_token(connection: sqlite3.Connection) -> int:
     return token
 
 
+def _assert_run_lease(
+    connection: sqlite3.Connection,
+    *,
+    run_id: str,
+    owner_id: str | None,
+    fencing_token: int | None,
+) -> None:
+    if owner_id is None and fencing_token is None:
+        return
+    if owner_id is None or fencing_token is None or fencing_token < 1:
+        raise ValueError("lease owner and positive fencing token must be provided together")
+    validated_owner = _validate_identifier("lease_owner_id", owner_id)
+    row = connection.execute(
+        "SELECT 1 FROM active_run_lease WHERE lease_key = 1 AND run_id = ? "
+        "AND owner_id = ? AND fencing_token = ?",
+        (run_id, validated_owner, fencing_token),
+    ).fetchone()
+    if row is None:
+        raise SessionRunLeaseLostError(
+            f"run lease owner or fencing token was lost for {run_id}"
+        )
+
+
 def _is_busy_or_locked(exc: sqlite3.OperationalError) -> bool:
     code = getattr(exc, "sqlite_errorcode", None)
     primary = int(code) & 0xFF if isinstance(code, int) else None
     return primary in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} or any(
         marker in str(exc).casefold() for marker in ("busy", "locked")
     )
+
+
+def _pid_is_alive(pid: int) -> bool:
+    if pid < 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _trusted_root(root: Path) -> Path:

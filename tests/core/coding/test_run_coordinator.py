@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from pathlib import Path
 
@@ -135,10 +136,10 @@ async def test_cancel_during_begin_run_closes_committed_lease_before_propagating
     allow_begin = threading.Event()
     original_begin = journal.begin_run
 
-    def blocked_begin(run_id: str, *, owner_id: str):
+    def blocked_begin(run_id: str, *, owner_id: str, owner_pid: int):
         begin_started.set()
         assert allow_begin.wait(timeout=2)
-        return original_begin(run_id, owner_id=owner_id)
+        return original_begin(run_id, owner_id=owner_id, owner_pid=owner_pid)
 
     monkeypatch.setattr(journal, "begin_run", blocked_begin)
     start_task = asyncio.create_task(coordinator.start_run("run-1", _events()))
@@ -186,17 +187,19 @@ async def test_repeated_cancel_waits_for_cleanup_and_closes_unowned_stream(
 
     stream = UnownedStream()
 
-    def blocked_begin(run_id: str, *, owner_id: str):
+    def blocked_begin(run_id: str, *, owner_id: str, owner_pid: int):
         begin_started.set()
         assert allow_begin.wait(timeout=2)
-        return original_begin(run_id, owner_id=owner_id)
+        return original_begin(run_id, owner_id=owner_id, owner_pid=owner_pid)
 
     monkeypatch.setattr(journal, "begin_run", blocked_begin)
     start_task = asyncio.create_task(coordinator.start_run("run-1", stream))
     assert await asyncio.to_thread(begin_started.wait, 1)
     start_task.cancel()
+    await asyncio.sleep(0.05)
     start_task.cancel()
     await asyncio.sleep(0.05)
+    assert not start_task.done()
     allow_begin.set()
     with pytest.raises(asyncio.CancelledError):
         await start_task
@@ -209,9 +212,52 @@ async def test_repeated_cancel_waits_for_cleanup_and_closes_unowned_stream(
 
 
 @pytest.mark.asyncio
+async def test_active_run_repeated_cancel_waits_for_terminal_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    journal = SessionEventJournal(tmp_path, "session-1")
+    coordinator = RunCoordinator(journal)
+    entered = asyncio.Event()
+    terminal_started = threading.Event()
+    allow_terminal = threading.Event()
+
+    async def blocked():
+        entered.set()
+        await asyncio.Event().wait()
+        if False:
+            yield RunEvent(kind="tool", status="done", payload={})
+
+    task = await coordinator.start_run("run-1", blocked())
+    await entered.wait()
+    original_terminal = journal.append_terminal_and_release
+
+    def blocked_terminal(**values: object):
+        terminal_started.set()
+        assert allow_terminal.wait(timeout=2)
+        return original_terminal(**values)
+
+    monkeypatch.setattr(journal, "append_terminal_and_release", blocked_terminal)
+    task.cancel()
+    assert await asyncio.to_thread(terminal_started.wait, 1)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    assert not task.done()
+    assert journal.active_run_id() == "run-1"
+    allow_terminal.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert journal.active_run_id() is None
+    assert coordinator.active_run_id is None
+
+
+@pytest.mark.asyncio
 async def test_recovery_respects_live_owner_and_new_owner_recovers(tmp_path: Path) -> None:
-    owner_a = RunCoordinator(SessionEventJournal(tmp_path, "session-1"), owner_id="owner-a")
-    same_owner = RunCoordinator(SessionEventJournal(tmp_path, "session-1"), owner_id="owner-a")
+    owner_a = RunCoordinator(
+        SessionEventJournal(tmp_path, "session-1"), owner_id="owner-a", owner_pid=999_999
+    )
+    same_owner = RunCoordinator(
+        SessionEventJournal(tmp_path, "session-1"), owner_id="owner-a", owner_pid=999_999
+    )
     new_owner = RunCoordinator(SessionEventJournal(tmp_path, "session-1"), owner_id="owner-b")
     release = asyncio.Event()
 
@@ -223,14 +269,65 @@ async def test_recovery_respects_live_owner_and_new_owner_recovers(tmp_path: Pat
     task = await owner_a.start_run("run-1", blocked())
     assert await same_owner.recover_interrupted_runs() == ()
     assert same_owner.journal.active_run_id() == "run-1"
-    contender = RunCoordinator(SessionEventJournal(tmp_path, "session-1"), owner_id="owner-a")
+    contender = RunCoordinator(
+        SessionEventJournal(tmp_path, "session-1"), owner_id="owner-a", owner_pid=999_999
+    )
     with pytest.raises(ActiveRunConflictError, match="run-1"):
         await contender.start_run("run-2", _events())
 
     assert await new_owner.recover_interrupted_runs() == ("run-1",)
     assert new_owner.journal.active_run_id() is None
     release.set()
+    with pytest.raises(Exception, match="lease|fenc|owner"):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_recovery_does_not_take_lease_from_live_different_owner(tmp_path: Path) -> None:
+    live = RunCoordinator(
+        SessionEventJournal(tmp_path, "session-1"), owner_id="live-a", owner_pid=os.getpid()
+    )
+    observer = RunCoordinator(
+        SessionEventJournal(tmp_path, "session-1"), owner_id="live-b", owner_pid=os.getpid()
+    )
+    release = asyncio.Event()
+
+    async def blocked():
+        await release.wait()
+        if False:
+            yield RunEvent(kind="tool", status="done", payload={})
+
+    task = await live.start_run("run-1", blocked())
+    assert await observer.recover_interrupted_runs() == ()
+    assert observer.journal.active_run_id() == "run-1"
+    release.set()
     await task
+
+
+@pytest.mark.asyncio
+async def test_recovered_stale_owner_cannot_append_after_interrupted_terminal(
+    tmp_path: Path,
+) -> None:
+    old_owner = RunCoordinator(
+        SessionEventJournal(tmp_path, "session-1"), owner_id="old", owner_pid=999_999
+    )
+    new_owner = RunCoordinator(SessionEventJournal(tmp_path, "session-1"), owner_id="new")
+    release = asyncio.Event()
+
+    async def stale_stream():
+        await release.wait()
+        yield RunEvent(kind="tool", status="done", payload={"stale": True})
+
+    task = await old_owner.start_run("run-1", stale_stream())
+    assert await new_owner.recover_interrupted_runs() == ("run-1",)
+    release.set()
+    with pytest.raises(Exception, match="lease|fenc|owner"):
+        await task
+
+    events = new_owner.journal.replay(after=0, limit=20).items
+    assert events[-1].kind == "terminal"
+    assert events[-1].status == "interrupted"
+    assert not any(item.payload.get("stale") for item in events)
 
 
 @pytest.mark.asyncio
@@ -252,6 +349,28 @@ async def test_slow_subscriber_repairs_queue_overflow_from_journal(tmp_path: Pat
     await subscription.aclose()
 
     assert [item.sequence for item in [first, *remaining]] == list(range(1, 23))
+
+
+@pytest.mark.asyncio
+async def test_subscription_polls_events_from_another_coordinator(tmp_path: Path) -> None:
+    listener = RunCoordinator(
+        SessionEventJournal(tmp_path, "session-1"), poll_interval_seconds=0.01
+    )
+    writer = RunCoordinator(SessionEventJournal(tmp_path, "session-1"))
+    subscription = listener.subscribe(after=0)
+    first_waiter = asyncio.create_task(anext(subscription))
+    await asyncio.sleep(0.02)
+
+    task = await writer.start_run(
+        "run-1", _events(RunEvent(kind="assistant", status="done", payload={"ok": True}))
+    )
+    await task
+    first = await asyncio.wait_for(first_waiter, 1)
+    second = await asyncio.wait_for(anext(subscription), 1)
+    third = await asyncio.wait_for(anext(subscription), 1)
+    await subscription.aclose()
+
+    assert [item.sequence for item in (first, second, third)] == [1, 2, 3]
 
 
 @pytest.mark.asyncio

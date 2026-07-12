@@ -283,7 +283,7 @@ def test_v1_journal_migrates_to_persistent_lease_schema(tmp_path: Path) -> None:
     assert [item.event_id for item in migrated.replay(after=0, limit=10).items] == ["event-1"]
     assert migrated.active_run_id() is None
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
         assert connection.execute(
             "SELECT name FROM sqlite_schema WHERE name = 'active_run_lease'"
         ).fetchone() == ("active_run_lease",)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from contextlib import suppress
@@ -11,6 +12,7 @@ from typing import Any
 
 from core.coding.persistence.session_event_journal import (
     TERMINAL_STATUSES,
+    BeginRunResult,
     SessionEvent,
     SessionEventJournal,
     SessionRunLeaseConflictError,
@@ -44,17 +46,24 @@ class RunCoordinator:
         journal: SessionEventJournal,
         *,
         owner_id: str | None = None,
+        owner_pid: int | None = None,
         subscriber_queue_size: int = 256,
+        poll_interval_seconds: float = 0.1,
     ) -> None:
         if subscriber_queue_size < 1:
             raise ValueError("subscriber_queue_size must be positive")
+        if poll_interval_seconds <= 0:
+            raise ValueError("poll_interval_seconds must be positive")
         self.journal = journal
         self.owner_id = owner_id or _PROCESS_INSTANCE_ID
+        self.owner_pid = os.getpid() if owner_pid is None else owner_pid
         self._subscriber_queue_size = subscriber_queue_size
+        self._poll_interval_seconds = poll_interval_seconds
         self._state_lock = asyncio.Lock()
         self._publish_lock = asyncio.Lock()
         self._active_run_id: str | None = None
         self._active_task: asyncio.Task[None] | None = None
+        self._active_fencing_token: int | None = None
         self._subscribers: set[asyncio.Queue[SessionEvent]] = set()
         self._last_broadcast_sequence = 0
 
@@ -82,6 +91,7 @@ class RunCoordinator:
                 except Exception:
                     pass
                 else:
+                    begin_result = begin_task.result()
                     cleanup_task = asyncio.create_task(
                         self._persist(
                             run_id=run_id,
@@ -90,6 +100,7 @@ class RunCoordinator:
                                 status="cancelled",
                                 payload={"event": "run_cancelled"},
                             ),
+                            fencing_token=begin_result.fencing_token,
                         )
                     )
                     await _wait_through_cancellation(cleanup_task)
@@ -102,19 +113,25 @@ class RunCoordinator:
             except Exception:
                 await _close_unowned_stream(event_stream)
                 raise
+            begin_result = begin_task.result()
             self._active_run_id = run_id
+            self._active_fencing_token = begin_result.fencing_token
             task = asyncio.create_task(
-                self._consume(run_id, event_stream), name=f"sage-run-{run_id}"
+                self._consume(run_id, begin_result.fencing_token, event_stream),
+                name=f"sage-run-{run_id}",
             )
             self._active_task = task
             return task
 
-    async def _begin_run(self, run_id: str) -> SessionEvent:
+    async def _begin_run(self, run_id: str) -> BeginRunResult:
         async with self._publish_lock:
             stored = await asyncio.to_thread(
-                self.journal.begin_run, run_id, owner_id=self.owner_id
+                self.journal.begin_run,
+                run_id,
+                owner_id=self.owner_id,
+                owner_pid=self.owner_pid,
             )
-            self._broadcast(stored)
+            self._broadcast(stored.event)
             return stored
 
     async def cancel(self, run_id: str) -> bool:
@@ -123,19 +140,23 @@ class RunCoordinator:
             if self._active_run_id != run_id or self._active_task is None:
                 return False
             task = self._active_task
+            fencing_token = self._active_fencing_token
             task.cancel()
         with suppress(asyncio.CancelledError):
             await task
-        await self._persist(
-            run_id=run_id,
-            event=RunEvent(
-                kind="terminal", status="cancelled", payload={"event": "run_cancelled"}
-            ),
-        )
+        if await asyncio.to_thread(self.journal.active_run_id) == run_id:
+            await self._persist(
+                run_id=run_id,
+                event=RunEvent(
+                    kind="terminal", status="cancelled", payload={"event": "run_cancelled"}
+                ),
+                fencing_token=fencing_token,
+            )
         async with self._state_lock:
             if self._active_task is task:
                 self._active_run_id = None
                 self._active_task = None
+                self._active_fencing_token = None
         return True
 
     async def subscribe(self, *, after: int = 0) -> AsyncIterator[SessionEvent]:
@@ -157,24 +178,34 @@ class RunCoordinator:
                     cursor = event.sequence
                     yield event
             while True:
-                event = await queue.get()
-                if event.sequence <= cursor:
-                    continue
-                if event.sequence > cursor + 1:
-                    target = event.sequence
-                    while cursor < target:
-                        page = await asyncio.to_thread(
-                            self.journal.replay, after=cursor, limit=500
-                        )
-                        items = tuple(item for item in page.items if item.sequence <= target)
-                        if not items:
-                            raise RunCoordinatorError("journal sequence gap could not be repaired")
-                        for repaired in items:
-                            cursor = repaired.sequence
-                            yield repaired
+                live_event: SessionEvent | None
+                try:
+                    live_event = await asyncio.wait_for(
+                        queue.get(), timeout=self._poll_interval_seconds
+                    )
+                except TimeoutError:
+                    target = await asyncio.to_thread(self.journal.latest_sequence)
+                    if target <= cursor:
+                        continue
+                    live_event = None
                 else:
-                    cursor = event.sequence
-                    yield event
+                    if live_event.sequence <= cursor:
+                        continue
+                    target = live_event.sequence
+                if target == cursor + 1 and live_event is not None:
+                    cursor = live_event.sequence
+                    yield live_event
+                    continue
+                while cursor < target:
+                    page = await asyncio.to_thread(
+                        self.journal.replay, after=cursor, limit=500
+                    )
+                    items = tuple(item for item in page.items if item.sequence <= target)
+                    if not items:
+                        raise RunCoordinatorError("journal sequence gap could not be repaired")
+                    for repaired in items:
+                        cursor = repaired.sequence
+                        yield repaired
         finally:
             self._subscribers.discard(queue)
 
@@ -202,6 +233,7 @@ class RunCoordinator:
     async def _consume(
         self,
         run_id: str,
+        fencing_token: int,
         event_stream: AsyncIterator[RunEvent | Mapping[str, Any]],
     ) -> None:
         terminal_seen = False
@@ -210,7 +242,11 @@ class RunCoordinator:
                 event = _coerce_event(raw_event)
                 if terminal_seen:
                     break
-                await asyncio.shield(self._persist(run_id=run_id, event=event))
+                await asyncio.shield(
+                    self._persist(
+                        run_id=run_id, event=event, fencing_token=fencing_token
+                    )
+                )
                 if event.kind == "terminal":
                     terminal_seen = True
                     break
@@ -222,9 +258,10 @@ class RunCoordinator:
                         status="completed",
                         payload={"event": "run_completed"},
                     ),
+                    fencing_token=fencing_token,
                 )
         except asyncio.CancelledError:
-            await asyncio.shield(
+            cleanup_task = asyncio.create_task(
                 self._persist(
                     run_id=run_id,
                     event=RunEvent(
@@ -232,8 +269,10 @@ class RunCoordinator:
                         status="cancelled",
                         payload={"event": "run_cancelled"},
                     ),
+                    fencing_token=fencing_token,
                 )
             )
+            await _wait_through_cancellation(cleanup_task)
             raise
         except Exception as exc:
             await self._persist(
@@ -243,6 +282,7 @@ class RunCoordinator:
                     status="error",
                     payload={"event": "run_error", "error_type": type(exc).__name__},
                 ),
+                fencing_token=fencing_token,
             )
             raise
         finally:
@@ -250,8 +290,11 @@ class RunCoordinator:
                 if self._active_run_id == run_id:
                     self._active_run_id = None
                     self._active_task = None
+                    self._active_fencing_token = None
 
-    async def _persist(self, *, run_id: str, event: RunEvent) -> SessionEvent:
+    async def _persist(
+        self, *, run_id: str, event: RunEvent, fencing_token: int | None = None
+    ) -> SessionEvent:
         async with self._publish_lock:
             if event.kind == "terminal":
                 if event.status not in TERMINAL_STATUSES:
@@ -263,6 +306,8 @@ class RunCoordinator:
                     payload=event.payload,
                     event_id=event.event_id,
                     timestamp=event.timestamp,
+                    lease_owner_id=self.owner_id if fencing_token is not None else None,
+                    fencing_token=fencing_token,
                 )
             else:
                 stored = await asyncio.to_thread(
@@ -273,6 +318,8 @@ class RunCoordinator:
                     payload=event.payload,
                     event_id=event.event_id,
                     timestamp=event.timestamp,
+                    lease_owner_id=self.owner_id if fencing_token is not None else None,
+                    fencing_token=fencing_token,
                 )
             self._broadcast(stored)
             return stored
@@ -287,7 +334,9 @@ class RunCoordinator:
             queue.put_nowait(stored)
 
 
-async def _wait_through_cancellation(task: asyncio.Task[SessionEvent] | asyncio.Task[None]) -> None:
+async def _wait_through_cancellation(
+    task: asyncio.Task[BeginRunResult] | asyncio.Task[SessionEvent] | asyncio.Task[None],
+) -> None:
     while not task.done():
         try:
             await asyncio.shield(task)
