@@ -478,6 +478,9 @@ export const useCodingStore = defineStore('coding', () => {
         await rejectMemoryProposal(targetSessionId, proposalId, expectedRevision)
       }
       if (targetSessionId === sessionId.value && generation === memoryProposalSessionGeneration) {
+        // Invalidate any in-flight list response captured before this CAS
+        // transition, otherwise it could resurrect the now-terminal proposal.
+        memoryProposalGeneration += 1
         memoryProposals.value = memoryProposals.value.filter((item) => item.proposal_id !== proposalId)
       }
     } catch (error) {

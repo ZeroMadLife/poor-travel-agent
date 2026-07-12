@@ -254,7 +254,7 @@ export type CodingWorkspaceDiffReadyEvent = CodingEventMeta & {
 export type CodingMemoryProposalReadyEvent = CodingEventMeta & {
   type: 'memory_proposal_ready'
   session_id: string
-  run_id?: string
+  run_id: string
   reflection_id: string
   proposal_id: string
   candidate_count: number

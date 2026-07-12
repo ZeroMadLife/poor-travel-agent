@@ -49,7 +49,7 @@ describe('coding store', () => {
     vi.stubGlobal('fetch', fetchMock)
     const store = useCodingStore()
     store.sessionId = 'c1'
-    store.handleServerEvent({ type: 'memory_proposal_ready', session_id: 'c1', proposal_id: 'p1', reflection_id: 'r1', candidate_count: 1, base_revision: 0 } as never)
+    store.handleServerEvent({ type: 'memory_proposal_ready', session_id: 'c1', run_id: 'run_1', proposal_id: 'p1', reflection_id: 'r1', candidate_count: 1, base_revision: 0 } as never)
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(store.memoryProposals[0].proposal_id).toBe('p1')
   })
@@ -79,6 +79,25 @@ describe('coding store', () => {
     resolveApprove?.({ ok: true, json: async () => ({ proposal_id: 'p1', status: 'approved', revision: 3, candidates: [] }) })
     await approval
     expect(store.memoryProposalBusy).toEqual({})
+    expect(store.memoryProposals).toEqual([])
+  })
+
+  it('does not let an older pending list resurrect an approved proposal', async () => {
+    let resolveList: ((value: unknown) => void) | undefined
+    let resolveApprove: ((value: unknown) => void) | undefined
+    const fetchMock = vi.fn()
+      .mockReturnValueOnce(new Promise((resolve) => { resolveList = resolve }))
+      .mockReturnValueOnce(new Promise((resolve) => { resolveApprove = resolve }))
+    vi.stubGlobal('fetch', fetchMock)
+    const store = useCodingStore()
+    store.sessionId = 'c1'
+    store.memoryProposals = [memoryProposal('p1', 2)]
+    const list = store.loadMemoryProposals()
+    const approval = store.approveMemoryProposal('p1', 2)
+    resolveApprove?.({ ok: true, json: async () => memoryProposal('p1', 3) })
+    await approval
+    resolveList?.({ ok: true, json: async () => ({ proposals: [memoryProposal('p1', 2)] }) })
+    await list
     expect(store.memoryProposals).toEqual([])
   })
 
