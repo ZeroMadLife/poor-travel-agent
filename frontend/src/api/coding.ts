@@ -8,6 +8,8 @@ import type {
   CodingGitStatusResponse,
   CodingMcpServersResponse,
   CodingModelsResponse,
+  MemoryProposal,
+  MemoryProposalsResponse,
   CodingRunDetailResponse,
   CodingRunDiff,
   CodingRunsResponse,
@@ -235,6 +237,50 @@ export async function rejectCodingPlan(sessionId: string): Promise<void> {
     { method: 'POST' },
   )
   if (!response.ok) throw new Error(`reject plan failed: ${response.status}`)
+}
+
+function memoryProposalError(status: number): Error {
+  if (status === 409) return new Error('记忆候选已发生变化，请刷新后重试')
+  if (status === 404) return new Error('记忆候选不存在或已处理')
+  if (status === 422) return new Error('记忆候选版本无效')
+  return new Error('记忆服务暂时不可用，请稍后重试')
+}
+
+export async function fetchMemoryProposals(
+  sessionId: string,
+  status: 'pending' | 'approved' | 'rejected' = 'pending',
+): Promise<MemoryProposalsResponse> {
+  const url = new URL(`/api/v1/coding/${sessionId}/memory/proposals`, API_BASE_URL)
+  url.searchParams.set('status', status)
+  const response = await fetch(url)
+  if (!response.ok) throw memoryProposalError(response.status)
+  return (await response.json()) as MemoryProposalsResponse
+}
+
+async function transitionMemoryProposal(
+  sessionId: string,
+  proposalId: string,
+  expectedRevision: number,
+  action: 'approve' | 'reject',
+): Promise<MemoryProposal> {
+  const response = await fetch(
+    new URL(`/api/v1/coding/${sessionId}/memory/proposals/${encodeURIComponent(proposalId)}/${action}`, API_BASE_URL),
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expected_revision: expectedRevision }),
+    },
+  )
+  if (!response.ok) throw memoryProposalError(response.status)
+  return (await response.json()) as MemoryProposal
+}
+
+export function approveMemoryProposal(sessionId: string, proposalId: string, expectedRevision: number) {
+  return transitionMemoryProposal(sessionId, proposalId, expectedRevision, 'approve')
+}
+
+export function rejectMemoryProposal(sessionId: string, proposalId: string, expectedRevision: number) {
+  return transitionMemoryProposal(sessionId, proposalId, expectedRevision, 'reject')
 }
 
 export async function fetchCodingRuns(sessionId: string): Promise<CodingRunsResponse> {

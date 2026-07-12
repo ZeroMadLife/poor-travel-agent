@@ -5,6 +5,7 @@ import type {
   CodingToolCallEvent,
   CodingToolResultEvent,
   CodingContextSnapshot,
+  MemoryProposal,
 } from '../types/api'
 import type { Ref } from 'vue'
 
@@ -60,12 +61,15 @@ export type CodingEventState = {
   planPath: Ref<string>
   planReview: Ref<PlanReviewState | null>
   lastDiffInfo: Ref<DiffInfo | null>
+  memoryProposals: Ref<MemoryProposal[]>
+  memoryProposalRefresh: Ref<number>
 }
 
 export type CodingEventEffect = {
   approvalRequired?: boolean
   terminal?: boolean
   toolResult?: CodingToolResultEvent
+  memoryProposalReady?: boolean
 }
 
 function contextReasonLabel(reason: string): string {
@@ -121,6 +125,32 @@ export function applyCodingEvent(
       truncated: event.truncated || false,
     }
     return {}
+  }
+  if (event.type === 'memory_proposal_ready') {
+    if (event.session_id !== state.sessionId.value) return {}
+    const existing = state.memoryProposals.value.find((item) => item.proposal_id === event.proposal_id)
+    if (existing) {
+      existing.candidate_count = event.candidate_count
+      existing.base_revision = event.base_revision
+    } else {
+      state.memoryProposals.value.push({
+        proposal_id: event.proposal_id,
+        workspace_id: '',
+        status: 'pending',
+        projection_status: 'pending',
+        revision: 0,
+        candidates: [],
+        session_id: event.session_id,
+        run_id: event.run_id || '',
+        reflection_id: event.reflection_id,
+        base_revision: event.base_revision,
+        candidate_count: event.candidate_count,
+        created_at: event.created_at || '',
+        updated_at: event.created_at || '',
+      })
+    }
+    state.memoryProposalRefresh.value += 1
+    return { memoryProposalReady: true }
   }
   if (event.type === 'context_usage_updated') {
     state.contextChars.value = event.used_tokens

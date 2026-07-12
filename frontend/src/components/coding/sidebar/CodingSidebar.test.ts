@@ -152,6 +152,28 @@ it('renders memory panel collapsed by default and expands to show the hint', asy
   expect(wrapper.text()).toContain('整理记忆')
 })
 
+it('renders pending memory candidates with explicit review actions', async () => {
+  const store = useCodingStore()
+  store.memoryProposals = [{
+    proposal_id: 'p1', workspace_id: 'workspace', session_id: 'c1', run_id: 'run-1',
+    status: 'pending', projection_status: 'pending', revision: 2, candidate_count: 1,
+    base_revision: 0, reflection_id: 'reflection-1', created_at: '', updated_at: '',
+    candidates: [{ content: '项目使用 SQLite 作为本地证据存储', topic: 'project-conventions', source: 'dream_proposal', source_ref: 'daily/2026-07-11', created_at: '' }],
+  }]
+  store.approveMemoryProposal = vi.fn()
+  store.rejectMemoryProposal = vi.fn()
+  const wrapper = mount(CodingSidebar)
+  const toggle = wrapper.findAll('.panel-toggle').find((btn) => btn.text().includes('记忆'))
+  await toggle?.trigger('click')
+  expect(wrapper.text()).toContain('待审核 1 条')
+  expect(wrapper.text()).toContain('项目使用 SQLite')
+  expect(wrapper.text()).toContain('来源：dream_proposal')
+  await wrapper.find('[data-testid="memory-approve-p1"]').trigger('click')
+  await wrapper.find('[data-testid="memory-reject-p1"]').trigger('click')
+  expect(store.approveMemoryProposal).toHaveBeenCalledWith('p1', 2)
+  expect(store.rejectMemoryProposal).toHaveBeenCalledWith('p1', 2)
+})
+
 it('renders run detail as a readable worklog timeline', async () => {
   const store = useCodingStore()
   store.runs = [

@@ -25,10 +25,23 @@ function state() {
     planPath: ref(''),
     planReview: ref<PlanReviewState | null>(null),
     lastDiffInfo: ref<DiffInfo | null>(null),
+    memoryProposals: ref([]),
+    memoryProposalRefresh: ref(0),
   }
 }
 
 describe('codingEvents', () => {
+  it('requests a pending memory proposal refresh without activating candidates', () => {
+    const current = state()
+    const effect = applyCodingEvent(current, {
+      type: 'memory_proposal_ready',
+      session_id: 'coding_1', run_id: 'run_1', reflection_id: 'r1',
+      proposal_id: 'p1', candidate_count: 2, base_revision: 4,
+    })
+    expect(effect.memoryProposalReady).toBe(true)
+    expect(current.memoryProposalRefresh.value).toBe(1)
+    expect(current.memoryProposals.value[0]).toMatchObject({ proposal_id: 'p1', status: 'pending', revision: 0, base_revision: 4 })
+  })
   it('tracks context usage and compaction lifecycle', () => {
     const current = state()
 
