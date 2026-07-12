@@ -168,12 +168,12 @@ class MemoryProposalReadyEvent(RunEventBase):
     """Memory consolidation proposals are ready for user review."""
 
     type: Literal["memory_proposal_ready"] = "memory_proposal_ready"
-    session_id: str = ""
-    run_id: str = ""
-    reflection_id: str = ""
-    proposal_id: str = ""
-    candidate_count: int = Field(default=0, ge=0)
-    base_revision: int = Field(default=0, ge=0)
+    session_id: str
+    run_id: str
+    reflection_id: str
+    proposal_id: str
+    candidate_count: int = Field(ge=0)
+    base_revision: int = Field(ge=0)
 
 
 class ContextUsageUpdatedEvent(RunEventBase):
@@ -181,6 +181,7 @@ class ContextUsageUpdatedEvent(RunEventBase):
 
     type: Literal["context_usage_updated"] = "context_usage_updated"
     session_id: str
+    run_id: str
     used_tokens: int = Field(ge=0)
     model_limit_tokens: int = Field(gt=0)
     output_reserve_tokens: int = Field(gt=0)

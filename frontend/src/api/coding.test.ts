@@ -12,11 +12,42 @@ import {
   resumeCodingSession,
   startCodingSession,
   stopCodingRun,
+  fetchMemoryProposals,
+  approveMemoryProposal,
+  rejectMemoryProposal,
 } from './coding'
 
 describe('coding API client', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
+  })
+
+  it('lists pending memory proposals for a session', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ proposals: [{ proposal_id: 'p1', status: 'pending', revision: 2, candidates: [] }] }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await fetchMemoryProposals('c1')
+    expect(result.proposals[0].proposal_id).toBe('p1')
+    const url = fetchMock.mock.calls[0][0] as URL
+    expect(url.pathname).toBe('/api/v1/coding/c1/memory/proposals')
+    expect(url.searchParams.get('status')).toBe('pending')
+  })
+
+  it('approves and rejects memory proposals with a revision precondition', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ proposal_id: 'p1', status: 'approved', revision: 3, candidates: [] }) })
+    vi.stubGlobal('fetch', fetchMock)
+    await approveMemoryProposal('c1', 'p1', 2)
+    await rejectMemoryProposal('c1', 'p2', 4)
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: 'POST', body: JSON.stringify({ expected_revision: 2 }) })
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({ method: 'POST', body: JSON.stringify({ expected_revision: 4 }) })
+  })
+
+  it('maps a memory CAS conflict to a Chinese retryable error', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 409 }))
+    await expect(approveMemoryProposal('c1', 'p1', 2)).rejects.toThrow('记忆候选已发生变化，请刷新后重试')
   })
 
   it('creates a coding session', async () => {

@@ -221,10 +221,43 @@ function runIcon(status: string) {
         </button>
       </div>
       <div v-if="!isPanelCollapsed('memory')">
-        <p class="memory-hint">
+        <div v-if="store.memoryProposals.length" class="memory-proposals" aria-live="polite">
+          <p class="memory-count">待审核 {{ store.memoryProposals.length }} 条</p>
+          <article v-for="proposal in store.memoryProposals" :key="proposal.proposal_id" class="memory-proposal">
+            <div class="memory-proposal-meta">
+              <span>{{ proposal.proposal_id }}</span>
+              <span>版本 {{ proposal.revision }}</span>
+            </div>
+            <p v-for="candidate in proposal.candidates" :key="`${proposal.proposal_id}-${candidate.content}`" class="memory-candidate">
+              {{ candidate.content }}
+            </p>
+            <p class="memory-source">
+              来源：{{ proposal.candidates[0]?.source || 'dream' }}
+              <template v-if="proposal.candidates[0]?.source_ref"> · {{ proposal.candidates[0].source_ref }}</template>
+            </p>
+            <div class="memory-actions">
+              <button
+                :data-testid="`memory-approve-${proposal.proposal_id}`"
+                :aria-label="`批准记忆候选 ${proposal.proposal_id}`"
+                :disabled="!!store.memoryProposalBusy[proposal.proposal_id]"
+                type="button"
+                @click="store.approveMemoryProposal(proposal.proposal_id, proposal.revision)"
+              >批准</button>
+              <button
+                :data-testid="`memory-reject-${proposal.proposal_id}`"
+                :aria-label="`拒绝记忆候选 ${proposal.proposal_id}`"
+                :disabled="!!store.memoryProposalBusy[proposal.proposal_id]"
+                type="button"
+                @click="store.rejectMemoryProposal(proposal.proposal_id, proposal.revision)"
+              >拒绝</button>
+            </div>
+          </article>
+        </div>
+        <p v-else class="memory-hint">
           <code>/remember</code> 记住项目约定<br />
           <code>/dream</code> 整理记忆
         </p>
+        <p v-if="store.memoryProposalError" class="memory-error" role="alert">{{ store.memoryProposalError }}</p>
       </div>
     </section>
 
@@ -392,6 +425,75 @@ function runIcon(status: string) {
   background: #f3f4f6;
   padding: 1px 4px;
   border-radius: 3px;
+  font-size: 11px;
+}
+
+.memory-count {
+  margin: 4px 0 6px;
+  color: #92400e;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.memory-proposal {
+  margin: 0 0 8px;
+  padding: 7px;
+  border: 1px solid #fde68a;
+  border-radius: 6px;
+  background: #fffbeb;
+}
+
+.memory-proposal-meta,
+.memory-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 10px;
+  color: #92400e;
+}
+
+.memory-candidate {
+  margin: 6px 0 4px;
+  color: #374151;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.memory-source {
+  margin: 0 0 6px;
+  color: #78716c;
+  font-size: 10px;
+}
+
+.memory-actions {
+  justify-content: flex-end;
+}
+
+.memory-actions button {
+  padding: 3px 8px;
+  border: 1px solid #d6d3d1;
+  border-radius: 4px;
+  background: #fff;
+  color: #44403c;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.memory-actions button:first-child {
+  border-color: #15803d;
+  color: #166534;
+}
+
+.memory-actions button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.memory-error {
+  margin: 4px 0 0;
+  color: #b91c1c;
   font-size: 11px;
 }
 

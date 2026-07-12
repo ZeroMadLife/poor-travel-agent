@@ -251,6 +251,16 @@ export type CodingWorkspaceDiffReadyEvent = CodingEventMeta & {
   truncated: boolean
 }
 
+export type CodingMemoryProposalReadyEvent = CodingEventMeta & {
+  type: 'memory_proposal_ready'
+  session_id: string
+  run_id: string
+  reflection_id: string
+  proposal_id: string
+  candidate_count: number
+  base_revision: number
+}
+
 export type CodingRunFinishedEvent = CodingEventMeta & {
   type: 'run_finished'
   status: string
@@ -320,6 +330,7 @@ export type CodingServerEvent =
   | CodingRuntimeModeChangedEvent
   | CodingPlanReadyForReviewEvent
   | CodingWorkspaceDiffReadyEvent
+  | CodingMemoryProposalReadyEvent
   | CodingRunFinishedEvent
   | CodingContextUsageEvent
   | CodingCompactionStartedEvent
@@ -392,6 +403,34 @@ export type CodingCompactResponse = {
   reason: string
   retryable: boolean
   context: CodingContextSnapshot
+}
+
+export type MemoryCandidate = {
+  content: string
+  topic: string
+  source: string
+  source_ref: string
+  created_at: string
+}
+
+export type MemoryProposal = {
+  proposal_id: string
+  workspace_id: string
+  session_id: string
+  run_id: string
+  reflection_id: string
+  status: 'pending' | 'approved' | 'rejected'
+  projection_status: 'pending' | 'complete'
+  revision: number
+  base_revision: number
+  candidate_count: number
+  candidates: MemoryCandidate[]
+  created_at: string
+  updated_at: string
+}
+
+export type MemoryProposalsResponse = {
+  proposals: MemoryProposal[]
 }
 
 export type CodingSkillSummary = {

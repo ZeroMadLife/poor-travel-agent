@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import {
   approveCodingPlan,
+  approveMemoryProposal,
   buildCodingStreamUrl,
   fetchCodingFile,
   fetchCodingFiles,
@@ -10,6 +11,7 @@ import {
   fetchCodingGitStatus,
   fetchCodingMcpServers,
   fetchCodingModels,
+  fetchMemoryProposals,
   fetchCodingRun,
   fetchCodingRunDiff,
   fetchCodingRuns,
@@ -17,6 +19,7 @@ import {
   fetchCodingSessions,
   fetchCodingSkills,
   rejectCodingPlan,
+  rejectMemoryProposal,
   requestCodingCompaction,
   respondCodingApproval,
   resumeCodingSession,
@@ -41,6 +44,7 @@ import type {
   CodingSkillSummary,
   CodingToolResultEvent,
   CodingContextSnapshot,
+  MemoryProposal,
   PermissionMode,
 } from '../types/api'
 import { applyCodingEvent } from './codingEvents'
@@ -105,6 +109,10 @@ export const useCodingStore = defineStore('coding', () => {
   const codingSessions = ref<CodingSessionSummary[]>([])
   const runs = ref<CodingRunSummary[]>([])
   const selectedRun = ref<CodingRunDetailResponse | null>(null)
+  const memoryProposals = ref<MemoryProposal[]>([])
+  const memoryProposalBusy = ref<Record<string, boolean>>({})
+  const memoryProposalError = ref('')
+  const memoryProposalRefresh = ref(0)
 
   const skills = ref<CodingSkillSummary[]>([])
   const mcpServers = ref<CodingMcpServer[]>([])
@@ -127,6 +135,8 @@ export const useCodingStore = defineStore('coding', () => {
   let approvalPollTimer: number | null = null
   let fileTreeGeneration = 0
   let contextRequestGeneration = 0
+  let memoryProposalGeneration = 0
+  let memoryProposalSessionGeneration = 0
   const dirCache = new Map<string, CodingFileEntry[]>()
 
   const contextBudget = computed(() => contextSnapshot.value?.effective_limit_tokens ?? 0)
@@ -164,6 +174,7 @@ export const useCodingStore = defineStore('coding', () => {
 
   function connectSocket() {
     if (!sessionId.value) return
+    void loadMemoryProposals()
     stream?.disconnect()
     stream = new CodingStream({
       onEvent: handleServerEvent,
@@ -194,9 +205,12 @@ export const useCodingStore = defineStore('coding', () => {
         planPath,
         planReview,
         lastDiffInfo,
+        memoryProposals,
+        memoryProposalRefresh,
       },
       event,
     )
+    if (effect.memoryProposalReady) void loadMemoryProposals()
     if (event.type === 'turn_finished') {
       window.setTimeout(() => void loadContext(), 0)
     }
@@ -431,6 +445,64 @@ export const useCodingStore = defineStore('coding', () => {
     }
   }
 
+  async function loadMemoryProposals() {
+    if (!sessionId.value) return
+    const targetSessionId = sessionId.value
+    const generation = ++memoryProposalGeneration
+    try {
+      const response = await fetchMemoryProposals(targetSessionId)
+      if (targetSessionId !== sessionId.value || generation !== memoryProposalGeneration) return
+      memoryProposals.value = response.proposals.filter((proposal) => proposal.status === 'pending')
+      memoryProposalError.value = ''
+    } catch (error) {
+      if (targetSessionId === sessionId.value && generation === memoryProposalGeneration) {
+        memoryProposalError.value = error instanceof Error ? error.message : String(error)
+      }
+    }
+  }
+
+  async function transitionMemoryProposal(
+    proposalId: string,
+    expectedRevision: number,
+    action: 'approve' | 'reject',
+  ) {
+    if (!sessionId.value || memoryProposalBusy.value[proposalId]) return
+    const targetSessionId = sessionId.value
+    const generation = memoryProposalSessionGeneration
+    memoryProposalBusy.value = { ...memoryProposalBusy.value, [proposalId]: true }
+    memoryProposalError.value = ''
+    try {
+      if (action === 'approve') {
+        await approveMemoryProposal(targetSessionId, proposalId, expectedRevision)
+      } else {
+        await rejectMemoryProposal(targetSessionId, proposalId, expectedRevision)
+      }
+      if (targetSessionId === sessionId.value && generation === memoryProposalSessionGeneration) {
+        // Invalidate any in-flight list response captured before this CAS
+        // transition, otherwise it could resurrect the now-terminal proposal.
+        memoryProposalGeneration += 1
+        memoryProposals.value = memoryProposals.value.filter((item) => item.proposal_id !== proposalId)
+      }
+    } catch (error) {
+      if (targetSessionId === sessionId.value && generation === memoryProposalSessionGeneration) {
+        memoryProposalError.value = error instanceof Error ? error.message : String(error)
+      }
+    } finally {
+      if (targetSessionId !== sessionId.value || generation !== memoryProposalSessionGeneration) return
+      const next = { ...memoryProposalBusy.value }
+      delete next[proposalId]
+      memoryProposalBusy.value = next
+    }
+  }
+
+  function approveMemoryProposalAction(proposalId: string, expectedRevision: number) {
+    return transitionMemoryProposal(proposalId, expectedRevision, 'approve')
+  }
+
+  function rejectMemoryProposalAction(proposalId: string, expectedRevision: number) {
+    return transitionMemoryProposal(proposalId, expectedRevision, 'reject')
+  }
+
   async function loadSessions() {
     try {
       const res = await fetchCodingSessions()
@@ -446,6 +518,11 @@ export const useCodingStore = defineStore('coding', () => {
     stream?.disconnect()
     stream = null
     contextRequestGeneration += 1
+    memoryProposalGeneration += 1
+    memoryProposalSessionGeneration += 1
+    memoryProposals.value = []
+    memoryProposalBusy.value = {}
+    memoryProposalError.value = ''
     contextSnapshot.value = null
     contextChars.value = 0
     compactionState.value = 'idle'
@@ -478,6 +555,11 @@ export const useCodingStore = defineStore('coding', () => {
     stream?.disconnect()
     stream = null
     contextRequestGeneration += 1
+    memoryProposalGeneration += 1
+    memoryProposalSessionGeneration += 1
+    memoryProposals.value = []
+    memoryProposalBusy.value = {}
+    memoryProposalError.value = ''
     contextSnapshot.value = null
     contextChars.value = 0
     compactionState.value = 'idle'
@@ -685,6 +767,9 @@ export const useCodingStore = defineStore('coding', () => {
     codingSessions,
     runs,
     selectedRun,
+    memoryProposals,
+    memoryProposalBusy,
+    memoryProposalError,
     skills,
     mcpServers,
     models,
@@ -711,6 +796,9 @@ export const useCodingStore = defineStore('coding', () => {
     loadContext,
     loadSessions,
     loadRuns,
+    loadMemoryProposals,
+    approveMemoryProposal: approveMemoryProposalAction,
+    rejectMemoryProposal: rejectMemoryProposalAction,
     loadRunDetail,
     loadRunDiff,
     openDiffDrawer,

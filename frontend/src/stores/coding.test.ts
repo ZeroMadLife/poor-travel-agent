@@ -1,6 +1,15 @@
 import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useCodingStore } from './coding'
+import type { MemoryProposal } from '../types/api'
+
+function memoryProposal(proposalId: string, revision: number): MemoryProposal {
+  return {
+    proposal_id: proposalId, workspace_id: 'workspace', session_id: 'c1', run_id: '',
+    reflection_id: '', status: 'pending', projection_status: 'pending', revision,
+    base_revision: 0, candidate_count: 0, candidates: [], created_at: '', updated_at: '',
+  }
+}
 
 describe('coding store', () => {
   beforeEach(() => {
@@ -18,6 +27,78 @@ describe('coding store', () => {
     expect(store.isThinking).toBe(false)
     expect(store.skills).toEqual([])
     expect(store.contextBudget).toBe(0)
+  })
+
+  it('loads pending memory proposals and ignores an older generation', async () => {
+    let resolveFirst: ((value: unknown) => void) | undefined
+    const fetchMock = vi.fn()
+      .mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve }))
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ proposals: [{ proposal_id: 'new', status: 'pending', revision: 0, candidates: [] }] }) })
+    vi.stubGlobal('fetch', fetchMock)
+    const store = useCodingStore()
+    store.sessionId = 'c1'
+    const older = store.loadMemoryProposals()
+    await store.loadMemoryProposals()
+    resolveFirst?.({ ok: true, json: async () => ({ proposals: [{ proposal_id: 'old', status: 'pending', revision: 0, candidates: [] }] }) })
+    await older
+    expect(store.memoryProposals.map((proposal) => proposal.proposal_id)).toEqual(['new'])
+  })
+
+  it('refreshes pending proposals after a proposal-ready event', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ proposals: [{ proposal_id: 'p1', status: 'pending', revision: 0, candidates: [] }] }) })
+    vi.stubGlobal('fetch', fetchMock)
+    const store = useCodingStore()
+    store.sessionId = 'c1'
+    store.handleServerEvent({ type: 'memory_proposal_ready', session_id: 'c1', run_id: 'run_1', proposal_id: 'p1', reflection_id: 'r1', candidate_count: 1, base_revision: 0 } as never)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(store.memoryProposals[0].proposal_id).toBe('p1')
+  })
+
+  it('keeps a proposal pending and shows a Chinese CAS error on conflict', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 409 }))
+    const store = useCodingStore()
+    store.sessionId = 'c1'
+    store.memoryProposals = [memoryProposal('p1', 2)]
+    await store.approveMemoryProposal('p1', 2)
+    expect(store.memoryProposals).toHaveLength(1)
+    expect(store.memoryProposalError).toBe('记忆候选已发生变化，请刷新后重试')
+    expect(store.memoryProposalBusy).toEqual({})
+  })
+
+  it('keeps proposal action state isolated from a concurrent list refresh', async () => {
+    let resolveApprove: ((value: unknown) => void) | undefined
+    const fetchMock = vi.fn()
+      .mockReturnValueOnce(new Promise((resolve) => { resolveApprove = resolve }))
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ proposals: [{ proposal_id: 'p1', status: 'pending', revision: 2, candidates: [] }] }) })
+    vi.stubGlobal('fetch', fetchMock)
+    const store = useCodingStore()
+    store.sessionId = 'c1'
+    store.memoryProposals = [memoryProposal('p1', 2)]
+    const approval = store.approveMemoryProposal('p1', 2)
+    await store.loadMemoryProposals()
+    resolveApprove?.({ ok: true, json: async () => ({ proposal_id: 'p1', status: 'approved', revision: 3, candidates: [] }) })
+    await approval
+    expect(store.memoryProposalBusy).toEqual({})
+    expect(store.memoryProposals).toEqual([])
+  })
+
+  it('does not let an older pending list resurrect an approved proposal', async () => {
+    let resolveList: ((value: unknown) => void) | undefined
+    let resolveApprove: ((value: unknown) => void) | undefined
+    const fetchMock = vi.fn()
+      .mockReturnValueOnce(new Promise((resolve) => { resolveList = resolve }))
+      .mockReturnValueOnce(new Promise((resolve) => { resolveApprove = resolve }))
+    vi.stubGlobal('fetch', fetchMock)
+    const store = useCodingStore()
+    store.sessionId = 'c1'
+    store.memoryProposals = [memoryProposal('p1', 2)]
+    const list = store.loadMemoryProposals()
+    const approval = store.approveMemoryProposal('p1', 2)
+    resolveApprove?.({ ok: true, json: async () => memoryProposal('p1', 3) })
+    await approval
+    resolveList?.({ ok: true, json: async () => ({ proposals: [memoryProposal('p1', 2)] }) })
+    await list
+    expect(store.memoryProposals).toEqual([])
   })
 
   it('computes context percent from chars', () => {
