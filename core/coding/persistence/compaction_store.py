@@ -298,10 +298,14 @@ class CompactionStore:
     def _require_verified_artifact(
         self, session_id: str, compaction_id: str, artifact: dict[str, Any]
     ) -> None:
-        if self._checkpoint_anchor_key is None:
-            return
         if artifact.get("status") == "completed":
+            if self._checkpoint_anchor_key is None:
+                raise CompactionCorruptionError(
+                    "completed checkpoint cannot be resumed without an anchor key"
+                )
             self._require_verified_completed(session_id, compaction_id, artifact)
+            return
+        if self._checkpoint_anchor_key is None:
             return
         if artifact.get("status") != "failed":
             return

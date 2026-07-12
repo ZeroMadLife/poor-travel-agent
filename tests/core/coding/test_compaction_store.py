@@ -308,6 +308,16 @@ def test_unconfigured_checkpoint_anchor_fails_closed(tmp_path) -> None:
     assert store.load_latest_checkpoint("s1") is None
 
 
+def test_unconfigured_store_rejects_completed_artifact_reads(tmp_path) -> None:
+    store = CompactionStore(tmp_path)
+    store.begin("s1", "cmp-1", {"trigger": "auto"})
+    store.complete("s1", "cmp-1", _result())
+    with pytest.raises(CompactionCorruptionError, match="anchor key"):
+        store.load("s1", "cmp-1")
+    with pytest.raises(CompactionCorruptionError, match="anchor key"):
+        store.load_latest_attempt("s1")
+
+
 def test_directory_fsync_failure_after_replace_confirms_committed_payload(
     tmp_path, monkeypatch
 ) -> None:
