@@ -25,6 +25,25 @@ class MemoryManager:
         self.working: WorkingMemory | None = None
         self._pending_proposal: list[MemoryFact] | None = None
         self._proposal_id: str = ""
+        self._restore_pending_proposal()
+        self._replay_projections()
+
+    def _restore_pending_proposal(self) -> None:
+        pending = self.memory_store.list_proposals("pending")
+        if pending:
+            proposal = pending[-1]
+            self._proposal_id = proposal.proposal_id
+            self._pending_proposal = [MemoryFact(topic=c.topic, content=c.content, source=c.source,
+                                                  source_ref=c.source_ref, created_at=c.created_at, status="proposed")
+                                      for c in proposal.candidates]
+
+    def _replay_projections(self) -> None:
+        for proposal in self.memory_store.pending_projections():
+            facts = [MemoryFact(topic=c.topic, content=c.content, source=c.source,
+                                source_ref=c.source_ref, created_at=c.created_at, status="proposed")
+                     for c in proposal.candidates]
+            self.durable.approve_dream(facts)
+            self.memory_store.mark_projection_complete(proposal.proposal_id)
 
     def build_working_memory(
         self, session: dict[str, Any], runtime_mode: str, permission_mode: str
@@ -101,6 +120,7 @@ class MemoryManager:
                                 source_ref=c.source_ref, created_at=c.created_at,
                                 status="proposed") for c in proposal.candidates]
             self.durable.approve_dream(facts)
+            self.memory_store.mark_projection_complete(proposal_id)
         return proposal
 
     def reject(self, proposal_id: str, expected_revision: int = 0) -> MemoryProposal:
@@ -126,6 +146,10 @@ class MemoryManager:
 
     def reject_dream(self) -> bool:
         """Discard the pending proposal without writing."""
+        if self._proposal_id:
+            proposal = self.memory_store.get_proposal(self._proposal_id)
+            if proposal is not None and proposal.status == "pending":
+                self.memory_store.reject(self._proposal_id, proposal.revision)
         self._pending_proposal = None
         self._proposal_id = ""
         return True

@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from core.coding.context import WorkspaceContext
+from core.coding.engine.events import MemoryProposalReadyEvent, event_to_dict
 from core.coding.tools.base import ToolContext, ToolResult
 from core.coding.tools.registry import register_tool
 from core.coding.tools.schemas import DreamArgs, RememberArgs
@@ -62,9 +63,17 @@ def dream(
         return ToolResult(content="No facts to consolidate.")
     # Emit a proposal-ready event through the runtime's session event bus so the
     # frontend can surface the approval UI.
-    pending = runtime.memory_manager.pending_proposal
+    pending = runtime.memory_manager.get_proposal(runtime.memory_manager._proposal_id)
     if pending:
-        runtime.session_event_bus.emit("memory_proposal_ready", pending)
+        event = MemoryProposalReadyEvent(
+            session_id=pending.session_id,
+            run_id=pending.run_id,
+            reflection_id=pending.reflection_id,
+            proposal_id=pending.proposal_id,
+            candidate_count=len(pending.candidates),
+            base_revision=pending.base_revision,
+        )
+        runtime.session_event_bus.emit(event.type, event_to_dict(event))
     lines = ["Memory proposals generated (awaiting approval):"]
     for p in proposals:
         lines.append(f"- [{p.topic}] {p.content}")

@@ -168,8 +168,12 @@ class MemoryProposalReadyEvent(RunEventBase):
     """Memory consolidation proposals are ready for user review."""
 
     type: Literal["memory_proposal_ready"] = "memory_proposal_ready"
+    session_id: str = ""
+    run_id: str = ""
+    reflection_id: str = ""
     proposal_id: str = ""
-    facts: list[dict[str, str]] = Field(default_factory=list)
+    candidate_count: int = Field(default=0, ge=0)
+    base_revision: int = Field(default=0, ge=0)
 
 
 class ContextUsageUpdatedEvent(RunEventBase):

@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import uuid
 from collections.abc import Iterable
@@ -11,6 +12,12 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+SCHEMA_VERSION = 1
+MAX_CONTENT = 32_000
+MAX_CANDIDATES = 256
+MAX_JSON_BYTES = 512 * 1024
+_TOPICS = {"project-conventions", "decisions"}
 
 
 class MemoryStoreError(RuntimeError):
@@ -41,6 +48,7 @@ class MemoryProposal:
     candidates: tuple[MemoryCandidate, ...]
     status: str
     revision: int
+    projection_status: str = "pending"
     session_id: str = ""
     run_id: str = ""
     reflection_id: str = ""
@@ -68,13 +76,22 @@ class MemoryStore:
     """Small transactional SQLite store scoped to one workspace."""
 
     def __init__(self, storage_root: Path, workspace_id: str) -> None:
-        if not workspace_id or any(c in workspace_id for c in "/\\"):
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", workspace_id):
             raise ValueError("invalid workspace id")
+        if storage_root.exists() and storage_root.is_symlink():
+            raise MemoryStoreError("storage root must not be a symlink")
         self.root = storage_root / "memory" / workspace_id
+        memory_root = storage_root / "memory"
+        if memory_root.exists() and memory_root.is_symlink():
+            raise MemoryStoreError("memory root must not be a symlink")
         self.root.mkdir(parents=True, exist_ok=True)
+        if self.root.is_symlink():
+            raise MemoryStoreError("workspace directory must not be a symlink")
         with suppress(OSError):
             os.chmod(self.root, 0o700)
         self.path = self.root / "memory.sqlite3"
+        if self.path.is_symlink() or (self.path.exists() and self.path.stat().st_nlink != 1):
+            raise MemoryStoreError("database must be a single regular file")
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
@@ -82,10 +99,15 @@ class MemoryStore:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=FULL")
         return conn
 
     def _init_db(self) -> None:
         with self._connect() as db:
+            version = int(db.execute("PRAGMA user_version").fetchone()[0])
+            if version > SCHEMA_VERSION:
+                raise MemoryStoreError(f"unsupported memory schema version {version}")
             db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS memory_facts (
@@ -96,6 +118,7 @@ class MemoryStore:
                 CREATE TABLE IF NOT EXISTS memory_proposals (
                     proposal_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL,
                     candidates_json TEXT NOT NULL, status TEXT NOT NULL,
+                    projection_status TEXT NOT NULL DEFAULT 'pending',
                     revision INTEGER NOT NULL, session_id TEXT NOT NULL DEFAULT '',
                     run_id TEXT NOT NULL DEFAULT '', reflection_id TEXT NOT NULL DEFAULT '',
                     base_revision INTEGER NOT NULL DEFAULT 0,
@@ -113,6 +136,11 @@ class MemoryStore:
                     ON memory_events(proposal_id, created_at);
                 """
             )
+            columns = {row[1] for row in db.execute("PRAGMA table_info(memory_proposals)")}
+            if "projection_status" not in columns:
+                db.execute("ALTER TABLE memory_proposals ADD COLUMN projection_status TEXT NOT NULL DEFAULT 'complete'")
+                db.commit()
+            db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             with suppress(OSError):
                 os.chmod(self.path, 0o600)
 
@@ -123,10 +151,14 @@ class MemoryStore:
         values = tuple(c for c in candidates if c.content.strip())
         if not values:
             raise ValueError("proposal requires at least one candidate")
+        if len(values) > MAX_CANDIDATES:
+            raise ValueError("proposal has too many candidates")
         # Deduplicate within a proposal while preserving order.
         unique: list[MemoryCandidate] = []
         seen: set[str] = set()
         for candidate in values:
+            if len(candidate.content) > MAX_CONTENT or candidate.topic not in _TOPICS:
+                raise ValueError("invalid memory candidate")
             if candidate.content_hash not in seen:
                 unique.append(candidate)
                 seen.add(candidate.content_hash)
@@ -136,9 +168,17 @@ class MemoryStore:
             db.execute("BEGIN IMMEDIATE")
             base = int(db.execute("SELECT COUNT(*) FROM memory_facts").fetchone()[0])
             payload = json.dumps([c.__dict__ for c in unique], ensure_ascii=False, sort_keys=True)
-            db.execute("INSERT INTO memory_proposals VALUES (?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?, ?)",
-                       (proposal, self._workspace_id(), payload, session_id, run_id,
-                        reflection_id, base, now, now))
+            if len(payload.encode("utf-8")) > MAX_JSON_BYTES:
+                raise ValueError("proposal payload too large")
+            try:
+                db.execute("INSERT INTO memory_proposals (proposal_id, workspace_id, candidates_json, status, projection_status, revision, session_id, run_id, reflection_id, base_revision, created_at, updated_at) VALUES (?, ?, ?, 'pending', 'pending', 0, ?, ?, ?, ?, ?, ?)",
+                           (proposal, self._workspace_id(), payload, session_id, run_id, reflection_id, base, now, now))
+            except sqlite3.IntegrityError as exc:
+                existing = db.execute("SELECT * FROM memory_proposals WHERE proposal_id=?", (proposal,)).fetchone()
+                if existing is None or existing["candidates_json"] != payload:
+                    raise MemoryConflictError(f"proposal id conflict: {proposal}") from exc
+                db.rollback()
+                return _proposal(existing)
             self._event(db, "proposal_created", proposal, self._workspace_id(), session_id, run_id, reflection_id,
                         len(unique), base, 0, now)
             db.commit()
@@ -148,6 +188,16 @@ class MemoryStore:
         with self._connect() as db:
             row = db.execute("SELECT * FROM memory_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
         return _proposal(row) if row else None
+
+    def mark_projection_complete(self, proposal_id: str) -> None:
+        with self._connect() as db:
+            db.execute("UPDATE memory_proposals SET projection_status='complete', updated_at=? WHERE proposal_id=? AND status='approved'", (_now(), proposal_id))
+            db.commit()
+
+    def pending_projections(self) -> list[MemoryProposal]:
+        with self._connect() as db:
+            rows = db.execute("SELECT * FROM memory_proposals WHERE status='approved' AND projection_status!='complete'").fetchall()
+        return [_proposal(row) for row in rows]
 
     def list_proposals(self, status: str | None = None) -> list[MemoryProposal]:
         with self._connect() as db:
@@ -187,8 +237,8 @@ class MemoryStore:
                     db.execute("INSERT OR IGNORE INTO memory_facts VALUES (?, ?, ?, ?, ?, ?, ?)",
                                (candidate.content_hash, candidate.content, candidate.topic,
                                 candidate.source, candidate.source_ref, candidate.created_at or now, proposal_id))
-            db.execute("UPDATE memory_proposals SET status=?, revision=?, updated_at=? WHERE proposal_id=?",
-                       (status, new_revision, now, proposal_id))
+            db.execute("UPDATE memory_proposals SET status=?, projection_status=?, revision=?, updated_at=? WHERE proposal_id=?",
+                       (status, "pending" if status == "approved" else "complete", new_revision, now, proposal_id))
             self._event(db, f"proposal_{status}", proposal_id, current.workspace_id, current.session_id, current.run_id,
                         current.reflection_id, len(current.candidates), current.base_revision,
                         new_revision, now)
@@ -197,7 +247,7 @@ class MemoryStore:
 
     def list_facts(self) -> list[MemoryCandidate]:
         with self._connect() as db:
-            rows = db.execute("SELECT content, topic, source, source_ref, created_at FROM memory_facts ORDER BY rowid").fetchall()
+            rows = db.execute("SELECT f.content, f.topic, f.source, f.source_ref, f.created_at FROM memory_facts f JOIN memory_proposals p ON p.proposal_id=f.proposal_id WHERE p.status='approved' ORDER BY f.rowid").fetchall()
         return [MemoryCandidate(**dict(r)) for r in rows]
 
     def list_events(self, proposal_id: str | None = None) -> list[MemoryEvent]:
