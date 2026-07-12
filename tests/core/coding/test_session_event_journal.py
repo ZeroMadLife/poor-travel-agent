@@ -263,6 +263,10 @@ def test_active_lease_cannot_be_bypassed_by_omitting_fencing_credentials(
         journal.append_terminal_and_release(
             run_id="run-1", status="completed", payload={}
         )
+    with pytest.raises(SessionEventJournalError, match="lease|fenc|owner"):
+        journal.append_terminal_once(
+            run_id="run-1", status="completed", payload={}
+        )
 
     assert journal.active_run_id() == "run-1"
 
@@ -281,13 +285,19 @@ def test_release_requires_matching_owner_and_fencing_token(tmp_path: Path) -> No
     ) is True
 
 
-def test_pid_reuse_does_not_make_previous_process_owner_live(tmp_path: Path) -> None:
+def test_pid_reuse_does_not_make_previous_process_owner_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    process_starts = iter(("procfs:old-start", "procfs:new-start"))
+    monkeypatch.setattr(
+        journal_module,
+        "_process_start_fingerprint",
+        lambda _pid: next(process_starts),
+    )
     journal = SessionEventJournal(tmp_path, "session-1")
     journal.begin_run("run-1", owner_id="previous-process", owner_pid=os.getpid())
 
-    recovered = journal.recover_run_lease(
-        recovery_owner_id="current-process", live_owner_ids={"current-process"}
-    )
+    recovered = journal.recover_run_lease(recovery_owner_id="current-process")
 
     assert recovered is not None
     assert recovered.status == "interrupted"
@@ -330,7 +340,7 @@ def test_v1_journal_migrates_to_persistent_lease_schema(tmp_path: Path) -> None:
     assert [item.event_id for item in migrated.replay(after=0, limit=10).items] == ["event-1"]
     assert migrated.active_run_id() is None
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == journal_module.SCHEMA_VERSION
         assert connection.execute(
             "SELECT name FROM sqlite_schema WHERE name = 'active_run_lease'"
         ).fetchone() == ("active_run_lease",)

@@ -251,11 +251,8 @@ async def test_active_run_repeated_cancel_waits_for_terminal_cleanup(
 
 
 @pytest.mark.asyncio
-async def test_recovery_respects_live_owner_and_new_owner_recovers(tmp_path: Path) -> None:
+async def test_new_owner_recovers_dead_process_lease(tmp_path: Path) -> None:
     owner_a = RunCoordinator(
-        SessionEventJournal(tmp_path, "session-1"), owner_id="owner-a", owner_pid=999_999
-    )
-    same_owner = RunCoordinator(
         SessionEventJournal(tmp_path, "session-1"), owner_id="owner-a", owner_pid=999_999
     )
     new_owner = RunCoordinator(SessionEventJournal(tmp_path, "session-1"), owner_id="owner-b")
@@ -267,8 +264,6 @@ async def test_recovery_respects_live_owner_and_new_owner_recovers(tmp_path: Pat
             yield RunEvent(kind="tool", status="running", payload={})
 
     task = await owner_a.start_run("run-1", blocked())
-    assert await same_owner.recover_interrupted_runs() == ()
-    assert same_owner.journal.active_run_id() == "run-1"
     contender = RunCoordinator(
         SessionEventJournal(tmp_path, "session-1"), owner_id="owner-a", owner_pid=999_999
     )

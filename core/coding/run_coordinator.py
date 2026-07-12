@@ -19,7 +19,6 @@ from core.coding.persistence.session_event_journal import (
 )
 
 _PROCESS_INSTANCE_ID = f"process-{uuid.uuid4()}"
-_LIVE_PROCESS_OWNERS: set[str] = set()
 
 
 class RunCoordinatorError(RuntimeError):
@@ -57,7 +56,6 @@ class RunCoordinator:
             raise ValueError("poll_interval_seconds must be positive")
         self.journal = journal
         self.owner_id = owner_id or _PROCESS_INSTANCE_ID
-        _LIVE_PROCESS_OWNERS.add(self.owner_id)
         self.owner_pid = os.getpid() if owner_pid is None else owner_pid
         self._subscriber_queue_size = subscriber_queue_size
         self._poll_interval_seconds = poll_interval_seconds
@@ -218,7 +216,6 @@ class RunCoordinator:
             lease_event = await asyncio.to_thread(
                 self.journal.recover_run_lease,
                 recovery_owner_id=self.owner_id,
-                live_owner_ids=frozenset(_LIVE_PROCESS_OWNERS),
             )
             if lease_event is not None:
                 self._broadcast(lease_event)

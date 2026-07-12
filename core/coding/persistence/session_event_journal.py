@@ -14,15 +14,16 @@ import os
 import re
 import sqlite3
 import stat
+import subprocess
 import uuid
-from collections.abc import Collection, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 _DATABASE_NAME = "timeline.sqlite3"
 _MAX_PAYLOAD_BYTES = 1024 * 1024
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
@@ -74,12 +75,23 @@ CREATE TABLE active_run_lease (
     acquired_at TEXT NOT NULL
 )
 """
+_LEASE_V4_SQL = """
+CREATE TABLE active_run_lease (
+    lease_key INTEGER PRIMARY KEY CHECK (lease_key = 1),
+    run_id TEXT NOT NULL UNIQUE,
+    owner_id TEXT NOT NULL,
+    owner_pid INTEGER NOT NULL,
+    fencing_token INTEGER NOT NULL,
+    acquired_at TEXT NOT NULL
+)
+"""
 _LEASE_SQL = """
 CREATE TABLE active_run_lease (
     lease_key INTEGER PRIMARY KEY CHECK (lease_key = 1),
     run_id TEXT NOT NULL UNIQUE,
     owner_id TEXT NOT NULL,
     owner_pid INTEGER NOT NULL,
+    owner_process_start TEXT NOT NULL,
     fencing_token INTEGER NOT NULL,
     acquired_at TEXT NOT NULL
 )
@@ -209,6 +221,8 @@ class SessionEventJournal:
         payload: Mapping[str, Any],
         event_id: str | None = None,
         timestamp: str | None = None,
+        lease_owner_id: str | None = None,
+        fencing_token: int | None = None,
     ) -> SessionEvent:
         """Atomically append the first terminal event for a run."""
         if status not in TERMINAL_STATUSES:
@@ -224,6 +238,12 @@ class SessionEventJournal:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                _assert_run_lease(
+                    connection,
+                    run_id=run_id,
+                    owner_id=lease_owner_id,
+                    fencing_token=fencing_token,
+                )
                 stored = self._terminal_in_transaction(connection, values)
                 connection.commit()
                 return stored
@@ -292,9 +312,16 @@ class SessionEventJournal:
                 token = _allocate_fencing_token(connection)
                 connection.execute(
                     "INSERT INTO active_run_lease "
-                    "(lease_key, run_id, owner_id, owner_pid, fencing_token, acquired_at) "
-                    "VALUES (1, ?, ?, ?, ?, ?)",
-                    (validated_run, validated_owner, owner_pid, token, acquired_at),
+                    "(lease_key, run_id, owner_id, owner_pid, owner_process_start, "
+                    "fencing_token, acquired_at) VALUES (1, ?, ?, ?, ?, ?, ?)",
+                    (
+                        validated_run,
+                        validated_owner,
+                        owner_pid,
+                        _process_start_fingerprint(owner_pid) or "",
+                        token,
+                        acquired_at,
+                    ),
                 )
                 connection.commit()
             except sqlite3.IntegrityError as exc:
@@ -340,9 +367,16 @@ class SessionEventJournal:
                 token = _allocate_fencing_token(connection)
                 connection.execute(
                     "INSERT INTO active_run_lease "
-                    "(lease_key, run_id, owner_id, owner_pid, fencing_token, acquired_at) "
-                    "VALUES (1, ?, ?, ?, ?, ?)",
-                    (validated_run, validated_owner, owner_pid, token, acquired_at),
+                    "(lease_key, run_id, owner_id, owner_pid, owner_process_start, "
+                    "fencing_token, acquired_at) VALUES (1, ?, ?, ?, ?, ?, ?)",
+                    (
+                        validated_run,
+                        validated_owner,
+                        owner_pid,
+                        _process_start_fingerprint(owner_pid) or "",
+                        token,
+                        acquired_at,
+                    ),
                 )
                 stored = self._insert(connection, **values)
                 connection.commit()
@@ -383,27 +417,24 @@ class SessionEventJournal:
         self,
         *,
         recovery_owner_id: str = "recovery",
-        live_owner_ids: Collection[str] = (),
     ) -> SessionEvent | None:
         """Atomically interrupt and release a lease abandoned by a prior process."""
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                owner = _validate_identifier("recovery_owner_id", recovery_owner_id)
+                _validate_identifier("recovery_owner_id", recovery_owner_id)
                 row = connection.execute(
-                    "SELECT run_id, owner_id, owner_pid FROM active_run_lease WHERE lease_key = 1"
+                    "SELECT run_id, owner_id, owner_pid, owner_process_start "
+                    "FROM active_run_lease WHERE lease_key = 1"
                 ).fetchone()
                 if row is None:
                     connection.commit()
                     return None
                 run_id = str(row[0])
-                if str(row[1]) == owner:
-                    connection.commit()
-                    return None
                 owner_pid = int(row[2])
-                if _pid_is_alive(owner_pid) and (
-                    owner_pid != os.getpid() or str(row[1]) in live_owner_ids
-                ):
+                stored_process_start = str(row[3])
+                current_process_start = _process_start_fingerprint(owner_pid)
+                if stored_process_start and stored_process_start == current_process_start:
                     connection.commit()
                     return None
                 existing = connection.execute(
@@ -540,8 +571,8 @@ class SessionEventJournal:
                     if existing is not None:
                         connection.execute(
                             "INSERT INTO active_run_lease "
-                            "(lease_key, run_id, owner_id, owner_pid, fencing_token, acquired_at) "
-                            "VALUES (1, ?, 'legacy', -1, 1, ?)",
+                            "(lease_key, run_id, owner_id, owner_pid, owner_process_start, "
+                            "fencing_token, acquired_at) VALUES (1, ?, 'legacy', -1, '', 1, ?)",
                             (str(existing[0]), str(existing[1])),
                         )
                         next_token = 2
@@ -561,8 +592,24 @@ class SessionEventJournal:
                     if existing is not None:
                         connection.execute(
                             "INSERT INTO active_run_lease "
-                            "(lease_key, run_id, owner_id, owner_pid, fencing_token, acquired_at) "
-                            "VALUES (1, ?, ?, -1, ?, ?)",
+                            "(lease_key, run_id, owner_id, owner_pid, owner_process_start, "
+                            "fencing_token, acquired_at) VALUES (1, ?, ?, -1, '', ?, ?)",
+                            tuple(existing),
+                        )
+                    connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                elif version == 4:
+                    _validate_schema(connection, self.path, lease_version=4)
+                    existing = connection.execute(
+                        "SELECT run_id, owner_id, owner_pid, fencing_token, acquired_at "
+                        "FROM active_run_lease WHERE lease_key = 1"
+                    ).fetchone()
+                    connection.execute("DROP TABLE active_run_lease")
+                    connection.execute(_LEASE_SQL)
+                    if existing is not None:
+                        connection.execute(
+                            "INSERT INTO active_run_lease "
+                            "(lease_key, run_id, owner_id, owner_pid, owner_process_start, "
+                            "fencing_token, acquired_at) VALUES (1, ?, ?, ?, '', ?, ?)",
                             tuple(existing),
                         )
                     connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -791,7 +838,7 @@ def _schema_objects(connection: sqlite3.Connection) -> list[tuple[str, str, str 
 
 
 def _validate_schema(
-    connection: sqlite3.Connection, path: Path, *, lease_version: int = 4
+    connection: sqlite3.Connection, path: Path, *, lease_version: int = SCHEMA_VERSION
 ) -> None:
     expected_columns = [
         "sequence", "event_id", "session_id", "run_id", "kind", "status", "timestamp",
@@ -827,7 +874,8 @@ def _validate_schema(
     expected_lease_sql = {
         2: _LEASE_V2_SQL,
         3: _LEASE_V3_SQL,
-        4: _LEASE_SQL,
+        4: _LEASE_V4_SQL,
+        5: _LEASE_SQL,
     }.get(lease_version, _LEASE_SQL)
     if lease_version and _normalize_sql(
         object_sql[("table", "active_run_lease")]
@@ -905,16 +953,32 @@ def _is_busy_or_locked(exc: sqlite3.OperationalError) -> bool:
     )
 
 
-def _pid_is_alive(pid: int) -> bool:
+def _process_start_fingerprint(pid: int) -> str | None:
+    """Return an OS process incarnation marker, not merely a reusable PID."""
     if pid < 1:
-        return False
+        return None
+    proc_stat = Path(f"/proc/{pid}/stat")
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+        raw = proc_stat.read_text(encoding="ascii")
+    except (FileNotFoundError, PermissionError, OSError, UnicodeError):
+        pass
+    else:
+        close_paren = raw.rfind(")")
+        fields = raw[close_paren + 2 :].split() if close_paren >= 0 else []
+        if len(fields) > 19:
+            return f"procfs:{fields[19]}"
+    try:
+        completed = subprocess.run(
+            ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = completed.stdout.strip()
+    return f"ps:{value}" if completed.returncode == 0 and value else None
 
 
 def _trusted_root(root: Path) -> Path:
