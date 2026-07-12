@@ -66,6 +66,41 @@ def test_replay_paginates_at_boundaries(tmp_path: Path) -> None:
         journal.replay(after=-1, limit=1)
 
 
+def test_replay_before_reads_a_bounded_tail_and_older_pages(tmp_path: Path) -> None:
+    journal = SessionEventJournal(tmp_path, "session-1")
+    for index in range(250):
+        _append(journal, payload={"index": index})
+
+    tail = journal.replay_before(limit=100)
+    older = journal.replay_before(before=tail.older_cursor, limit=100)
+    oldest = journal.replay_before(before=older.older_cursor, limit=100)
+
+    assert [item.sequence for item in tail.items] == list(range(151, 251))
+    assert tail.older_cursor == 151
+    assert tail.latest_cursor == 250
+    assert tail.has_more is True
+    assert [item.sequence for item in older.items] == list(range(51, 151))
+    assert older.older_cursor == 51
+    assert older.latest_cursor == 250
+    assert older.has_more is True
+    assert [item.sequence for item in oldest.items] == list(range(1, 51))
+    assert oldest.older_cursor is None
+    assert oldest.latest_cursor == 250
+    assert oldest.has_more is False
+
+
+def test_replay_before_validates_cursor_and_empty_tail(tmp_path: Path) -> None:
+    journal = SessionEventJournal(tmp_path, "session-1")
+
+    empty = journal.replay_before(limit=10)
+
+    assert empty.items == ()
+    assert empty.older_cursor is None
+    assert empty.latest_cursor == 0
+    with pytest.raises(ValueError, match="before"):
+        journal.replay_before(before=0, limit=10)
+
+
 def test_concurrent_append_allocates_strict_session_sequence(tmp_path: Path) -> None:
     journal = SessionEventJournal(tmp_path, "session-1")
     with ThreadPoolExecutor(max_workers=8) as executor:

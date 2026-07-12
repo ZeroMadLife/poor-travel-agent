@@ -93,6 +93,8 @@ class CodingTimelineResponse(BaseModel):
     items: list[CodingTimelineEvent]
     next_cursor: int
     has_more: bool
+    older_cursor: int | None = None
+    latest_cursor: int = 0
     active_run: CodingActiveRun | None = None
 
 

@@ -150,6 +150,14 @@ class ReplayPage:
 
 
 @dataclass(frozen=True, slots=True)
+class BackwardReplayPage:
+    items: tuple[SessionEvent, ...]
+    older_cursor: int | None
+    latest_cursor: int
+    has_more: bool
+
+
+@dataclass(frozen=True, slots=True)
 class BeginRunResult:
     event: SessionEvent
     fencing_token: int
@@ -503,6 +511,43 @@ class SessionEventJournal:
         return ReplayPage(
             items=items,
             next_cursor=items[-1].sequence if items else after,
+            has_more=has_more,
+        )
+
+    def replay_before(
+        self, *, before: int | None = None, limit: int = 100
+    ) -> BackwardReplayPage:
+        """Return a bounded tail or events older than an exclusive cursor."""
+        if before is not None and (
+            isinstance(before, bool) or not isinstance(before, int) or before <= 0
+        ):
+            raise ValueError("before must be a positive integer")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise ValueError("limit must be between 1 and 500")
+        with self._connect() as connection:
+            latest_row = connection.execute(
+                "SELECT COALESCE(MAX(sequence), 0) FROM session_events"
+            ).fetchone()
+            if before is None:
+                rows = connection.execute(
+                    "SELECT * FROM session_events ORDER BY sequence DESC LIMIT ?",
+                    (limit + 1,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM session_events WHERE sequence < ? "
+                    "ORDER BY sequence DESC LIMIT ?",
+                    (before, limit + 1),
+                ).fetchall()
+        has_more = len(rows) > limit
+        selected = rows[:limit]
+        items = tuple(
+            _event_from_row(row, self.session_id) for row in reversed(selected)
+        )
+        return BackwardReplayPage(
+            items=items,
+            older_cursor=items[0].sequence if has_more and items else None,
+            latest_cursor=int(latest_row[0]),
             has_more=has_more,
         )
 
