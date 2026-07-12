@@ -7,6 +7,12 @@ from typing import Any
 
 from core.coding.memory.durable import DurableMemory, MemoryFact, workspace_id_from_path
 from core.coding.memory.working import WorkingMemory
+from core.coding.persistence.memory_store import (
+    MemoryCandidate,
+    MemoryEvent,
+    MemoryProposal,
+    MemoryStore,
+)
 
 
 class MemoryManager:
@@ -15,6 +21,7 @@ class MemoryManager:
     def __init__(self, storage_root: Path, workspace_root: Path) -> None:
         ws_id = workspace_id_from_path(workspace_root)
         self.durable = DurableMemory(storage_root, ws_id)
+        self.memory_store = MemoryStore(storage_root, ws_id)
         self.working: WorkingMemory | None = None
         self._pending_proposal: list[MemoryFact] | None = None
         self._proposal_id: str = ""
@@ -61,7 +68,43 @@ class MemoryManager:
 
             self._proposal_id = f"dream_{now().replace(':', '').replace('-', '')}"
             self._pending_proposal = proposals
+            self.create_proposal(
+                [MemoryCandidate(f.content, f.topic, "dream_proposal", f.source_ref, f.created_at) for f in proposals],
+                reflection_id=self._proposal_id,
+                proposal_id=self._proposal_id,
+            )
         return proposals
+
+    def create_proposal(
+        self, candidates: list[MemoryCandidate], *, run_id: str = "", reflection_id: str = "",
+        session_id: str = "", proposal_id: str | None = None,
+    ) -> MemoryProposal:
+        """Persist a proposal; candidates do not become active facts."""
+        return self.memory_store.create_proposal(
+            candidates, run_id=run_id, reflection_id=reflection_id,
+            session_id=session_id, proposal_id=proposal_id,
+        )
+
+    def get_proposal(self, proposal_id: str) -> MemoryProposal | None:
+        return self.memory_store.get_proposal(proposal_id)
+
+    def list_proposals(self, status: str | None = None) -> list[MemoryProposal]:
+        return self.memory_store.list_proposals(status)
+
+    def approve(self, proposal_id: str, expected_revision: int = 0) -> MemoryProposal:
+        proposal = self.memory_store.approve(proposal_id, expected_revision)
+        if proposal.status == "approved":
+            facts = [MemoryFact(topic=c.topic, content=c.content, source=c.source,
+                                source_ref=c.source_ref, created_at=c.created_at,
+                                status="proposed") for c in proposal.candidates]
+            self.durable.approve_dream(facts)
+        return proposal
+
+    def reject(self, proposal_id: str, expected_revision: int = 0) -> MemoryProposal:
+        return self.memory_store.reject(proposal_id, expected_revision)
+
+    def list_memory_events(self, proposal_id: str | None = None) -> list[MemoryEvent]:
+        return self.memory_store.list_events(proposal_id)
 
     def approve_dream(self) -> bool:
         """Write the pending proposal to durable files and clear it.
@@ -70,7 +113,10 @@ class MemoryManager:
         """
         if not self._pending_proposal:
             return False
-        self.durable.approve_dream(self._pending_proposal)
+        if self._proposal_id:
+            self.approve(self._proposal_id)
+        else:
+            self.durable.approve_dream(self._pending_proposal)
         self._pending_proposal = None
         self._proposal_id = ""
         return True

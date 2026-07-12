@@ -6,6 +6,14 @@ from core.coding.persistence.compaction_store import (
     CompactionStore,
     CompactionStoreError,
 )
+from core.coding.persistence.memory_store import (
+    MemoryCandidate,
+    MemoryConflictError,
+    MemoryEvent,
+    MemoryProposal,
+    MemoryStore,
+    MemoryStoreError,
+)
 from core.coding.persistence.run_store import RunStore
 from core.coding.persistence.session_events import SessionEventBus
 from core.coding.persistence.session_store import CodingSessionStore
@@ -23,6 +31,12 @@ __all__ = [
     "CompactionCorruptionError",
     "CompactionStore",
     "CompactionStoreError",
+    "MemoryCandidate",
+    "MemoryConflictError",
+    "MemoryEvent",
+    "MemoryProposal",
+    "MemoryStore",
+    "MemoryStoreError",
     "RunStore",
     "SessionEventBus",
     "TodoLedger",
