@@ -23,6 +23,9 @@ from core.coding.persistence.transcript_schema import (
 )
 
 __all__ = [
+    "MAX_ARGS_BYTES",
+    "MAX_ARGS_DEPTH",
+    "MAX_ARGS_ITEMS",
     "TranscriptConflictError",
     "TranscriptCorruptionError",
     "TranscriptItem",
@@ -30,6 +33,10 @@ __all__ = [
     "TranscriptStore",
     "TranscriptStoreError",
 ]
+
+MAX_ARGS_BYTES = 256 * 1024
+MAX_ARGS_DEPTH = 32
+MAX_ARGS_ITEMS = 10_000
 
 _BUSY_TIMEOUT_MS = 5000
 _DATABASE_NAME = "transcript.sqlite3"
@@ -51,6 +58,48 @@ class TranscriptConflictError(TranscriptStoreError):
     """Raised when a message id is reused for different canonical evidence."""
 
 
+class FrozenDict(dict[str, Any]):
+    """A recursively frozen dict that remains JSON/dict compatible."""
+
+    def _immutable(self, *args: Any, **kwargs: Any) -> None:
+        raise TypeError("transcript args are immutable")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    clear = _immutable
+    pop = _immutable  # type: ignore[assignment]
+    popitem = _immutable  # type: ignore[assignment]
+    setdefault = _immutable  # type: ignore[assignment]
+    update = _immutable  # type: ignore[assignment]
+    __ior__ = _immutable  # type: ignore[assignment]
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> FrozenDict:
+        return self
+
+
+class FrozenList(list[Any]):
+    """A recursively frozen list that remains JSON/list compatible."""
+
+    def _immutable(self, *args: Any, **kwargs: Any) -> None:
+        raise TypeError("transcript args are immutable")
+
+    __setitem__ = _immutable  # type: ignore[assignment]
+    __delitem__ = _immutable
+    __iadd__ = _immutable  # type: ignore[assignment]
+    __imul__ = _immutable  # type: ignore[assignment]
+    append = _immutable
+    clear = _immutable
+    extend = _immutable
+    insert = _immutable
+    pop = _immutable
+    remove = _immutable
+    reverse = _immutable
+    sort = _immutable  # type: ignore[assignment]
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> FrozenList:
+        return self
+
+
 @dataclass(frozen=True)
 class TranscriptItem:
     """One canonical transcript entry."""
@@ -69,6 +118,11 @@ class TranscriptItem:
     is_error: bool = False
     policy_reason: str = ""
     security_event_type: str = ""
+
+    def __post_init__(self) -> None:
+        _validate_is_error(self.is_error)
+        _validate_args_structure(self.args)
+        object.__setattr__(self, "args", _freeze_json_value(self.args))
 
 
 class TranscriptStore:
@@ -104,6 +158,7 @@ class TranscriptStore:
 
     def append_and_get_sequence(self, item: TranscriptItem) -> tuple[bool, int]:
         """Insert canonical evidence or return its existing stable sequence."""
+        _validate_is_error(item.is_error)
         args_json = _canonical_args_json(item.args)
         values = _stored_values(item, args_json)
         try:
@@ -115,7 +170,11 @@ class TranscriptStore:
                         (item.message_id,),
                     ).fetchone()
                     if existing is not None:
-                        if tuple(existing[1:]) != values:
+                        existing_item = _row_to_item(existing, self.path)
+                        existing_values = _stored_values(
+                            existing_item, _canonical_args_json(existing_item.args)
+                        )
+                        if existing_values != values:
                             raise TranscriptConflictError(
                                 f"conflicting transcript message_id {item.message_id!r} at {self.path}"
                             )
@@ -293,36 +352,63 @@ class TranscriptStore:
 
 
 def _canonical_args_json(args: dict[str, Any]) -> str:
-    if not isinstance(args, dict):
-        raise TypeError("transcript args must be a dict")
-    _validate_json_value(args)
-    return json.dumps(
+    _validate_args_structure(args)
+    encoded = json.dumps(
         args,
         ensure_ascii=False,
         allow_nan=False,
         sort_keys=True,
         separators=(",", ":"),
     )
+    size = len(encoded.encode("utf-8"))
+    if size > MAX_ARGS_BYTES:
+        raise ValueError(
+            f"transcript args exceed {MAX_ARGS_BYTES} bytes (encoded size {size})"
+        )
+    return encoded
 
 
-def _validate_json_value(value: Any) -> None:
-    if value is None or isinstance(value, str | bool | int):
-        return
-    if isinstance(value, float):
-        if not (value == value and abs(value) != float("inf")):
-            raise ValueError("transcript args must contain finite JSON numbers")
-        return
-    if isinstance(value, list):
-        for child in value:
-            _validate_json_value(child)
-        return
+def _validate_args_structure(args: dict[str, Any]) -> None:
+    if not isinstance(args, dict):
+        raise TypeError("transcript args must be a dict")
+    stack: list[tuple[Any, int]] = [(args, 1)]
+    items = 0
+    while stack:
+        value, depth = stack.pop()
+        items += 1
+        if items > MAX_ARGS_ITEMS:
+            raise ValueError(f"transcript args exceed {MAX_ARGS_ITEMS} items")
+        if depth > MAX_ARGS_DEPTH:
+            raise ValueError(f"transcript args exceed depth {MAX_ARGS_DEPTH}")
+        if value is None or isinstance(value, str | bool | int):
+            continue
+        if isinstance(value, float):
+            if not (value == value and abs(value) != float("inf")):
+                raise ValueError("transcript args must contain finite JSON numbers")
+            continue
+        if isinstance(value, list):
+            stack.extend((child, depth + 1) for child in reversed(value))
+            continue
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if not isinstance(key, str):
+                    raise TypeError("transcript args object keys must be strings")
+                stack.append((child, depth + 1))
+            continue
+        raise TypeError(f"transcript args contains non-JSON value {type(value).__name__}")
+
+
+def _freeze_json_value(value: Any) -> Any:
     if isinstance(value, dict):
-        for key, child in value.items():
-            if not isinstance(key, str):
-                raise TypeError("transcript args object keys must be strings")
-            _validate_json_value(child)
-        return
-    raise TypeError(f"transcript args contains non-JSON value {type(value).__name__}")
+        return FrozenDict((key, _freeze_json_value(child)) for key, child in value.items())
+    if isinstance(value, list):
+        return FrozenList(_freeze_json_value(child) for child in value)
+    return value
+
+
+def _validate_is_error(value: Any) -> None:
+    if type(value) is not bool:
+        raise TypeError("transcript is_error must be a bool")
 
 
 def _stored_values(item: TranscriptItem, args_json: str) -> tuple[Any, ...]:
@@ -355,8 +441,22 @@ def _read_items(
 def _row_to_item(row: tuple[Any, ...], path: Path) -> TranscriptItem:
     message_id = str(row[1])
     try:
-        args = json.loads(row[10], parse_constant=_reject_json_constant)
-        _validate_json_value(args)
+        raw_args = row[10]
+        if type(raw_args) is not str:
+            raise TypeError("args_json is not text")
+        raw_size = len(raw_args.encode("utf-8"))
+        if raw_size > MAX_ARGS_BYTES:
+            raise ValueError(
+                f"transcript args exceed {MAX_ARGS_BYTES} bytes (encoded size {raw_size})"
+            )
+        args = json.loads(
+            raw_args,
+            object_pairs_hook=_object_without_duplicate_keys,
+            parse_constant=_reject_json_constant,
+        )
+        canonical_args = _canonical_args_json(args)
+        if canonical_args.encode("utf-8") != raw_args.encode("utf-8"):
+            raise ValueError("args_json is not canonical JSON")
     except (TypeError, ValueError) as exc:
         raise TranscriptCorruptionError(
             f"invalid args_json for transcript message {message_id!r} at {path}: {exc}"
@@ -364,6 +464,11 @@ def _row_to_item(row: tuple[Any, ...], path: Path) -> TranscriptItem:
     if not isinstance(args, dict):
         raise TranscriptCorruptionError(
             f"invalid args_json object for transcript message {message_id!r} at {path}"
+        )
+    raw_is_error = row[11]
+    if type(raw_is_error) is not int or raw_is_error not in {0, 1}:
+        raise TranscriptCorruptionError(
+            f"invalid is_error for transcript message {message_id!r} at {path}"
         )
     return TranscriptItem(
         message_id=message_id,
@@ -377,7 +482,7 @@ def _row_to_item(row: tuple[Any, ...], path: Path) -> TranscriptItem:
         sequence=int(row[0]),
         name=str(row[9]),
         args=args,
-        is_error=bool(row[11]),
+        is_error=raw_is_error == 1,
         policy_reason=str(row[12]),
         security_event_type=str(row[13]),
     )
@@ -385,6 +490,15 @@ def _row_to_item(row: tuple[Any, ...], path: Path) -> TranscriptItem:
 
 def _reject_json_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON number {value}")
+
+
+def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key {key!r}")
+        result[key] = value
+    return result
 
 
 def _ensure_wal(connection: sqlite3.Connection, path: Path) -> None:

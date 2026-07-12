@@ -3,12 +3,16 @@ from __future__ import annotations
 import json
 import multiprocessing
 import sqlite3
+from copy import deepcopy
 from pathlib import Path
 from queue import Empty
 
 import pytest
 
 from core.coding.persistence.transcript_store import (
+    MAX_ARGS_BYTES,
+    MAX_ARGS_DEPTH,
+    MAX_ARGS_ITEMS,
     TranscriptConflictError,
     TranscriptCorruptionError,
     TranscriptItem,
@@ -350,3 +354,163 @@ def test_jsonl_export_contains_sequence_and_typed_fields(tmp_path):
     assert exported["is_error"] is True
     assert exported["policy_reason"] == "exit status"
     assert exported["security_event_type"] == "tool_error"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"key":1,"key":2}',
+        '{"nested":{"key":1,"key":2}}',
+    ],
+)
+def test_read_rejects_duplicate_json_object_keys_at_every_depth(tmp_path, payload):
+    store = TranscriptStore(tmp_path, "s1")
+    store.append(TranscriptItem(message_id="m1", role="tool", content="ok"))
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("UPDATE transcript SET args_json=?", (payload,))
+
+    with pytest.raises(TranscriptCorruptionError) as exc_info:
+        store.read_all()
+
+    assert str(store.path) in str(exc_info.value)
+    assert "m1" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("payload", "operation"),
+    [
+        ('{ "a": 1}', "read_all"),
+        ('{"z":1,"a":2}', "read_range"),
+        ('{"text":"\\u4f60\\u597d"}', "export"),
+    ],
+)
+def test_all_read_paths_reject_noncanonical_args_json(tmp_path, payload, operation):
+    store = TranscriptStore(tmp_path, "s1")
+    store.append(TranscriptItem(message_id="m1", role="tool", content="ok"))
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("UPDATE transcript SET args_json=?", (payload,))
+
+    with pytest.raises(TranscriptCorruptionError) as exc_info:
+        if operation == "read_all":
+            store.read_all()
+        elif operation == "read_range":
+            store.read_range(1, 1)
+        else:
+            store.export_jsonl()
+
+    assert str(store.path) in str(exc_info.value)
+    assert "m1" in str(exc_info.value)
+
+
+def test_append_requires_an_actual_bool_for_is_error(tmp_path):
+    store = TranscriptStore(tmp_path, "s1")
+
+    with pytest.raises((TypeError, ValueError), match="is_error"):
+        store.append(TranscriptItem(message_id="m1", role="tool", content="x", is_error=1))
+
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute("SELECT count(*) FROM transcript").fetchone() == (0,)
+
+
+def test_read_rejects_non_boolean_sqlite_is_error_value(tmp_path):
+    store = TranscriptStore(tmp_path, "s1")
+    store.append(TranscriptItem(message_id="m1", role="tool", content="ok"))
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("PRAGMA ignore_check_constraints=ON")
+        connection.execute("UPDATE transcript SET is_error=2")
+
+    with pytest.raises(TranscriptCorruptionError) as exc_info:
+        store.read_all()
+
+    assert "is_error" in str(exc_info.value)
+    assert str(store.path) in str(exc_info.value)
+    assert "m1" in str(exc_info.value)
+
+
+def test_transcript_item_takes_a_recursive_immutable_args_snapshot():
+    source = {"nested": {"values": [1, {"ok": True}]}}
+    item = TranscriptItem(message_id="m1", role="tool", content="ok", args=source)
+    source["nested"]["values"][1]["ok"] = False
+    source["nested"]["values"].append(2)
+
+    assert item.args == {"nested": {"values": [1, {"ok": True}]}}
+    assert deepcopy(item.args) is item.args
+    with pytest.raises(TypeError):
+        item.args["new"] = "value"
+    with pytest.raises(TypeError):
+        item.args["nested"]["new"] = "value"
+    with pytest.raises(TypeError):
+        item.args["nested"]["values"].append(2)
+    with pytest.raises(TypeError):
+        item.args["nested"]["values"][1]["ok"] = False
+
+
+def test_args_depth_budget_rejects_without_recursion_error(tmp_path):
+    store = TranscriptStore(tmp_path, "s1")
+    value: object = "leaf"
+    for _ in range(MAX_ARGS_DEPTH + 1):
+        value = {"nested": value}
+
+    with pytest.raises(ValueError, match="depth"):
+        store.append(TranscriptItem(message_id="deep", role="tool", content="x", args=value))
+
+
+def test_args_item_budget_rejects_before_database_write(tmp_path):
+    store = TranscriptStore(tmp_path, "s1")
+    args = {"values": list(range(MAX_ARGS_ITEMS))}
+
+    with pytest.raises(ValueError, match="items"):
+        store.append(TranscriptItem(message_id="many", role="tool", content="x", args=args))
+
+    assert store.read_all() == []
+
+
+def test_args_byte_budget_rejects_before_database_growth(tmp_path):
+    store = TranscriptStore(tmp_path, "s1")
+    before = store.path.stat().st_size
+    args = {"payload": "x" * (5 * 1024 * 1024)}
+
+    with pytest.raises(ValueError, match="bytes"):
+        store.append(TranscriptItem(message_id="huge", role="tool", content="x", args=args))
+
+    assert store.read_all() == []
+    assert store.path.stat().st_size <= before + 4096
+
+
+def test_read_applies_args_budgets_as_corruption(tmp_path):
+    store = TranscriptStore(tmp_path, "s1")
+    store.append(TranscriptItem(message_id="m1", role="tool", content="ok"))
+    oversized = json.dumps({"payload": "x" * (MAX_ARGS_BYTES + 1)}, separators=(",", ":"))
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("UPDATE transcript SET args_json=?", (oversized,))
+
+    with pytest.raises(TranscriptCorruptionError, match="bytes"):
+        store.read_all()
+
+
+def test_read_deep_json_never_leaks_recursion_error(tmp_path):
+    store = TranscriptStore(tmp_path, "s1")
+    store.append(TranscriptItem(message_id="m1", role="tool", content="ok"))
+    payload = '{"nested":' * 2_000 + "null" + "}" * 2_000
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("UPDATE transcript SET args_json=?", (payload,))
+
+    with pytest.raises(TranscriptCorruptionError) as exc_info:
+        store.read_all()
+
+    assert str(store.path) in str(exc_info.value)
+    assert "m1" in str(exc_info.value)
+
+
+def test_duplicate_id_validates_existing_json_before_comparison(tmp_path):
+    store = TranscriptStore(tmp_path, "s1")
+    item = TranscriptItem(message_id="m1", role="tool", content="ok", args={"a": 1})
+    store.append(item)
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("UPDATE transcript SET args_json='{ \"a\": 1}'")
+
+    with pytest.raises(TranscriptCorruptionError) as exc_info:
+        store.append_and_get_sequence(item)
+
+    assert str(store.path) in str(exc_info.value)
+    assert "m1" in str(exc_info.value)
