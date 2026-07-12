@@ -151,10 +151,22 @@ def create_app(
     app.state.coding_model_factory = coding_model_factory or (
         lambda model_id=coding_default_model: create_llm(model_id)
     )
-    app.state.coding_model_catalog = coding_model_catalog or [
-        {"id": "deepseek:deepseek-v4-flash", "label": "DeepSeek V4 Flash", "provider": "deepseek"},
-        {"id": "deepseek:deepseek-v4-pro", "label": "DeepSeek V4 Pro", "provider": "deepseek"},
-    ]
+    app.state.coding_model_catalog = (
+        [
+            {
+                "id": "deepseek:deepseek-v4-flash",
+                "label": "DeepSeek V4 Flash",
+                "provider": "deepseek",
+            },
+            {
+                "id": "deepseek:deepseek-v4-pro",
+                "label": "DeepSeek V4 Pro",
+                "provider": "deepseek",
+            },
+        ]
+        if coding_model_catalog is None
+        else coding_model_catalog
+    )
     app.state.coding_default_model = coding_default_model
     app.state.coding_model_capabilities = (
         coding_model_capabilities

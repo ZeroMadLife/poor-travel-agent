@@ -370,3 +370,24 @@ def test_create_and_resume_reject_models_outside_catalog(
     assert resumed.status_code == 422
     assert resumed.json()["detail"] == "unknown coding model"
     assert constructed is False
+
+
+def test_explicit_empty_model_catalog_stays_empty_and_blocks_session(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        coding_model_factory=Model,
+        coding_model_catalog=[],
+        coding_default_model="model-a",
+        coding_workspace_root=tmp_path,
+        coding_storage_root=tmp_path / ".coding",
+    )
+    client = TestClient(app)
+
+    listed = client.get("/api/v1/coding/models")
+    created = client.post("/api/v1/coding/session", json={})
+
+    assert listed.status_code == 200
+    assert listed.json()["models"] == []
+    assert created.status_code == 422
+    assert created.json()["detail"] == "unknown coding model"
