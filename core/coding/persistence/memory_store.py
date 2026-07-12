@@ -165,11 +165,12 @@ class MemoryStore:
             objects = _schema_objects(db)
             if version == 0:
                 if objects:
-                    raise MemoryStoreError("refusing to initialize non-empty v0 memory database")
-                db.execute(_FACTS_SQL)
-                db.execute(_PROPOSALS_SQL)
-                db.execute(_EVENTS_SQL)
-                db.execute(_EVENT_INDEX_SQL)
+                    _migrate_legacy_v0(db, objects)
+                else:
+                    db.execute(_FACTS_SQL)
+                    db.execute(_PROPOSALS_SQL)
+                    db.execute(_EVENTS_SQL)
+                    db.execute(_EVENT_INDEX_SQL)
                 db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             _validate_schema(db, self.path)
             integrity = db.execute("PRAGMA integrity_check").fetchall()
@@ -177,6 +178,7 @@ class MemoryStore:
                 raise MemoryCorruptionError(f"memory database failed integrity check at {self.path}")
             with suppress(OSError):
                 os.chmod(self.path, 0o600)
+            db.commit()
 
     def _verify_database_and_sidecars(self) -> tuple[int, int]:
         try:
@@ -428,6 +430,29 @@ def _validate_schema(db: sqlite3.Connection, path: Path) -> None:
     event_index = db.execute("PRAGMA index_info(memory_events_proposal_idx)").fetchall()
     if [row[2] for row in event_index] != ["proposal_id", "created_at"]:
         raise MemoryStoreError(f"invalid memory event index at {path}")
+
+
+def _migrate_legacy_v0(db: sqlite3.Connection, objects: list[tuple[str, str, str, str | None]]) -> None:
+    """Migrate the previous three-table schema without accepting unknown objects."""
+    names = {(kind, name) for kind, name, _, _ in objects}
+    allowed = {
+        ("table", "memory_facts"), ("table", "memory_proposals"),
+        ("table", "memory_events"), ("index", "memory_events_proposal_idx"),
+        ("index", "sqlite_autoindex_memory_facts_1"),
+        ("index", "sqlite_autoindex_memory_proposals_1"),
+        ("index", "sqlite_autoindex_memory_events_1"),
+    }
+    if names != allowed:
+        raise MemoryStoreError("unknown objects in legacy memory database")
+    proposal_columns = {row[1] for row in db.execute("PRAGMA table_info(memory_proposals)")}
+    if "projection_status" in proposal_columns:
+        return
+    db.execute("ALTER TABLE memory_proposals RENAME TO memory_proposals_legacy")
+    db.execute("DROP INDEX memory_events_proposal_idx")
+    db.execute(_PROPOSALS_SQL)
+    db.execute("INSERT INTO memory_proposals (proposal_id, workspace_id, candidates_json, status, projection_status, revision, session_id, run_id, reflection_id, base_revision, created_at, updated_at) SELECT proposal_id, workspace_id, candidates_json, status, CASE WHEN status='approved' THEN 'complete' ELSE 'pending' END, revision, session_id, run_id, reflection_id, base_revision, created_at, updated_at FROM memory_proposals_legacy")
+    db.execute("DROP TABLE memory_proposals_legacy")
+    db.execute(_EVENT_INDEX_SQL)
 
 
 def _trusted_root(root: Path) -> Path:

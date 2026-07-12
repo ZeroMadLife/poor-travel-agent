@@ -105,6 +105,28 @@ def test_same_proposal_id_requires_metadata_match(tmp_path: Path) -> None:
         store.create_proposal([MemoryCandidate("same")], proposal_id="p", run_id="r2")
 
 
+def test_legacy_v0_proposal_schema_migrates(tmp_path: Path) -> None:
+    import sqlite3
+
+    root = tmp_path / "storage" / "memory" / "workspace"
+    root.mkdir(parents=True)
+    path = root / "memory.sqlite3"
+    db = sqlite3.connect(path)
+    db.executescript("""
+    CREATE TABLE memory_facts (content_hash TEXT PRIMARY KEY, content TEXT NOT NULL, topic TEXT NOT NULL, source TEXT NOT NULL, source_ref TEXT NOT NULL, created_at TEXT NOT NULL, proposal_id TEXT NOT NULL DEFAULT '');
+    CREATE TABLE memory_proposals (proposal_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, candidates_json TEXT NOT NULL, status TEXT NOT NULL, revision INTEGER NOT NULL, session_id TEXT NOT NULL DEFAULT '', run_id TEXT NOT NULL DEFAULT '', reflection_id TEXT NOT NULL DEFAULT '', base_revision INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE memory_events (event_id TEXT PRIMARY KEY, event_type TEXT NOT NULL, proposal_id TEXT NOT NULL, workspace_id TEXT NOT NULL, session_id TEXT NOT NULL DEFAULT '', run_id TEXT NOT NULL DEFAULT '', reflection_id TEXT NOT NULL DEFAULT '', candidate_count INTEGER NOT NULL, base_revision INTEGER NOT NULL, revision INTEGER NOT NULL, created_at TEXT NOT NULL);
+    CREATE INDEX memory_events_proposal_idx ON memory_events(proposal_id, created_at);
+    PRAGMA user_version=0;
+    """)
+    db.commit()
+    db.close()
+    store = MemoryStore(tmp_path / "storage", "workspace")
+    assert store.path.exists()
+    with sqlite3.connect(store.path) as check:
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 1
+
+
 def test_store_rejects_symlink_in_storage_path(tmp_path: Path) -> None:
     real = tmp_path / "real"
     real.mkdir()
