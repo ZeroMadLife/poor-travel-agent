@@ -44,3 +44,14 @@ def test_cas_idempotency_and_audit_events(tmp_path: Path) -> None:
     events = store.list_events("p")
     assert [e.event_type for e in events] == ["proposal_created", "proposal_approved"]
     assert events[0].candidate_count == 1
+
+
+def test_manager_approval_replay_does_not_duplicate_markdown_projection(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    manager = MemoryManager(tmp_path / "storage", workspace)
+    proposal = manager.create_proposal([MemoryCandidate("once")], proposal_id="once")
+    manager.approve(proposal.proposal_id, 0)
+    first = len(manager.durable.list_facts())
+    manager.approve(proposal.proposal_id, 1)
+    assert len(manager.durable.list_facts()) == first

@@ -92,8 +92,11 @@ class MemoryManager:
         return self.memory_store.list_proposals(status)
 
     def approve(self, proposal_id: str, expected_revision: int = 0) -> MemoryProposal:
+        before = self.memory_store.get_proposal(proposal_id)
         proposal = self.memory_store.approve(proposal_id, expected_revision)
-        if proposal.status == "approved":
+        # Only project a newly approved proposal. Replaying an approval is a
+        # no-op at both SQLite and the Markdown projection layers.
+        if proposal.status == "approved" and before is not None and before.status == "pending":
             facts = [MemoryFact(topic=c.topic, content=c.content, source=c.source,
                                 source_ref=c.source_ref, created_at=c.created_at,
                                 status="proposed") for c in proposal.candidates]
