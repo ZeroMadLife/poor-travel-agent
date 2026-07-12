@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import sqlite3
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +15,10 @@ from core.coding.context import (
     CompactionCheckpoint,
     CompactionResult,
     CompactionSummary,
+    CompactManager,
+    ContextBusyError,
     ContextPolicy,
+    ModelCapabilityRegistry,
     PreparedContext,
 )
 from core.coding.context.budget import ContextUsage
@@ -22,6 +28,7 @@ from core.coding.engine.events import (
     ContextCompactionStartedEvent,
     ContextUsageUpdatedEvent,
 )
+from core.coding.persistence import TranscriptStore
 from core.coding.runtime import CodingRuntime
 
 
@@ -71,6 +78,21 @@ def _checkpoint(compaction_id: str, start: int, end: int) -> CompactionCheckpoin
     )
 
 
+def _bind_checkpoint_to_evidence(
+    checkpoint: CompactionCheckpoint, evidence: list[dict[str, Any]]
+) -> CompactionCheckpoint:
+    evidence_hash = CompactManager._evidence_hash(evidence)
+    summary_hash = CompactManager._summary_hash(
+        checkpoint.previous_summary_hash,
+        evidence_hash,
+        checkpoint.summary.render_for_prompt(),
+    )
+    return replace(
+        checkpoint,
+        evidence_hash=evidence_hash,
+        summary_hash=summary_hash,
+        prefix_hash=CompactManager._prefix_hash([]),
+    )
 class LifecycleController:
     def __init__(self, *, applied: bool) -> None:
         self.lifecycle_sink: Any = None
@@ -303,7 +325,10 @@ def test_resume_restores_only_authenticated_completed_checkpoint(tmp_path: Path)
     )
     for content in ("one", "two", "tail"):
         original._append_canonical_item({"role": "user", "content": content})
-    checkpoint = _checkpoint("compact-resume", 1, 2)
+    checkpoint = _bind_checkpoint_to_evidence(
+        _checkpoint("compact-resume", 1, 2),
+        original.session["history"][:2],
+    )
     projected = [
         {
             "role": "system",
@@ -354,6 +379,31 @@ def test_resume_restores_only_authenticated_completed_checkpoint(tmp_path: Path)
     assert no_key.session["context_state"]["resume_status"] == "disabled_missing_anchor_key"
     assert no_key._active_checkpoint is None
     assert no_key._active_projection == no_key.session["history"]
+
+    with sqlite3.connect(original.transcript_store.path) as connection:
+        connection.execute(
+            "UPDATE transcript SET content = ? WHERE sequence = 1", ("tampered",)
+        )
+    replaced = CodingRuntime.resume(
+        session_id="s-resume-context",
+        model=RecordingModel([]),
+        storage_root=storage,
+        checkpoint_anchor_key=key,
+    )
+    assert replaced.session["context_state"]["resume_status"] == "canonical_fallback"
+    assert replaced._active_checkpoint is None
+
+    with sqlite3.connect(original.transcript_store.path) as connection:
+        connection.execute("UPDATE transcript SET content = ? WHERE sequence = 1", ("one",))
+        connection.execute("DELETE FROM transcript WHERE sequence = 2")
+    truncated = CodingRuntime.resume(
+        session_id="s-resume-context",
+        model=RecordingModel([]),
+        storage_root=storage,
+        checkpoint_anchor_key=key,
+    )
+    assert truncated.session["context_state"]["resume_status"] == "canonical_fallback"
+    assert truncated._active_checkpoint is None
 
 
 @pytest.mark.asyncio
@@ -513,3 +563,135 @@ async def test_manual_compact_rejects_active_run_and_unconfigured_window(
     configured.active_run_id = "run-active"
     with pytest.raises(Exception, match="active run"):
         await configured.manual_compact()
+
+
+@pytest.mark.asyncio
+async def test_manual_compact_mutex_rejects_loser_and_failure_closes_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runtime = CodingRuntime(
+        session_id="s-manual-race",
+        workspace_root=workspace,
+        model=RecordingModel([]),
+        storage_root=tmp_path / ".coding",
+        context_policy=ContextPolicy(
+            context_window_tokens=100_000, output_reserve_tokens=10_000
+        ),
+        checkpoint_anchor_key=b"m" * 32,
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fail_compaction(*args: Any, **kwargs: Any) -> CompactionResult:
+        del args, kwargs
+        entered.set()
+        await release.wait()
+        raise RuntimeError("summarizer-secret")
+
+    assert runtime.context_controller is not None
+    monkeypatch.setattr(runtime.context_controller, "manual_compact", fail_compaction)
+    winner = asyncio.create_task(runtime.manual_compact("first"))
+    await entered.wait()
+
+    with pytest.raises(ContextBusyError, match="context operation"):
+        await runtime.manual_compact("loser")
+    attempts = list(
+        (runtime.compaction_store._root / "evidence" / "s-manual-race" / "compactions").glob(
+            "*.json"
+        )
+    )
+    assert len(attempts) == 1
+
+    release.set()
+    with pytest.raises(RuntimeError, match="manual compaction failed"):
+        await winner
+    attempt = runtime.compaction_store.load_latest_attempt("s-manual-race")
+    assert attempt is not None and attempt["status"] == "failed"
+    assert "summarizer-secret" not in json.dumps(attempt)
+    assert runtime._context_operation_lock.locked() is False
+
+
+def test_switch_model_rebuilds_or_disables_context_controller(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelCapabilityRegistry(
+        {
+            "model-a": {"context_window_tokens": 100_000, "output_reserve_tokens": 10_000},
+            "model-b": {"context_window_tokens": 200_000, "output_reserve_tokens": 20_000},
+        }
+    )
+    model_a = RecordingModel([])
+    runtime = CodingRuntime(
+        session_id="s-switch-context",
+        workspace_root=workspace,
+        model=model_a,
+        storage_root=tmp_path / ".coding",
+        model_capabilities=registry,
+    )
+    assert runtime.context_controller is None
+
+    model_b = RecordingModel([])
+    runtime.switch_model("model-b", lambda: model_b)
+    assert runtime.context_policy is not None
+    assert runtime.context_policy.context_window_tokens == 200_000
+    assert runtime.context_controller is not None
+    assert runtime.context_controller.counter.model is model_b
+    assert runtime.context_controller.compactor.summarizer.model is model_b
+
+    runtime.switch_model("unknown", lambda: RecordingModel([]))
+    assert runtime.context_policy is None
+    assert runtime.context_controller is None
+
+    replacement_a = RecordingModel([])
+    runtime.switch_model("model-a", lambda: replacement_a)
+    assert runtime.context_policy is not None
+    assert runtime.context_policy.context_window_tokens == 100_000
+    assert runtime.context_controller is not None
+    assert runtime.context_controller.counter.model is replacement_a
+
+
+def test_legacy_backfill_failure_is_atomic_and_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    storage = tmp_path / ".coding"
+    state = {
+        "id": "s-backfill-atomic",
+        "workspace_root": str(workspace),
+        "history": [
+            {"role": "user", "content": "one"},
+            {"role": "assistant", "content": "two"},
+        ],
+    }
+    original = TranscriptStore.append_many
+
+    def fail_backfill(self: TranscriptStore, items: Any) -> list[int]:
+        del self, items
+        raise OSError("sqlite unavailable")
+
+    monkeypatch.setattr(TranscriptStore, "append_many", fail_backfill)
+    with pytest.raises(OSError, match="sqlite unavailable"):
+        CodingRuntime(
+            session_id="s-backfill-atomic",
+            workspace_root=workspace,
+            model=RecordingModel([]),
+            storage_root=storage,
+            session_state=state,
+        )
+    assert state["history"] == [
+        {"role": "user", "content": "one"},
+        {"role": "assistant", "content": "two"},
+    ]
+
+    monkeypatch.setattr(TranscriptStore, "append_many", original)
+    retried = CodingRuntime(
+        session_id="s-backfill-atomic",
+        workspace_root=workspace,
+        model=RecordingModel([]),
+        storage_root=storage,
+        session_state=state,
+    )
+    assert [item.content for item in retried.transcript_store.read_all()] == ["one", "two"]
