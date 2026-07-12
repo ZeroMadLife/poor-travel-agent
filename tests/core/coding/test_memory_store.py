@@ -55,3 +55,23 @@ def test_manager_approval_replay_does_not_duplicate_markdown_projection(tmp_path
     first = len(manager.durable.list_facts())
     manager.approve(proposal.proposal_id, 1)
     assert len(manager.durable.list_facts()) == first
+
+
+def test_projection_failure_is_replayed_after_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    manager = MemoryManager(tmp_path / "storage", workspace)
+    proposal = manager.create_proposal([MemoryCandidate("recover")], proposal_id="recover")
+    original = manager.durable.approve_dream
+    monkeypatch.setattr(manager.durable, "approve_dream", lambda facts: (_ for _ in ()).throw(OSError("disk")))
+    with pytest.raises(OSError):
+        manager.approve(proposal.proposal_id, 0)
+    reopened = MemoryManager(tmp_path / "storage", workspace)
+    assert [f.content for f in reopened.durable.list_facts()] == ["recover"]
+    monkeypatch.setattr(manager.durable, "approve_dream", original)
+
+
+@pytest.mark.parametrize("bad", [".", "..", "a/b", "a\\b", "", " space"])
+def test_store_rejects_unsafe_workspace_ids(tmp_path: Path, bad: str) -> None:
+    with pytest.raises(ValueError):
+        MemoryStore(tmp_path / "storage", bad)
