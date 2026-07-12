@@ -1,5 +1,6 @@
 """Context, prompt-budget, and workspace public API."""
 
+from core.coding.context.budget import ContextPolicy, ContextUsage, TokenCounter
 from core.coding.context.compact import (
     CheckpointVerifier,
     CompactionBusyError,
@@ -62,7 +63,9 @@ __all__ = [
     "ContextLevel",
     "ContextLifecycleSinkError",
     "ContextManager",
+    "ContextPolicy",
     "ContextProjector",
+    "ContextUsage",
     "FileChange",
     "FileSnapshot",
     "ModelCapabilityRegistry",
@@ -70,6 +73,7 @@ __all__ = [
     "SectionRender",
     "StructuredSummarizer",
     "Summarizer",
+    "TokenCounter",
     "WorkspaceContext",
     "WorkspaceDiff",
     "WorkspaceDiffTracker",

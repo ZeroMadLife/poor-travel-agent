@@ -46,7 +46,8 @@ class LifecycleSink:
     def __init__(self) -> None:
         self.events: list[Any] = []
 
-    async def __call__(self, event: Any) -> None:
+    async def __call__(self, event: Any, result: CompactionResult | None) -> None:
+        del result
         self.events.append(event)
 
 
@@ -156,12 +157,17 @@ async def test_started_sink_runs_before_compactor_and_terminal_sink_after_result
             order.append("compactor")
             return await super().compact(history, **kwargs)
 
-    async def sink(event: Any) -> None:
+    async def sink(event: Any, result: CompactionResult | None) -> None:
+        if event.type == "context_compaction_started":
+            assert result is None
+        else:
+            assert result is compactor.result
         order.append(event.type)
 
+    compactor = OrderedCompactor(_result(history))
     controller = ContextController(
         session_id="s1", policy=_policy(), counter=LengthCounter(),
-        projector=ContextProjector(), compactor=OrderedCompactor(_result(history)),
+        projector=ContextProjector(), compactor=compactor,
         renderer=RecordingRenderer(), lifecycle_sink=sink,
     )
 
@@ -175,7 +181,8 @@ async def test_started_sink_failure_is_fail_closed_before_compactor() -> None:
     history = [{"role": "user", "content": "x" * 180}]
     compactor = RecordingCompactor(_result(history))
 
-    async def broken_sink(event: Any) -> None:
+    async def broken_sink(event: Any, result: CompactionResult | None) -> None:
+        del event, result
         raise OSError("database secret")
 
     controller = ContextController(
@@ -195,7 +202,8 @@ async def test_terminal_sink_failure_surfaces_after_compaction() -> None:
     compactor = RecordingCompactor(_result(history))
     calls = 0
 
-    async def broken_terminal_sink(event: Any) -> None:
+    async def broken_terminal_sink(event: Any, result: CompactionResult | None) -> None:
+        del event, result
         nonlocal calls
         calls += 1
         if calls == 2:

@@ -836,9 +836,10 @@ def test_coding_websocket_slash_command_persists_original_text(tmp_path: Path) -
     # History stores the original slash command text, not the expanded prompt.
     history = runtime.session["history"]
     user_messages = [item for item in history if item.get("role") == "user"]
-    assert user_messages == [
-        {"role": "user", "content": "/review", "created_at": user_messages[0]["created_at"]}
-    ]
+    assert len(user_messages) == 1
+    assert user_messages[0]["content"] == "/review"
+    assert user_messages[0]["message_id"]
+    assert user_messages[0]["sequence"] == 1
     # The expanded review prompt (git diff instructions) is never persisted to history.
     assert all("git diff" not in str(item.get("content", "")) for item in history)
 

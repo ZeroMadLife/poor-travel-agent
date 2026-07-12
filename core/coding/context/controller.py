@@ -32,7 +32,7 @@ class ContextLifecycleSinkError(RuntimeError):
 
 Renderer = Callable[[list[dict[str, Any]], str], str]
 HistoryProvider = Callable[[], list[dict[str, Any]]]
-LifecycleSink = Callable[[RunEventBase], Awaitable[None]]
+LifecycleSink = Callable[[RunEventBase, CompactionResult | None], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -124,7 +124,7 @@ class ContextController:
                     before_tokens=usage.used_tokens,
                 )
             events.append(started)
-            await self._deliver_lifecycle(started)
+            await self._deliver_lifecycle(started, None)
             result = await self.compactor.compact(
                 history=original,
                 session_id=self.session_id,
@@ -155,7 +155,7 @@ class ContextController:
                         retryable=result.retryable,
                     )
             events.append(terminal)
-            await self._deliver_lifecycle(terminal)
+            await self._deliver_lifecycle(terminal, result)
         self.last_usage = usage
         events.append(self._usage_event(usage, run_id))
         return PreparedContext.create(
@@ -239,11 +239,13 @@ class ContextController:
             compactable=True,
         )
 
-    async def _deliver_lifecycle(self, event: RunEventBase) -> None:
+    async def _deliver_lifecycle(
+        self, event: RunEventBase, result: CompactionResult | None
+    ) -> None:
         if self.lifecycle_sink is None:
             return
         try:
-            await self.lifecycle_sink(event)
+            await self.lifecycle_sink(event, result)
         except asyncio.CancelledError:
             raise
         except Exception:
