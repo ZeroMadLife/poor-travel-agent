@@ -236,6 +236,44 @@ class SessionEventJournal:
                 connection.rollback()
                 raise
 
+    def begin_run(self, run_id: str) -> SessionEvent:
+        """Acquire the singleton lease and persist run_started atomically."""
+        validated_run = _validate_identifier("run_id", run_id)
+        acquired_at = datetime.now(UTC).isoformat()
+        values = _validated_event_input(
+            run_id=validated_run,
+            kind="system",
+            status="running",
+            payload={"event": "run_started"},
+            event_id=None,
+            timestamp=acquired_at,
+        )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                lease = connection.execute(
+                    "SELECT run_id FROM active_run_lease WHERE lease_key = 1"
+                ).fetchone()
+                if lease is not None:
+                    raise SessionRunLeaseConflictError(str(lease[0]))
+                terminal = connection.execute(
+                    "SELECT 1 FROM session_events WHERE run_id = ? AND kind = 'terminal'",
+                    (validated_run,),
+                ).fetchone()
+                if terminal is not None:
+                    raise SessionEventJournalError(f"run {validated_run} is already terminal")
+                connection.execute(
+                    "INSERT INTO active_run_lease (lease_key, run_id, acquired_at) "
+                    "VALUES (1, ?, ?)",
+                    (validated_run, acquired_at),
+                )
+                stored = self._insert(connection, **values)
+                connection.commit()
+                return stored
+            except Exception:
+                connection.rollback()
+                raise
+
     def release_run_lease(self, run_id: str) -> bool:
         """Release a matching lease, used when startup fails before task ownership."""
         validated_run = _validate_identifier("run_id", run_id)

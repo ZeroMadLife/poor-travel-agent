@@ -114,6 +114,42 @@ async def test_multiple_coordinators_share_one_persistent_run_lease(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_cancel_during_begin_run_closes_committed_lease_before_propagating(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    journal = SessionEventJournal(tmp_path, "session-1")
+    coordinator = RunCoordinator(journal)
+    begin_started = threading.Event()
+    allow_begin = threading.Event()
+    original_begin = journal.begin_run
+
+    def blocked_begin(run_id: str):
+        begin_started.set()
+        assert allow_begin.wait(timeout=2)
+        return original_begin(run_id)
+
+    monkeypatch.setattr(journal, "begin_run", blocked_begin)
+    start_task = asyncio.create_task(coordinator.start_run("run-1", _events()))
+    assert await asyncio.to_thread(begin_started.wait, 1)
+    start_task.cancel()
+    await asyncio.sleep(0.05)
+    assert not start_task.done()
+    allow_begin.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await start_task
+
+    assert journal.active_run_id() is None
+    events = journal.replay(after=0, limit=20).items
+    assert [(item.kind, item.status) for item in events] == [
+        ("system", "running"),
+        ("terminal", "cancelled"),
+    ]
+    next_task = await coordinator.start_run("run-2", _events())
+    await next_task
+
+
+@pytest.mark.asyncio
 async def test_cancel_token_cancels_task_and_persists_one_terminal(tmp_path: Path) -> None:
     coordinator = RunCoordinator(SessionEventJournal(tmp_path, "session-1"))
     entered = asyncio.Event()

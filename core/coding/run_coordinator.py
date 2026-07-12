@@ -60,26 +60,40 @@ class RunCoordinator:
                 raise ActiveRunConflictError(
                     f"session already has active run {self._active_run_id}"
                 )
+            begin_task = asyncio.create_task(self._begin_run(run_id))
             try:
-                await asyncio.to_thread(self.journal.acquire_run_lease, run_id)
+                await asyncio.shield(begin_task)
+            except asyncio.CancelledError:
+                try:
+                    await begin_task
+                except Exception:
+                    pass
+                else:
+                    await asyncio.shield(
+                        self._persist(
+                            run_id=run_id,
+                            event=RunEvent(
+                                kind="terminal",
+                                status="cancelled",
+                                payload={"event": "run_cancelled"},
+                            ),
+                        )
+                    )
+                raise
             except SessionRunLeaseConflictError as exc:
                 raise ActiveRunConflictError(str(exc)) from exc
-            try:
-                await self._persist(
-                    run_id=run_id,
-                    event=RunEvent(
-                        kind="system", status="running", payload={"event": "run_started"}
-                    ),
-                )
-            except BaseException:
-                await asyncio.to_thread(self.journal.release_run_lease, run_id)
-                raise
             self._active_run_id = run_id
             task = asyncio.create_task(
                 self._consume(run_id, event_stream), name=f"sage-run-{run_id}"
             )
             self._active_task = task
             return task
+
+    async def _begin_run(self, run_id: str) -> SessionEvent:
+        async with self._publish_lock:
+            stored = await asyncio.to_thread(self.journal.begin_run, run_id)
+            self._broadcast(stored)
+            return stored
 
     async def cancel(self, run_id: str) -> bool:
         """Cancel the matching active task; subscribers are unaffected."""
