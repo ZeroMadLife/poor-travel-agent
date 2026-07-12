@@ -151,6 +151,13 @@ def _history(turns: int = 6, *, verbose: bool = True) -> list[dict[str, Any]]:
     return history
 
 
+def _sequenced_history(start: int = 0) -> list[dict[str, Any]]:
+    history = _history()
+    for sequence, item in enumerate(history, start=start):
+        item["sequence"] = sequence
+    return history
+
+
 def _summary(
     source_range: tuple[int, int],
     *,
@@ -423,20 +430,27 @@ async def test_previous_checkpoint_metadata_must_match_its_summary_range() -> No
 
 
 async def test_system_prefix_is_preserved_and_old_summary_is_removed() -> None:
-    prefix = {"role": "system", "content": "project safety policy", "marker": 7}
+    prefix = {
+        "role": "system",
+        "content": "project safety policy",
+        "marker": 7,
+        "sequence": 40,
+    }
     stale = {"role": "system", "kind": "compact_summary", "content": "stale"}
-    history: list[dict[str, Any]] = [prefix, stale, *_history()]
-    summarizer = QueueSummarizer(_summary((1, 9)))
+    history: list[dict[str, Any]] = [prefix, stale, *_sequenced_history(45)]
+    summarizer = QueueSummarizer(_summary((45, 53)))
 
-    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
-        session_id="test", history=history
-    )
+    result = await CompactManager(
+        summarizer=summarizer,
+        policy=_policy(),
+        checkpoint_verifier=_trusted_checkpoint,
+    ).compact(session_id="test", history=history, previous_checkpoint=_checkpoint())
 
     assert result.applied is True
     assert result.projected_history[0] == prefix
     assert result.projected_history[1]["kind"] == "compact_summary"
     assert all(item.get("content") != "stale" for item in result.projected_history)
-    assert summarizer.calls[0]["archived_history"] == _history()[:9]
+    assert summarizer.calls[0]["archived_history"] == _sequenced_history(45)[:9]
 
 
 async def test_previous_summary_and_checkpoint_summary_are_deep_copies() -> None:
@@ -448,7 +462,11 @@ async def test_previous_summary_and_checkpoint_summary_are_deep_copies() -> None
         summarizer=summarizer,
         policy=_policy(),
         checkpoint_verifier=_trusted_checkpoint,
-    ).compact(session_id="test", history=_history(), previous_checkpoint=previous)
+    ).compact(
+        session_id="test",
+        history=_sequenced_history(45),
+        previous_checkpoint=previous,
+    )
 
     assert result.applied is True
     assert summarizer.calls[0]["previous_summary"] == previous.summary
@@ -590,7 +608,9 @@ async def test_checkpoint_hash_chain_binds_prior_evidence_and_summary() -> None:
     )
 
     second = await second_manager.compact(
-        session_id="test", history=_history(), previous_checkpoint=first.checkpoint
+        session_id="test",
+        history=_sequenced_history(9),
+        previous_checkpoint=first.checkpoint,
     )
 
     assert second.applied is True
@@ -656,16 +676,23 @@ async def test_explicit_range_maps_full_source_history_to_archived_span() -> Non
 
 async def test_old_summary_does_not_consume_canonical_range_position() -> None:
     stale = {"role": "system", "kind": "compact_summary", "content": "stale"}
-    history = [stale, *_history()]
-    summarizer = QueueSummarizer(_summary((100, 108)))
+    history = [stale, *_sequenced_history(45)]
+    summarizer = QueueSummarizer(_summary((45, 53)))
 
-    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
-        session_id="test", history=history, transcript_range=(100, 117)
+    result = await CompactManager(
+        summarizer=summarizer,
+        policy=_policy(),
+        checkpoint_verifier=_trusted_checkpoint,
+    ).compact(
+        session_id="test",
+        history=history,
+        transcript_range=(45, 62),
+        previous_checkpoint=_checkpoint(),
     )
 
     assert result.applied is True
     assert result.checkpoint is not None
-    assert result.checkpoint.transcript_start == 100
+    assert result.checkpoint.transcript_start == 45
 
 
 async def test_explicit_range_cross_checks_item_sequences() -> None:
@@ -757,34 +784,156 @@ async def test_denied_tool_run_id_is_not_source_evidence() -> None:
     assert result.reason == "summary_quality_invalid"
 
 
-async def test_mid_history_system_item_is_protected_not_archived() -> None:
+async def test_mid_history_system_item_fails_closed() -> None:
     protected = {"role": "system", "content": "mid-session safety", "marker": 9}
     history = _history()
     history.insert(4, protected)
-    summarizer = QueueSummarizer(_summary((0, 9)))
+    summarizer = QueueSummarizer(_summary((0, 8)))
 
     result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
         session_id="test", history=history
     )
 
-    assert result.applied is True
-    assert protected in result.projected_history
-    assert protected not in summarizer.calls[0]["archived_history"]
+    assert result.applied is False
+    assert result.reason == "unsupported_control_layout"
+    assert result.projected_history == history
+    assert summarizer.calls == []
 
 
-async def test_unsupported_control_role_is_protected() -> None:
+async def test_mid_history_control_role_fails_closed_without_reordering() -> None:
     protected = {"role": "control", "content": "approval boundary"}
     history = _history()
     history.insert(4, protected)
-    summarizer = QueueSummarizer(_summary((0, 9)))
+    summarizer = QueueSummarizer(_summary((0, 8)))
+
+    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
+        session_id="test", history=history
+    )
+
+    assert result.applied is False
+    assert result.reason == "unsupported_control_layout"
+    assert result.projected_history == history
+    assert result.projected_history[4] == protected
+    assert summarizer.calls == []
+
+
+async def test_success_event_with_empty_policy_fields_is_valid_evidence() -> None:
+    history = _history()
+    history[1].update(policy_reason=None, security_event_type="")
+    summary = CompactionSummary(
+        goal="finish",
+        files_read=("src/file-0.py",),
+        source_transcript_range=(0, 8),
+    )
+
+    result = await CompactManager(summarizer=QueueSummarizer(summary), policy=_policy()).compact(
+        session_id="test", history=history
+    )
+
+    assert result.applied is True
+
+
+async def test_archived_user_run_id_is_source_evidence() -> None:
+    history = _history()
+    history[0]["run_id"] = "user-only-run"
+    summary = _summary((0, 8), source_run_ids=["user-only-run"])
+
+    result = await CompactManager(summarizer=QueueSummarizer(summary), policy=_policy()).compact(
+        session_id="test", history=history
+    )
+
+    assert result.applied is True
+
+
+async def test_old_system_summary_without_trusted_checkpoint_is_not_removed() -> None:
+    stale = {"role": "system", "kind": "compact_summary", "content": "stale"}
+    history = [stale, *_history()]
+    summarizer = QueueSummarizer(_summary((0, 8)))
+
+    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
+        session_id="test", history=history
+    )
+
+    assert result.applied is False
+    assert result.reason == "invalid_previous_checkpoint"
+    assert result.projected_history == history
+    assert summarizer.calls == []
+
+
+async def test_old_summary_trust_check_precedes_insufficient_history() -> None:
+    stale = {"role": "system", "kind": "compact_summary", "content": "stale"}
+    history = [stale, *_history(turns=2)]
+    summarizer = QueueSummarizer(_summary((0, 1)))
+
+    result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
+        session_id="test", history=history
+    )
+
+    assert result.reason == "invalid_previous_checkpoint"
+    assert result.projected_history == history
+    assert summarizer.calls == []
+
+
+async def test_user_item_with_compact_summary_kind_is_canonical() -> None:
+    history = _history()
+    history[0]["kind"] = "compact_summary"
+    summarizer = QueueSummarizer(_summary((0, 8)))
 
     result = await CompactManager(summarizer=summarizer, policy=_policy()).compact(
         session_id="test", history=history
     )
 
     assert result.applied is True
-    assert protected in result.projected_history
-    assert protected not in summarizer.calls[0]["archived_history"]
+    assert history[0] in summarizer.calls[0]["archived_history"]
+
+
+async def test_previous_checkpoint_without_sequences_fails_closed() -> None:
+    summarizer = QueueSummarizer(_summary((45, 53)))
+    manager = CompactManager(
+        summarizer=summarizer,
+        policy=_policy(),
+        checkpoint_verifier=_trusted_checkpoint,
+    )
+
+    result = await manager.compact(
+        session_id="test", history=_history(), previous_checkpoint=_checkpoint()
+    )
+
+    assert result.reason == "missing_transcript_sequence"
+    assert summarizer.calls == []
+
+
+async def test_verified_repeated_compaction_uses_real_sequences() -> None:
+    first_history = _history()
+    for sequence, item in enumerate(first_history):
+        item["sequence"] = sequence
+    first = await CompactManager(
+        summarizer=QueueSummarizer(_summary((0, 8))), policy=_policy()
+    ).compact(session_id="test", history=first_history)
+    assert first.checkpoint is not None
+
+    prefix = {"role": "system", "content": "stable", "sequence": 0}
+    stale = {"role": "system", "kind": "compact_summary", "content": "old"}
+    second_history = _history()
+    for sequence, item in enumerate(second_history, start=9):
+        item["sequence"] = sequence
+    second_history = [prefix, stale, *second_history]
+    second = await CompactManager(
+        summarizer=QueueSummarizer(_summary((9, 17))),
+        policy=_policy(),
+        checkpoint_verifier=_trusted_checkpoint,
+    ).compact(
+        session_id="test",
+        history=second_history,
+        previous_checkpoint=first.checkpoint,
+    )
+
+    assert second.applied is True
+    assert second.checkpoint is not None
+    assert (second.checkpoint.transcript_start, second.checkpoint.transcript_end) == (
+        9,
+        17,
+    )
 
 
 async def test_callback_cancellation_is_best_effort_after_commit() -> None:
@@ -857,7 +1006,7 @@ async def test_compactor_updates_previous_summary_iteratively() -> None:
         checkpoint_verifier=_trusted_checkpoint,
     ).compact(
         session_id="test",
-        history=_history(),
+        history=_sequenced_history(45),
         previous_checkpoint=previous,
         transcript_range=(45, 62),
     )
@@ -873,7 +1022,7 @@ async def test_compactor_updates_previous_summary_iteratively() -> None:
 async def test_invalid_summary_keeps_previous_checkpoint() -> None:
     previous = _checkpoint()
     summarizer = QueueSummarizer(_summary((900, 999)), _summary((900, 999)))
-    history = _history()
+    history = _sequenced_history(45)
 
     result = await CompactManager(
         summarizer=summarizer,
@@ -913,7 +1062,7 @@ async def test_summary_missing_todo_id_is_repaired_once() -> None:
 
 async def test_summary_failure_preserves_original_context() -> None:
     previous = _checkpoint()
-    history = _history()
+    history = _sequenced_history(45)
     summarizer = QueueSummarizer(RuntimeError("provider unavailable"))
 
     result = await CompactManager(

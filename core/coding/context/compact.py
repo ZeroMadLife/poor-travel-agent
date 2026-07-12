@@ -186,7 +186,10 @@ class CompactManager:
                 )
 
         try:
-            protected, archived, tail, canonical = self._split_history(original)
+            prefix, archived, tail, canonical, has_old_summary = self._split_history(original)
+            previous_summary = self._validated_previous_summary(previous_checkpoint, session_id)
+            if has_old_summary and previous_checkpoint is None:
+                raise ValueError("invalid_previous_checkpoint")
             if not archived:
                 return self._unchanged(
                     original,
@@ -197,9 +200,12 @@ class CompactManager:
                     trigger,
                 )
             archived_range = self._resolve_transcript_range(
-                archived, canonical, transcript_range, previous_checkpoint
+                prefix,
+                archived,
+                canonical,
+                transcript_range,
+                previous_checkpoint,
             )
-            previous_summary = self._validated_previous_summary(previous_checkpoint, session_id)
             evidence_hash = self._evidence_hash(archived)
             max_tokens = max(
                 1,
@@ -232,7 +238,7 @@ class CompactManager:
                 "content": rendered_summary,
                 "created_at": now(),
             }
-            projected = [*deepcopy(protected), summary_item, *deepcopy(tail)]
+            projected = [*deepcopy(prefix), summary_item, *deepcopy(tail)]
             after_tokens = self._count_history(projected)
             savings_ratio = (before_tokens - after_tokens) / before_tokens
             if savings_ratio < self.compaction_policy.minimum_savings_ratio:
@@ -285,6 +291,8 @@ class CompactManager:
                 "invalid_transcript_range",
                 "non_contiguous_transcript_range",
                 "invalid_previous_checkpoint",
+                "missing_transcript_sequence",
+                "unsupported_control_layout",
             }
             reason = str(exc) if known_reason else "compaction_failed"
             value_error_cooldown: float | None = (
@@ -362,22 +370,42 @@ class CompactManager:
         list[dict[str, Any]],
         list[dict[str, Any]],
         list[dict[str, Any]],
+        bool,
     ]:
-        filtered = [item for item in history if item.get("kind") != "compact_summary"]
-        turns: list[list[dict[str, Any]]] = []
-        protected: list[dict[str, Any]] = []
-        current: list[dict[str, Any]] | None = None
-        for item in filtered:
+        prefix: list[dict[str, Any]] = []
+        active: list[dict[str, Any]] = []
+        seen_user = False
+        has_old_summary = False
+        supported_roles = {"user", "assistant", "tool"}
+        for item in history:
             role = item.get("role")
-            if role == "system" or role not in {"user", "assistant", "tool"}:
-                protected.append(item)
-            elif role == "user":
+            is_old_summary = role == "system" and item.get("kind") == "compact_summary"
+            if not seen_user:
+                if is_old_summary:
+                    has_old_summary = True
+                elif role == "user":
+                    seen_user = True
+                    active.append(item)
+                elif role == "system" or role not in supported_roles:
+                    prefix.append(item)
+                else:
+                    raise ValueError("unsupported_control_layout")
+                continue
+            if role == "system" or role not in supported_roles:
+                raise ValueError("unsupported_control_layout")
+            active.append(item)
+
+        turns: list[list[dict[str, Any]]] = []
+        current: list[dict[str, Any]] | None = None
+        for item in active:
+            role = item.get("role")
+            if role == "user":
                 if current is not None:
                     turns.append(current)
                 current = [item]
-            elif current is None:
-                protected.append(item)
             else:
+                if current is None:
+                    raise ValueError("unsupported_control_layout")
                 current.append(item)
         if current is not None:
             turns.append(current)
@@ -396,14 +424,16 @@ class CompactManager:
         archived_turns = turns[:-keep] if keep else turns
         tail_turns = turns[-keep:] if keep else []
         return (
-            protected,
+            prefix,
             [item for turn in archived_turns for item in turn],
             [item for turn in tail_turns for item in turn],
-            filtered,
+            active,
+            has_old_summary,
         )
 
     @staticmethod
     def _resolve_transcript_range(
+        prefix: list[dict[str, Any]],
         archived: list[dict[str, Any]],
         canonical: list[dict[str, Any]],
         supplied: tuple[int, int] | None,
@@ -411,6 +441,19 @@ class CompactManager:
     ) -> tuple[int, int]:
         positions = {id(item): index for index, item in enumerate(canonical)}
         archived_positions = [positions[id(item)] for item in archived]
+        if archived_positions != list(range(archived_positions[0], archived_positions[-1] + 1)):
+            raise ValueError("non_contiguous_transcript_range")
+        if previous is not None:
+            sequenced_items = [*prefix, *canonical]
+            if not all(
+                isinstance(item.get("sequence"), int) and not isinstance(item.get("sequence"), bool)
+                for item in sequenced_items
+            ):
+                raise ValueError("missing_transcript_sequence")
+            if any(int(item["sequence"]) < 0 for item in sequenced_items):
+                raise ValueError("invalid_transcript_range")
+            if any(int(item["sequence"]) > previous.transcript_end for item in prefix):
+                raise ValueError("non_contiguous_transcript_range")
         if supplied is not None:
             if (
                 len(supplied) != 2
@@ -457,7 +500,10 @@ class CompactManager:
                 mapped = [source_start + index for index in range(len(canonical))]
         if previous is not None and source_start != previous.transcript_end + 1:
             raise ValueError("non_contiguous_transcript_range")
-        return (mapped[archived_positions[0]], mapped[archived_positions[-1]])
+        resolved = (mapped[archived_positions[0]], mapped[archived_positions[-1]])
+        if resolved[1] - resolved[0] + 1 != len(archived):
+            raise ValueError("non_contiguous_transcript_range")
+        return resolved
 
     def _validated_previous_summary(
         self, checkpoint: CompactionCheckpoint | None, session_id: str
@@ -497,9 +543,9 @@ class CompactManager:
             return False
         if item.get("is_error") or item.get("ok") is False:
             return False
-        if "policy_reason" in item:
+        if item.get("policy_reason") not in (None, ""):
             return False
-        return "security_event_type" not in item
+        return item.get("security_event_type") in (None, "")
 
     @staticmethod
     def _normalize_path(value: str) -> str:
@@ -521,9 +567,12 @@ class CompactManager:
         artifacts: set[str] = set()
         run_ids: set[str] = set()
         for item in archived:
+            role = item.get("role")
+            run_id = item.get("run_id")
+            if role in {"user", "assistant"} and isinstance(run_id, str):
+                run_ids.add(run_id)
             if not cls._successful_tool(item):
                 continue
-            run_id = item.get("run_id")
             if isinstance(run_id, str):
                 run_ids.add(run_id)
             raw_args = item.get("args")
