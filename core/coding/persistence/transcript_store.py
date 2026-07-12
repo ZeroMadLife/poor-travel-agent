@@ -8,10 +8,11 @@ import os
 import sqlite3
 import stat
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from core.coding.persistence.atomic_export import EXPORT_NAME, publish_jsonl
@@ -58,45 +59,85 @@ class TranscriptConflictError(TranscriptStoreError):
     """Raised when a message id is reused for different canonical evidence."""
 
 
-class FrozenDict(dict[str, Any]):
-    """A recursively frozen dict that remains JSON/dict compatible."""
+class FrozenMapping(Mapping[str, Any]):
+    """Read-only mapping backed by a private mapping proxy."""
 
-    def _immutable(self, *args: Any, **kwargs: Any) -> None:
+    __data: Mapping[str, Any]
+    __slots__ = ("__data",)
+
+    def __init__(self, values: Mapping[str, Any]) -> None:
+        try:
+            object.__getattribute__(self, "_FrozenMapping__data")
+        except AttributeError:
+            object.__setattr__(self, "_FrozenMapping__data", MappingProxyType(dict(values)))
+            return
         raise TypeError("transcript args are immutable")
 
-    __setitem__ = _immutable
-    __delitem__ = _immutable
-    clear = _immutable
-    pop = _immutable  # type: ignore[assignment]
-    popitem = _immutable  # type: ignore[assignment]
-    setdefault = _immutable  # type: ignore[assignment]
-    update = _immutable  # type: ignore[assignment]
-    __ior__ = _immutable  # type: ignore[assignment]
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise TypeError("transcript args are immutable")
 
-    def __deepcopy__(self, memo: dict[int, Any]) -> FrozenDict:
+    def __delattr__(self, name: str) -> None:
+        raise TypeError("transcript args are immutable")
+
+    def __getitem__(self, key: str) -> Any:
+        return self.__data[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.__data)
+
+    def __len__(self) -> int:
+        return len(self.__data)
+
+    def __repr__(self) -> str:
+        return repr(dict(self.__data))
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Mapping):
+            return False
+        return dict(self.__data) == dict(other.items())
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> FrozenMapping:
         return self
 
 
-class FrozenList(list[Any]):
-    """A recursively frozen list that remains JSON/list compatible."""
+class FrozenSequence(Sequence[Any]):
+    """Read-only sequence backed by a private tuple."""
 
-    def _immutable(self, *args: Any, **kwargs: Any) -> None:
+    __data: tuple[Any, ...]
+    __slots__ = ("__data",)
+
+    def __init__(self, values: Sequence[Any]) -> None:
+        try:
+            object.__getattribute__(self, "_FrozenSequence__data")
+        except AttributeError:
+            object.__setattr__(self, "_FrozenSequence__data", tuple(values))
+            return
         raise TypeError("transcript args are immutable")
 
-    __setitem__ = _immutable  # type: ignore[assignment]
-    __delitem__ = _immutable
-    __iadd__ = _immutable  # type: ignore[assignment]
-    __imul__ = _immutable  # type: ignore[assignment]
-    append = _immutable
-    clear = _immutable
-    extend = _immutable
-    insert = _immutable
-    pop = _immutable
-    remove = _immutable
-    reverse = _immutable
-    sort = _immutable  # type: ignore[assignment]
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise TypeError("transcript args are immutable")
 
-    def __deepcopy__(self, memo: dict[int, Any]) -> FrozenList:
+    def __delattr__(self, name: str) -> None:
+        raise TypeError("transcript args are immutable")
+
+    def __getitem__(self, index: int | slice) -> Any:
+        return self.__data[index]
+
+    def __len__(self) -> int:
+        return len(self.__data)
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self.__data)
+
+    def __repr__(self) -> str:
+        return repr(list(self.__data))
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Sequence) or isinstance(other, str | bytes | bytearray):
+            return False
+        return list(self.__data) == list(other)
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> FrozenSequence:
         return self
 
 
@@ -114,7 +155,7 @@ class TranscriptItem:
     created_at: str = ""
     sequence: int = field(default=0, compare=False)
     name: str = ""
-    args: dict[str, Any] = field(default_factory=dict)
+    args: Mapping[str, Any] = field(default_factory=dict)
     is_error: bool = False
     policy_reason: str = ""
     security_event_type: str = ""
@@ -254,7 +295,8 @@ class TranscriptStore:
             raise
 
         return "".join(
-            json.dumps(asdict(item), ensure_ascii=False, sort_keys=True) + "\n" for item in items
+            json.dumps(_item_to_export_dict(item), ensure_ascii=False, sort_keys=True) + "\n"
+            for item in items
         ).encode("utf-8")
 
     def check_integrity(self) -> bool:
@@ -351,10 +393,11 @@ class TranscriptStore:
             ) from exc
 
 
-def _canonical_args_json(args: dict[str, Any]) -> str:
+def _canonical_args_json(args: Mapping[str, Any]) -> str:
     _validate_args_structure(args)
+    thawed = _thaw_json_value(args)
     encoded = json.dumps(
-        args,
+        thawed,
         ensure_ascii=False,
         allow_nan=False,
         sort_keys=True,
@@ -368,9 +411,9 @@ def _canonical_args_json(args: dict[str, Any]) -> str:
     return encoded
 
 
-def _validate_args_structure(args: dict[str, Any]) -> None:
-    if not isinstance(args, dict):
-        raise TypeError("transcript args must be a dict")
+def _validate_args_structure(args: Mapping[str, Any]) -> None:
+    if not isinstance(args, Mapping):
+        raise TypeError("transcript args must be a dict or Mapping")
     stack: list[tuple[Any, int]] = [(args, 1)]
     items = 0
     while stack:
@@ -386,10 +429,10 @@ def _validate_args_structure(args: dict[str, Any]) -> None:
             if not (value == value and abs(value) != float("inf")):
                 raise ValueError("transcript args must contain finite JSON numbers")
             continue
-        if isinstance(value, list):
+        if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
             stack.extend((child, depth + 1) for child in reversed(value))
             continue
-        if isinstance(value, dict):
+        if isinstance(value, Mapping):
             for key, child in value.items():
                 if not isinstance(key, str):
                     raise TypeError("transcript args object keys must be strings")
@@ -399,11 +442,42 @@ def _validate_args_structure(args: dict[str, Any]) -> None:
 
 
 def _freeze_json_value(value: Any) -> Any:
-    if isinstance(value, dict):
-        return FrozenDict((key, _freeze_json_value(child)) for key, child in value.items())
-    if isinstance(value, list):
-        return FrozenList(_freeze_json_value(child) for child in value)
+    if isinstance(value, FrozenMapping | FrozenSequence):
+        return value
+    if isinstance(value, Mapping):
+        return FrozenMapping(
+            {key: _freeze_json_value(child) for key, child in value.items()}
+        )
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return FrozenSequence(tuple(_freeze_json_value(child) for child in value))
     return value
+
+
+def _thaw_json_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw_json_value(child) for key, child in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [_thaw_json_value(child) for child in value]
+    return value
+
+
+def _item_to_export_dict(item: TranscriptItem) -> dict[str, Any]:
+    return {
+        "message_id": item.message_id,
+        "role": item.role,
+        "content": item.content,
+        "run_id": item.run_id,
+        "turn_id": item.turn_id,
+        "call_id": item.call_id,
+        "artifact_ref": item.artifact_ref,
+        "created_at": item.created_at,
+        "sequence": item.sequence,
+        "name": item.name,
+        "args": _thaw_json_value(item.args),
+        "is_error": item.is_error,
+        "policy_reason": item.policy_reason,
+        "security_event_type": item.security_event_type,
+    }
 
 
 def _validate_is_error(value: Any) -> None:

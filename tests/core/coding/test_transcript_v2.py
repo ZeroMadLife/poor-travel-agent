@@ -439,10 +439,38 @@ def test_transcript_item_takes_a_recursive_immutable_args_snapshot():
         item.args["new"] = "value"
     with pytest.raises(TypeError):
         item.args["nested"]["new"] = "value"
-    with pytest.raises(TypeError):
+    with pytest.raises((AttributeError, TypeError)):
         item.args["nested"]["values"].append(2)
     with pytest.raises(TypeError):
         item.args["nested"]["values"][1]["ok"] = False
+
+
+def test_immutable_args_have_no_mutable_builtin_base_class(tmp_path):
+    source = {"values": [{"key": "original"}]}
+    item = TranscriptItem(message_id="m1", role="tool", content="ok", args=source)
+    values = item.args["values"]
+
+    with pytest.raises(TypeError):
+        dict.__setitem__(item.args, "injected", True)
+    with pytest.raises(TypeError):
+        dict.__init__(item.args, {"replaced": True})
+    with pytest.raises(TypeError):
+        list.append(values, "injected")
+    with pytest.raises(TypeError):
+        item.args.__init__({"replaced": True})
+    with pytest.raises(TypeError):
+        values.__init__(["replaced"])
+
+    assert item.args == {"values": [{"key": "original"}]}
+    assert values == [{"key": "original"}]
+    copied = deepcopy(item)
+    assert copied == item
+    assert copied.args is item.args
+
+    store = TranscriptStore(tmp_path, "s1")
+    store.append(item)
+    exported = json.loads(store.export_jsonl().read_text())
+    assert exported["args"] == {"values": [{"key": "original"}]}
 
 
 def test_args_depth_budget_rejects_without_recursion_error(tmp_path):
