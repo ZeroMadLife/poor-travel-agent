@@ -197,6 +197,9 @@ export const useCodingStore = defineStore('coding', () => {
       },
       event,
     )
+    if (event.type === 'turn_finished') {
+      window.setTimeout(() => void loadContext(), 0)
+    }
     if (effect.approvalRequired) {
       void enrichApprovalPreview()
       startApprovalPolling()
@@ -208,7 +211,6 @@ export const useCodingStore = defineStore('coding', () => {
     }
     if (effect.terminal) {
       stopApprovalPolling()
-      void loadContext()
       if (event.type !== 'error') {
         void loadSessions()
         void loadRuns()
