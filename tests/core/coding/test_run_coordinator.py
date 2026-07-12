@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from core.coding.persistence import session_event_journal as journal_module
 from core.coding.persistence.session_event_journal import SessionEventJournal
 from core.coding.run_coordinator import ActiveRunConflictError, RunCoordinator, RunEvent
 
@@ -251,9 +252,11 @@ async def test_active_run_repeated_cancel_waits_for_terminal_cleanup(
 
 
 @pytest.mark.asyncio
-async def test_new_owner_recovers_dead_process_lease(tmp_path: Path) -> None:
+async def test_new_owner_recovers_dead_process_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     owner_a = RunCoordinator(
-        SessionEventJournal(tmp_path, "session-1"), owner_id="owner-a", owner_pid=999_999
+        SessionEventJournal(tmp_path, "session-1"), owner_id="owner-a"
     )
     new_owner = RunCoordinator(SessionEventJournal(tmp_path, "session-1"), owner_id="owner-b")
     release = asyncio.Event()
@@ -265,10 +268,18 @@ async def test_new_owner_recovers_dead_process_lease(tmp_path: Path) -> None:
 
     task = await owner_a.start_run("run-1", blocked())
     contender = RunCoordinator(
-        SessionEventJournal(tmp_path, "session-1"), owner_id="owner-a", owner_pid=999_999
+        SessionEventJournal(tmp_path, "session-1"), owner_id="owner-a"
     )
     with pytest.raises(ActiveRunConflictError, match="run-1"):
         await contender.start_run("run-2", _events())
+
+    monkeypatch.setattr(
+        journal_module,
+        "_process_identity",
+        lambda _pid: journal_module._ProcessIdentity(
+            journal_module._ProcessIdentityState.ABSENT
+        ),
+    )
 
     assert await new_owner.recover_interrupted_runs() == ("run-1",)
     assert new_owner.journal.active_run_id() is None
@@ -301,10 +312,10 @@ async def test_recovery_does_not_take_lease_from_live_different_owner(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_recovered_stale_owner_cannot_append_after_interrupted_terminal(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     old_owner = RunCoordinator(
-        SessionEventJournal(tmp_path, "session-1"), owner_id="old", owner_pid=999_999
+        SessionEventJournal(tmp_path, "session-1"), owner_id="old"
     )
     new_owner = RunCoordinator(SessionEventJournal(tmp_path, "session-1"), owner_id="new")
     release = asyncio.Event()
@@ -314,6 +325,13 @@ async def test_recovered_stale_owner_cannot_append_after_interrupted_terminal(
         yield RunEvent(kind="tool", status="done", payload={"stale": True})
 
     task = await old_owner.start_run("run-1", stale_stream())
+    monkeypatch.setattr(
+        journal_module,
+        "_process_identity",
+        lambda _pid: journal_module._ProcessIdentity(
+            journal_module._ProcessIdentityState.ABSENT
+        ),
+    )
     assert await new_owner.recover_interrupted_runs() == ("run-1",)
     release.set()
     with pytest.raises(Exception, match="lease|fenc|owner"):

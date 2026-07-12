@@ -288,10 +288,19 @@ def test_release_requires_matching_owner_and_fencing_token(tmp_path: Path) -> No
 def test_pid_reuse_does_not_make_previous_process_owner_live(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    process_starts = iter(("procfs:old-start", "procfs:new-start"))
+    process_starts = iter(
+        (
+            journal_module._ProcessIdentity(
+                journal_module._ProcessIdentityState.PRESENT, "linux:boot:old-start"
+            ),
+            journal_module._ProcessIdentity(
+                journal_module._ProcessIdentityState.PRESENT, "linux:boot:new-start"
+            ),
+        )
+    )
     monkeypatch.setattr(
         journal_module,
-        "_process_start_fingerprint",
+        "_process_identity",
         lambda _pid: next(process_starts),
     )
     journal = SessionEventJournal(tmp_path, "session-1")
@@ -302,6 +311,44 @@ def test_pid_reuse_does_not_make_previous_process_owner_live(
     assert recovered is not None
     assert recovered.status == "interrupted"
     assert journal.active_run_id() is None
+
+
+def test_transient_identity_failure_does_not_recover_live_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    journal = SessionEventJournal(tmp_path, "session-1")
+    journal.begin_run("run-1", owner_id="owner-1", owner_pid=os.getpid())
+    monkeypatch.setattr(
+        journal_module,
+        "_process_identity",
+        lambda _pid: journal_module._ProcessIdentity(
+            journal_module._ProcessIdentityState.UNKNOWN
+        ),
+    )
+
+    with pytest.raises(SessionEventJournalOperationalError, match="temporarily unavailable"):
+        journal.recover_run_lease()
+
+    assert journal.active_run_id() == "run-1"
+
+
+def test_begin_run_fails_when_live_owner_identity_is_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    journal = SessionEventJournal(tmp_path, "session-1")
+    monkeypatch.setattr(
+        journal_module,
+        "_process_identity",
+        lambda _pid: journal_module._ProcessIdentity(
+            journal_module._ProcessIdentityState.UNKNOWN
+        ),
+    )
+
+    with pytest.raises(SessionEventJournalOperationalError, match="reliable process identity"):
+        journal.begin_run("run-1", owner_id="owner-1", owner_pid=os.getpid())
+
+    assert journal.active_run_id() is None
+    assert journal.replay(after=0, limit=10).items == ()
 
 
 def test_recover_run_lease_marks_interrupted_and_releases_atomically(tmp_path: Path) -> None:

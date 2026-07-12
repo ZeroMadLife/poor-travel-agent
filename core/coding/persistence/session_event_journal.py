@@ -7,6 +7,7 @@ stdlib sqlite3 threat boundary and requires a process sandbox or fd-backed VFS.
 
 from __future__ import annotations
 
+import ctypes
 import errno
 import json
 import math
@@ -14,14 +15,15 @@ import os
 import re
 import sqlite3
 import stat
-import subprocess
+import sys
 import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 SCHEMA_VERSION = 5
 _DATABASE_NAME = "timeline.sqlite3"
@@ -151,6 +153,18 @@ class ReplayPage:
 class BeginRunResult:
     event: SessionEvent
     fencing_token: int
+
+
+class _ProcessIdentityState(Enum):
+    PRESENT = "present"
+    ABSENT = "absent"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class _ProcessIdentity:
+    state: _ProcessIdentityState
+    fingerprint: str | None = None
 
 
 class SessionEventJournal:
@@ -299,6 +313,7 @@ class SessionEventJournal:
         """Atomically acquire this session's singleton persistent run lease."""
         validated_run = _validate_identifier("run_id", run_id)
         validated_owner = _validate_identifier("owner_id", owner_id)
+        owner_process_start = _owner_process_start(owner_pid)
         acquired_at = datetime.now(UTC).isoformat()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -318,7 +333,7 @@ class SessionEventJournal:
                         validated_run,
                         validated_owner,
                         owner_pid,
-                        _process_start_fingerprint(owner_pid) or "",
+                        owner_process_start,
                         token,
                         acquired_at,
                     ),
@@ -341,6 +356,7 @@ class SessionEventJournal:
         """Acquire the singleton lease and persist run_started atomically."""
         validated_run = _validate_identifier("run_id", run_id)
         validated_owner = _validate_identifier("owner_id", owner_id)
+        owner_process_start = _owner_process_start(owner_pid)
         acquired_at = datetime.now(UTC).isoformat()
         values = _validated_event_input(
             run_id=validated_run,
@@ -373,7 +389,7 @@ class SessionEventJournal:
                         validated_run,
                         validated_owner,
                         owner_pid,
-                        _process_start_fingerprint(owner_pid) or "",
+                        owner_process_start,
                         token,
                         acquired_at,
                     ),
@@ -433,8 +449,19 @@ class SessionEventJournal:
                 run_id = str(row[0])
                 owner_pid = int(row[2])
                 stored_process_start = str(row[3])
-                current_process_start = _process_start_fingerprint(owner_pid)
-                if stored_process_start and stored_process_start == current_process_start:
+                identity = _process_identity(owner_pid)
+                if identity.state is _ProcessIdentityState.UNKNOWN:
+                    raise SessionEventJournalOperationalError(
+                        f"process identity is temporarily unavailable for lease {run_id}"
+                    )
+                if identity.state is _ProcessIdentityState.PRESENT and not stored_process_start:
+                    raise SessionEventJournalOperationalError(
+                        f"legacy lease owner identity cannot be verified for {run_id}"
+                    )
+                if (
+                    identity.state is _ProcessIdentityState.PRESENT
+                    and stored_process_start == identity.fingerprint
+                ):
                     connection.commit()
                     return None
                 existing = connection.execute(
@@ -953,32 +980,111 @@ def _is_busy_or_locked(exc: sqlite3.OperationalError) -> bool:
     )
 
 
-def _process_start_fingerprint(pid: int) -> str | None:
-    """Return an OS process incarnation marker, not merely a reusable PID."""
+def _owner_process_start(pid: int) -> str:
     if pid < 1:
-        return None
+        return ""
+    identity = _process_identity(pid)
+    if identity.state is not _ProcessIdentityState.PRESENT or not identity.fingerprint:
+        raise SessionEventJournalOperationalError(
+            f"cannot acquire run lease without a reliable process identity for pid {pid}"
+        )
+    return identity.fingerprint
+
+
+def _process_identity(pid: int) -> _ProcessIdentity:
+    """Return a boot-scoped process incarnation marker without PID-only guesses."""
+    if pid < 1:
+        return _ProcessIdentity(_ProcessIdentityState.ABSENT)
+    platform_name = str(sys.platform)
+    if platform_name.startswith("linux"):
+        return _linux_process_identity(pid)
+    if platform_name == "darwin":
+        return _darwin_process_identity(pid)
+    return _ProcessIdentity(_ProcessIdentityState.UNKNOWN)
+
+
+def _linux_process_identity(pid: int) -> _ProcessIdentity:
     proc_stat = Path(f"/proc/{pid}/stat")
     try:
         raw = proc_stat.read_text(encoding="ascii")
-    except (FileNotFoundError, PermissionError, OSError, UnicodeError):
-        pass
-    else:
-        close_paren = raw.rfind(")")
-        fields = raw[close_paren + 2 :].split() if close_paren >= 0 else []
-        if len(fields) > 19:
-            return f"procfs:{fields[19]}"
+    except FileNotFoundError:
+        return _ProcessIdentity(_ProcessIdentityState.ABSENT)
+    except (PermissionError, OSError, UnicodeError):
+        return _ProcessIdentity(_ProcessIdentityState.UNKNOWN)
+    close_paren = raw.rfind(")")
+    fields = raw[close_paren + 2 :].split() if close_paren >= 0 else []
+    if len(fields) <= 19 or not fields[19].isdigit():
+        return _ProcessIdentity(_ProcessIdentityState.UNKNOWN)
     try:
-        completed = subprocess.run(
-            ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=1,
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+    except (FileNotFoundError, PermissionError, OSError, UnicodeError):
+        return _ProcessIdentity(_ProcessIdentityState.UNKNOWN)
+    if not boot_id:
+        return _ProcessIdentity(_ProcessIdentityState.UNKNOWN)
+    return _ProcessIdentity(
+        _ProcessIdentityState.PRESENT,
+        f"linux:{boot_id}:{fields[19]}",
+    )
+
+
+class _ProcBSDInfo(ctypes.Structure):
+    _fields_: ClassVar[list[tuple[str, Any]]] = [
+        ("pbi_flags", ctypes.c_uint32),
+        ("pbi_status", ctypes.c_uint32),
+        ("pbi_xstatus", ctypes.c_uint32),
+        ("pbi_pid", ctypes.c_uint32),
+        ("pbi_ppid", ctypes.c_uint32),
+        ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32),
+        ("pbi_ruid", ctypes.c_uint32),
+        ("pbi_rgid", ctypes.c_uint32),
+        ("pbi_svuid", ctypes.c_uint32),
+        ("pbi_svgid", ctypes.c_uint32),
+        ("rfu_1", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * 16),
+        ("pbi_name", ctypes.c_char * 32),
+        ("pbi_nfiles", ctypes.c_uint32),
+        ("pbi_pgid", ctypes.c_uint32),
+        ("pbi_pjobc", ctypes.c_uint32),
+        ("e_tdev", ctypes.c_uint32),
+        ("e_tpgid", ctypes.c_uint32),
+        ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
+
+
+def _darwin_process_identity(pid: int) -> _ProcessIdentity:
+    info = _ProcBSDInfo()
+    try:
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        proc_pidinfo = libproc.proc_pidinfo
+        proc_pidinfo.argtypes = [
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint64,
+            ctypes.c_void_p,
+            ctypes.c_int,
+        ]
+        proc_pidinfo.restype = ctypes.c_int
+        ctypes.set_errno(0)
+        size = proc_pidinfo(
+            pid,
+            3,  # PROC_PIDTBSDINFO
+            0,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
         )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    value = completed.stdout.strip()
-    return f"ps:{value}" if completed.returncode == 0 and value else None
+    except (AttributeError, OSError):
+        return _ProcessIdentity(_ProcessIdentityState.UNKNOWN)
+    if size == ctypes.sizeof(info):
+        return _ProcessIdentity(
+            _ProcessIdentityState.PRESENT,
+            f"darwin:{info.pbi_start_tvsec}:{info.pbi_start_tvusec}",
+        )
+    if ctypes.get_errno() == errno.ESRCH:
+        return _ProcessIdentity(_ProcessIdentityState.ABSENT)
+    return _ProcessIdentity(_ProcessIdentityState.UNKNOWN)
 
 
 def _trusted_root(root: Path) -> Path:
