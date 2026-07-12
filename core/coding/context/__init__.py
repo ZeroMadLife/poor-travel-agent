@@ -7,6 +7,7 @@ from core.coding.context.compact import (
     CompactManager,
     Summarizer,
 )
+from core.coding.context.controller import ContextBusyError, ContextController, PreparedContext
 from core.coding.context.manager import (
     DEFAULT_SYSTEM_PROMPT,
     SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
@@ -15,7 +16,9 @@ from core.coding.context.manager import (
     normalize_text,
     tail_clip,
 )
+from core.coding.context.model_capabilities import ModelCapabilityRegistry
 from core.coding.context.projection import ContextLevel, ContextProjector
+from core.coding.context.summarizer import StructuredSummarizer
 from core.coding.context.summary import (
     CompactionCheckpoint,
     CompactionResult,
@@ -49,12 +52,17 @@ __all__ = [
     "CompactionPolicy",
     "CompactionResult",
     "CompactionSummary",
+    "ContextBusyError",
+    "ContextController",
     "ContextLevel",
     "ContextManager",
     "ContextProjector",
     "FileChange",
     "FileSnapshot",
+    "ModelCapabilityRegistry",
+    "PreparedContext",
     "SectionRender",
+    "StructuredSummarizer",
     "Summarizer",
     "WorkspaceContext",
     "WorkspaceDiff",
