@@ -8,10 +8,12 @@ import os
 import sqlite3
 import stat
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
+from typing import Any
 
 from core.coding.persistence.atomic_export import EXPORT_NAME, publish_jsonl
 from core.coding.persistence.transcript_schema import (
@@ -22,6 +24,10 @@ from core.coding.persistence.transcript_schema import (
 )
 
 __all__ = [
+    "MAX_ARGS_BYTES",
+    "MAX_ARGS_DEPTH",
+    "MAX_ARGS_ITEMS",
+    "TranscriptConflictError",
     "TranscriptCorruptionError",
     "TranscriptItem",
     "TranscriptSchemaError",
@@ -29,20 +35,110 @@ __all__ = [
     "TranscriptStoreError",
 ]
 
+MAX_ARGS_BYTES = 256 * 1024
+MAX_ARGS_DEPTH = 32
+MAX_ARGS_ITEMS = 10_000
+
 _BUSY_TIMEOUT_MS = 5000
 _DATABASE_NAME = "transcript.sqlite3"
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
 _FILE_FLAGS = os.O_CLOEXEC | os.O_NOFOLLOW
 _SIDECAR_SUFFIXES = ("-wal", "-shm")
-_SELECT_SQL = """
-SELECT message_id, role, content, run_id, turn_id, call_id, artifact_ref, created_at
-FROM transcript
-ORDER BY sequence
-"""
+_STORED_COLUMNS = (
+    "message_id, role, content, run_id, turn_id, call_id, artifact_ref, created_at, "
+    "name, args_json, is_error, policy_reason, security_event_type"
+)
+_SELECT_SQL = f"SELECT sequence, {_STORED_COLUMNS} FROM transcript ORDER BY sequence"
 
 
 class TranscriptCorruptionError(TranscriptStoreError):
     """Raised when the canonical SQLite database cannot be read safely."""
+
+
+class TranscriptConflictError(TranscriptStoreError):
+    """Raised when a message id is reused for different canonical evidence."""
+
+
+class FrozenMapping(Mapping[str, Any]):
+    """Read-only mapping backed by a private mapping proxy."""
+
+    __data: Mapping[str, Any]
+    __slots__ = ("__data",)
+
+    def __init__(self, values: Mapping[str, Any]) -> None:
+        try:
+            object.__getattribute__(self, "_FrozenMapping__data")
+        except AttributeError:
+            object.__setattr__(self, "_FrozenMapping__data", MappingProxyType(dict(values)))
+            return
+        raise TypeError("transcript args are immutable")
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise TypeError("transcript args are immutable")
+
+    def __delattr__(self, name: str) -> None:
+        raise TypeError("transcript args are immutable")
+
+    def __getitem__(self, key: str) -> Any:
+        return self.__data[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.__data)
+
+    def __len__(self) -> int:
+        return len(self.__data)
+
+    def __repr__(self) -> str:
+        return repr(dict(self.__data))
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Mapping):
+            return False
+        return dict(self.__data) == dict(other.items())
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> FrozenMapping:
+        return self
+
+
+class FrozenSequence(Sequence[Any]):
+    """Read-only sequence backed by a private tuple."""
+
+    __data: tuple[Any, ...]
+    __slots__ = ("__data",)
+
+    def __init__(self, values: Sequence[Any]) -> None:
+        try:
+            object.__getattribute__(self, "_FrozenSequence__data")
+        except AttributeError:
+            object.__setattr__(self, "_FrozenSequence__data", tuple(values))
+            return
+        raise TypeError("transcript args are immutable")
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise TypeError("transcript args are immutable")
+
+    def __delattr__(self, name: str) -> None:
+        raise TypeError("transcript args are immutable")
+
+    def __getitem__(self, index: int | slice) -> Any:
+        return self.__data[index]
+
+    def __len__(self) -> int:
+        return len(self.__data)
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self.__data)
+
+    def __repr__(self) -> str:
+        return repr(list(self.__data))
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Sequence) or isinstance(other, str | bytes | bytearray):
+            return False
+        return list(self.__data) == list(other)
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> FrozenSequence:
+        return self
 
 
 @dataclass(frozen=True)
@@ -57,6 +153,17 @@ class TranscriptItem:
     call_id: str = ""
     artifact_ref: str = ""
     created_at: str = ""
+    sequence: int = field(default=0, compare=False)
+    name: str = ""
+    args: Mapping[str, Any] = field(default_factory=dict)
+    is_error: bool = False
+    policy_reason: str = ""
+    security_event_type: str = ""
+
+    def __post_init__(self) -> None:
+        _validate_is_error(self.is_error)
+        _validate_args_structure(self.args)
+        object.__setattr__(self, "args", _freeze_json_value(self.args))
 
 
 class TranscriptStore:
@@ -88,32 +195,49 @@ class TranscriptStore:
 
     def append(self, item: TranscriptItem) -> bool:
         """Insert ``item`` once by message id in a short transaction."""
+        return self.append_and_get_sequence(item)[0]
+
+    def append_and_get_sequence(self, item: TranscriptItem) -> tuple[bool, int]:
+        """Insert canonical evidence or return its existing stable sequence."""
+        _validate_is_error(item.is_error)
+        args_json = _canonical_args_json(item.args)
+        values = _stored_values(item, args_json)
         try:
             with self._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 try:
+                    existing = connection.execute(
+                        f"SELECT sequence, {_STORED_COLUMNS} FROM transcript WHERE message_id = ?",
+                        (item.message_id,),
+                    ).fetchone()
+                    if existing is not None:
+                        existing_item = _row_to_item(existing, self.path)
+                        existing_values = _stored_values(
+                            existing_item, _canonical_args_json(existing_item.args)
+                        )
+                        if existing_values != values:
+                            raise TranscriptConflictError(
+                                f"conflicting transcript message_id {item.message_id!r} at {self.path}"
+                            )
+                        connection.commit()
+                        return False, int(existing[0])
                     cursor = connection.execute(
                         """
                         INSERT INTO transcript (
                             message_id, role, content, run_id, turn_id, call_id,
-                            artifact_ref, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(message_id) DO NOTHING
+                            artifact_ref, created_at, name, args_json, is_error,
+                            policy_reason, security_event_type
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (
-                            item.message_id,
-                            item.role,
-                            item.content,
-                            item.run_id,
-                            item.turn_id,
-                            item.call_id,
-                            item.artifact_ref,
-                            item.created_at,
-                        ),
+                        values,
                     )
-                    inserted = cursor.rowcount == 1
+                    if cursor.lastrowid is None:
+                        raise TranscriptStoreError(
+                            f"transcript insert returned no sequence at {self.path}"
+                        )
+                    sequence = int(cursor.lastrowid)
                     connection.commit()
-                    return inserted
+                    return True, sequence
                 except Exception:
                     _rollback(connection)
                     raise
@@ -125,7 +249,24 @@ class TranscriptStore:
         """Read transcript entries in their insertion sequence."""
         try:
             with self._connect() as connection:
-                return _read_items(connection)
+                return _read_items(connection, self.path, _SELECT_SQL)
+        except sqlite3.DatabaseError as exc:
+            self._raise_if_corrupt(exc)
+            raise
+
+    def read_range(self, start: int, end: int) -> list[TranscriptItem]:
+        """Read an inclusive sequence range in canonical order."""
+        if not isinstance(start, int) or isinstance(start, bool) or start < 1:
+            raise ValueError("start must be an integer >= 1")
+        if not isinstance(end, int) or isinstance(end, bool) or end < start:
+            raise ValueError("end must be an integer >= start")
+        sql = (
+            f"SELECT sequence, {_STORED_COLUMNS} FROM transcript "
+            "WHERE sequence BETWEEN ? AND ? ORDER BY sequence"
+        )
+        try:
+            with self._connect() as connection:
+                return _read_items(connection, self.path, sql, (start, end))
         except sqlite3.DatabaseError as exc:
             self._raise_if_corrupt(exc)
             raise
@@ -144,7 +285,7 @@ class TranscriptStore:
             with self._connect() as connection:
                 connection.execute("BEGIN")
                 try:
-                    items = _read_items(connection)
+                    items = _read_items(connection, self.path, _SELECT_SQL)
                     connection.commit()
                 except Exception:
                     _rollback(connection)
@@ -154,7 +295,8 @@ class TranscriptStore:
             raise
 
         return "".join(
-            json.dumps(asdict(item), ensure_ascii=False, sort_keys=True) + "\n" for item in items
+            json.dumps(_item_to_export_dict(item), ensure_ascii=False, sort_keys=True) + "\n"
+            for item in items
         ).encode("utf-8")
 
     def check_integrity(self) -> bool:
@@ -251,8 +393,186 @@ class TranscriptStore:
             ) from exc
 
 
-def _read_items(connection: sqlite3.Connection) -> list[TranscriptItem]:
-    return [TranscriptItem(*row) for row in connection.execute(_SELECT_SQL).fetchall()]
+def _canonical_args_json(args: Mapping[str, Any]) -> str:
+    _validate_args_structure(args)
+    thawed = _thaw_json_value(args)
+    encoded = json.dumps(
+        thawed,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    size = len(encoded.encode("utf-8"))
+    if size > MAX_ARGS_BYTES:
+        raise ValueError(
+            f"transcript args exceed {MAX_ARGS_BYTES} bytes (encoded size {size})"
+        )
+    return encoded
+
+
+def _validate_args_structure(args: Mapping[str, Any]) -> None:
+    if not isinstance(args, Mapping):
+        raise TypeError("transcript args must be a dict or Mapping")
+    stack: list[tuple[Any, int]] = [(args, 1)]
+    items = 0
+    while stack:
+        value, depth = stack.pop()
+        items += 1
+        if items > MAX_ARGS_ITEMS:
+            raise ValueError(f"transcript args exceed {MAX_ARGS_ITEMS} items")
+        if depth > MAX_ARGS_DEPTH:
+            raise ValueError(f"transcript args exceed depth {MAX_ARGS_DEPTH}")
+        if value is None or isinstance(value, str | bool | int):
+            continue
+        if isinstance(value, float):
+            if not (value == value and abs(value) != float("inf")):
+                raise ValueError("transcript args must contain finite JSON numbers")
+            continue
+        if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+            stack.extend((child, depth + 1) for child in reversed(value))
+            continue
+        if isinstance(value, Mapping):
+            for key, child in value.items():
+                if not isinstance(key, str):
+                    raise TypeError("transcript args object keys must be strings")
+                stack.append((child, depth + 1))
+            continue
+        raise TypeError(f"transcript args contains non-JSON value {type(value).__name__}")
+
+
+def _freeze_json_value(value: Any) -> Any:
+    if isinstance(value, FrozenMapping | FrozenSequence):
+        return value
+    if isinstance(value, Mapping):
+        return FrozenMapping(
+            {key: _freeze_json_value(child) for key, child in value.items()}
+        )
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return FrozenSequence(tuple(_freeze_json_value(child) for child in value))
+    return value
+
+
+def _thaw_json_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw_json_value(child) for key, child in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [_thaw_json_value(child) for child in value]
+    return value
+
+
+def _item_to_export_dict(item: TranscriptItem) -> dict[str, Any]:
+    return {
+        "message_id": item.message_id,
+        "role": item.role,
+        "content": item.content,
+        "run_id": item.run_id,
+        "turn_id": item.turn_id,
+        "call_id": item.call_id,
+        "artifact_ref": item.artifact_ref,
+        "created_at": item.created_at,
+        "sequence": item.sequence,
+        "name": item.name,
+        "args": _thaw_json_value(item.args),
+        "is_error": item.is_error,
+        "policy_reason": item.policy_reason,
+        "security_event_type": item.security_event_type,
+    }
+
+
+def _validate_is_error(value: Any) -> None:
+    if type(value) is not bool:
+        raise TypeError("transcript is_error must be a bool")
+
+
+def _stored_values(item: TranscriptItem, args_json: str) -> tuple[Any, ...]:
+    return (
+        item.message_id,
+        item.role,
+        item.content,
+        item.run_id,
+        item.turn_id,
+        item.call_id,
+        item.artifact_ref,
+        item.created_at,
+        item.name,
+        args_json,
+        int(item.is_error),
+        item.policy_reason,
+        item.security_event_type,
+    )
+
+
+def _read_items(
+    connection: sqlite3.Connection,
+    path: Path,
+    sql: str,
+    parameters: tuple[Any, ...] = (),
+) -> list[TranscriptItem]:
+    return [_row_to_item(row, path) for row in connection.execute(sql, parameters).fetchall()]
+
+
+def _row_to_item(row: tuple[Any, ...], path: Path) -> TranscriptItem:
+    message_id = str(row[1])
+    try:
+        raw_args = row[10]
+        if type(raw_args) is not str:
+            raise TypeError("args_json is not text")
+        raw_size = len(raw_args.encode("utf-8"))
+        if raw_size > MAX_ARGS_BYTES:
+            raise ValueError(
+                f"transcript args exceed {MAX_ARGS_BYTES} bytes (encoded size {raw_size})"
+            )
+        args = json.loads(
+            raw_args,
+            object_pairs_hook=_object_without_duplicate_keys,
+            parse_constant=_reject_json_constant,
+        )
+        canonical_args = _canonical_args_json(args)
+        if canonical_args.encode("utf-8") != raw_args.encode("utf-8"):
+            raise ValueError("args_json is not canonical JSON")
+    except (TypeError, ValueError) as exc:
+        raise TranscriptCorruptionError(
+            f"invalid args_json for transcript message {message_id!r} at {path}: {exc}"
+        ) from exc
+    if not isinstance(args, dict):
+        raise TranscriptCorruptionError(
+            f"invalid args_json object for transcript message {message_id!r} at {path}"
+        )
+    raw_is_error = row[11]
+    if type(raw_is_error) is not int or raw_is_error not in {0, 1}:
+        raise TranscriptCorruptionError(
+            f"invalid is_error for transcript message {message_id!r} at {path}"
+        )
+    return TranscriptItem(
+        message_id=message_id,
+        role=str(row[2]),
+        content=str(row[3]),
+        run_id=str(row[4]),
+        turn_id=str(row[5]),
+        call_id=str(row[6]),
+        artifact_ref=str(row[7]),
+        created_at=str(row[8]),
+        sequence=int(row[0]),
+        name=str(row[9]),
+        args=args,
+        is_error=raw_is_error == 1,
+        policy_reason=str(row[12]),
+        security_event_type=str(row[13]),
+    )
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON number {value}")
+
+
+def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key {key!r}")
+        result[key] = value
+    return result
 
 
 def _ensure_wal(connection: sqlite3.Connection, path: Path) -> None:
