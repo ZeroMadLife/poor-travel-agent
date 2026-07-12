@@ -124,7 +124,7 @@ class DurableMemory:
 
     def _append_daily_log(self, fact: MemoryFact) -> None:
         daily_path = self.root / "daily" / f"{date.today().isoformat()}.md"
-        if daily_path.is_symlink():
+        if daily_path.is_symlink() or (daily_path.exists() and daily_path.stat().st_nlink != 1):
             raise OSError("memory daily file must not be a symlink")
         entry = f"- [{fact.created_at}] ({fact.topic}) {fact.content}"
         if fact.source_ref:
@@ -135,7 +135,7 @@ class DurableMemory:
 
     def _append_topic_file(self, fact: MemoryFact) -> None:
         topic_path = self.root / self.TOPIC_FILES.get(fact.topic, "decisions.md")
-        if topic_path.is_symlink():
+        if topic_path.is_symlink() or (topic_path.exists() and topic_path.stat().st_nlink != 1):
             raise OSError("memory topic file must not be a symlink")
         entry = json.dumps(
             {
@@ -190,7 +190,7 @@ class DurableMemory:
                 ref = f" [run: {fact.source_ref[:8]}]" if fact.source_ref else ""
                 lines.append(f"  - {fact.content}{ref}")
             lines.append("")
-        if self.index_path.is_symlink():
+        if self.index_path.is_symlink() or (self.index_path.exists() and self.index_path.stat().st_nlink != 1):
             raise OSError("memory index must not be a symlink")
         self.index_path.write_text("\n".join(lines), encoding="utf-8")
 
