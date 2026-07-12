@@ -1,14 +1,19 @@
 """Coding context budget and compaction tests."""
 
+from collections.abc import Mapping
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 from core.coding.context import (
     DEFAULT_SYSTEM_PROMPT,
     SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+    CompactionPolicy,
+    CompactionSummary,
     CompactManager,
     ContextManager,
 )
+from core.coding.context.budget import ContextPolicy
 from core.coding.runtime import CodingRuntime
 
 
@@ -21,6 +26,36 @@ class FakeModel:
     async def complete(self, prompt: str) -> str:
         self.prompts.append(prompt)
         return "<final>done</final>"
+
+
+class FakeSummarizer:
+    """Return a small valid summary for compatibility tests."""
+
+    async def summarize(
+        self,
+        *,
+        archived_history: list[dict[str, Any]],
+        previous_summary: CompactionSummary | None,
+        focus: str,
+        max_tokens: int,
+        source_transcript_range: tuple[int, int],
+        repair_feedback: str | None,
+    ) -> CompactionSummary | Mapping[str, Any]:
+        return CompactionSummary(
+            goal="preserve recent work",
+            source_transcript_range=source_transcript_range,
+        )
+
+
+def _compact_manager() -> CompactManager:
+    return CompactManager(
+        summarizer=FakeSummarizer(),
+        policy=ContextPolicy(
+            context_window_tokens=10_000,
+            output_reserve_tokens=1_000,
+        ),
+        compaction_policy=CompactionPolicy(max_recent_turns=3),
+    )
 
 
 def test_context_manager_preserves_safety_sections_when_prompt_is_over_budget() -> None:
@@ -50,29 +85,23 @@ def test_context_manager_preserves_safety_sections_when_prompt_is_over_budget() 
     )
 
 
-def test_compact_manager_summarizes_old_turns_and_keeps_recent_turns() -> None:
+async def test_compact_manager_summarizes_old_turns_and_keeps_recent_turns() -> None:
     """CompactManager folds old turns into a compact_summary item."""
     history = [
-        {"role": "user", "content": f"request {index}"}
+        {"role": "user", "content": f"request {index} " + ("context " * 100)}
         if offset == 0
-        else {"role": "assistant", "content": f"answer {index}"}
+        else {"role": "assistant", "content": f"answer {index} " + ("context " * 100)}
         for index in range(5)
         for offset in range(2)
     ]
 
-    new_history, summary = CompactManager().compact(history, keep_recent_turns=2)
+    result = await _compact_manager().compact(history)
 
-    assert new_history[0]["role"] == "system"
-    assert new_history[0]["kind"] == "compact_summary"
-    assert "request 2" in new_history[0]["content"]
-    assert [item["content"] for item in new_history[-4:]] == [
-        "request 3",
-        "answer 3",
-        "request 4",
-        "answer 4",
-    ]
-    assert summary["pre_items"] == 10
-    assert summary["post_items"] == 5
+    assert result.applied is True
+    assert result.projected_history[0]["role"] == "system"
+    assert result.projected_history[0]["kind"] == "compact_summary"
+    assert result.projected_history[1:] == history[-6:]
+    assert result.archived_items == 4
 
 
 def test_context_manager_reuses_cached_system_prompt_across_turns() -> None:
@@ -179,23 +208,24 @@ async def test_workspace_reminder_does_not_enter_session_replay(tmp_path: Path) 
     ]
 
 
-def test_compact_manager_invalidates_context_cache_after_compaction() -> None:
+async def test_compact_manager_invalidates_context_cache_after_compaction() -> None:
     """Compaction can invalidate the prompt cache when memory/history changed."""
     manager = ContextManager()
     manager.build_system_prompt_once(["read_file: read a file"])
     assert manager.system_prompt_build_count == 1
 
     history = [
-        {"role": "user", "content": f"request {index}"}
+        {"role": "user", "content": f"request {index} " + ("context " * 100)}
         if offset == 0
-        else {"role": "assistant", "content": f"answer {index}"}
+        else {"role": "assistant", "content": f"answer {index} " + ("context " * 100)}
         for index in range(4)
         for offset in range(2)
     ]
 
-    CompactManager().compact(history, keep_recent_turns=1, context_manager=manager)
+    result = await _compact_manager().compact(history, context_manager=manager)
     manager.build_system_prompt_once(["read_file: read a file"])
 
+    assert result.applied is True
     assert manager.system_prompt_build_count == 2
 
 

@@ -1,6 +1,6 @@
 """Context, prompt-budget, and workspace public API."""
 
-from core.coding.context.compact import CompactManager
+from core.coding.context.compact import CompactionPolicy, CompactManager, Summarizer
 from core.coding.context.manager import (
     DEFAULT_SYSTEM_PROMPT,
     SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
@@ -10,6 +10,11 @@ from core.coding.context.manager import (
     tail_clip,
 )
 from core.coding.context.projection import ContextLevel, ContextProjector
+from core.coding.context.summary import (
+    CompactionCheckpoint,
+    CompactionResult,
+    CompactionSummary,
+)
 from core.coding.context.workspace import (
     IGNORED_PATH_NAMES,
     WorkspaceContext,
@@ -32,12 +37,17 @@ __all__ = [
     "MAX_FILE_SIZE",
     "SYSTEM_PROMPT_DYNAMIC_BOUNDARY",
     "CompactManager",
+    "CompactionCheckpoint",
+    "CompactionPolicy",
+    "CompactionResult",
+    "CompactionSummary",
     "ContextLevel",
     "ContextManager",
     "ContextProjector",
     "FileChange",
     "FileSnapshot",
     "SectionRender",
+    "Summarizer",
     "WorkspaceContext",
     "WorkspaceDiff",
     "WorkspaceDiffTracker",
