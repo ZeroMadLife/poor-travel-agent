@@ -872,7 +872,8 @@ class CodingRuntime:
         Yielding is forbidden inside ``finally`` for an async generator, so the
         cleanup block performs only state mutation (no yield).
         """
-        # Active-run lease: reject if a run is already in progress.
+        # The run and manual compaction share one operation lease. Acquire it
+        # before creating run evidence so a busy rejection has no partial run.
         if self.active_run_id is not None:
             yield event_to_dict(
                 ErrorEvent(
@@ -881,6 +882,15 @@ class CodingRuntime:
                 )
             )
             return
+        if self._context_operation_lock.locked():
+            yield event_to_dict(
+                ErrorEvent(
+                    run_id="",
+                    message="A context operation is already in progress for this session",
+                )
+            )
+            return
+        await self._context_operation_lock.acquire()
 
         self.stop_requested = False
         run_id = f"run_{uuid.uuid4().hex[:12]}"
@@ -902,17 +912,13 @@ class CodingRuntime:
             self.run_store.append_trace(run_id, started)
             self.session_event_bus.emit("turn_started", started)
             if self.context_controller is not None:
-                await self._acquire_context_operation()
-                try:
-                    prepared = await self.context_controller.on_turn_start(
-                        deepcopy(self._active_projection),
-                        user_message,
-                        run_id,
-                        previous_checkpoint=self._active_checkpoint,
-                        transcript_range=self._active_transcript_range(),
-                    )
-                finally:
-                    self._context_operation_lock.release()
+                prepared = await self.context_controller.on_turn_start(
+                    deepcopy(self._active_projection),
+                    user_message,
+                    run_id,
+                    previous_checkpoint=self._active_checkpoint,
+                    transcript_range=self._active_transcript_range(),
+                )
                 if prepared.compaction_result is not None and prepared.compaction_result.applied:
                     self._apply_compaction_result(prepared.compaction_result)
                 prepared_events = [event_to_dict(event) for event in prepared.events]
@@ -931,6 +937,7 @@ class CodingRuntime:
                 )
             self.active_run_id = None
             self.stop_requested = False
+            self._context_operation_lock.release()
             self._save_session()
             raise
         except Exception:
@@ -939,6 +946,7 @@ class CodingRuntime:
             )
             self.active_run_id = None
             self.stop_requested = False
+            self._context_operation_lock.release()
             self._save_session()
             for event in failure_events:
                 yield event
@@ -983,6 +991,7 @@ class CodingRuntime:
             )
             self.active_run_id = None
             self.stop_requested = False
+            self._context_operation_lock.release()
             self._save_session()
             for event in failure_events:
                 yield event
@@ -1127,6 +1136,7 @@ class CodingRuntime:
                 self._persist_run_terminal(run_id, run_start_time)
             self.stop_requested = False
             self.active_run_id = None
+            self._context_operation_lock.release()
             self._save_session()
 
     def request_stop(self, run_id: str | None = None) -> bool:

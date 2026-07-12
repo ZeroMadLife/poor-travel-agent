@@ -281,3 +281,92 @@ def test_model_switch_rejects_active_run(tmp_path: Path) -> None:
 
     assert response.status_code == 409
     assert response.json()["detail"] == "context operation is busy"
+
+
+def test_models_current_reflects_session_model(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = TestClient(app)
+    session_id = _session(client)
+    assert client.patch(
+        f"/api/v1/coding/{session_id}/model", json={"model_id": "model-b"}
+    ).status_code == 200
+
+    response = client.get("/api/v1/coding/models")
+    assert response.status_code == 200
+    assert response.json()["current"] == "model-b"
+    explicit = client.get("/api/v1/coding/models", params={"session_id": session_id})
+    assert explicit.json()["current"] == "model-b"
+
+
+def test_resume_rejects_external_workspace_before_runtime_construction(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    app = _app(tmp_path)
+    client = TestClient(app)
+    session_id = _session(client)
+    outside = tmp_path.parent / "outside-workspace"
+    outside.mkdir()
+    # Persist a path that would make SkillRegistry inspect an out-of-scope tree.
+    runtime = app.state.coding_sessions[session_id]
+    runtime._save_session()
+    store = runtime.session_store
+    state = store.load(session_id)
+    state["workspace_root"] = str(outside)
+    store.save(state)
+    constructed = False
+
+    class ExplodingRuntime:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            nonlocal constructed
+            constructed = True
+            raise AssertionError("runtime must not be constructed")
+
+    monkeypatch.setattr("api.coding.CodingRuntime", ExplodingRuntime)
+    response = client.post(f"/api/v1/coding/session/{session_id}/resume")
+    assert response.status_code == 400
+    assert constructed is False
+
+
+def test_create_rejects_workspace_symlink_escape(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "outside-create"
+    outside.mkdir()
+    (tmp_path / "escape").symlink_to(outside, target_is_directory=True)
+    client = TestClient(_app(tmp_path))
+
+    response = client.post(
+        "/api/v1/coding/session", json={"workspace_root": str(tmp_path / "escape")}
+    )
+    assert response.status_code == 400
+    assert "configured coding workspace" in response.json()["detail"]
+
+
+def test_create_and_resume_reject_models_outside_catalog(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    app = _app(tmp_path)
+    client = TestClient(app)
+    app.state.coding_default_model = "unknown"
+    created = client.post("/api/v1/coding/session", json={})
+    assert created.status_code == 422
+    assert created.json()["detail"] == "unknown coding model"
+
+    app.state.coding_default_model = "model-a"
+    session_id = _session(client)
+    runtime = app.state.coding_sessions[session_id]
+    runtime._save_session()
+    state = runtime.session_store.load(session_id)
+    state["model_spec"] = "unknown"
+    runtime.session_store.save(state)
+    constructed = False
+
+    class ExplodingRuntime:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            nonlocal constructed
+            constructed = True
+            raise AssertionError("runtime must not be constructed")
+
+    monkeypatch.setattr("api.coding.CodingRuntime", ExplodingRuntime)
+    resumed = client.post(f"/api/v1/coding/session/{session_id}/resume")
+    assert resumed.status_code == 422
+    assert resumed.json()["detail"] == "unknown coding model"
+    assert constructed is False
