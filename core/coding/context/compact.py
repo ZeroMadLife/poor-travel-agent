@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
-from collections.abc import Mapping
+import posixpath
+import time
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import uuid4
+
+from pydantic import ValidationError
 
 from core.coding.context.budget import ContextPolicy, TokenCounter
 from core.coding.context.summary import (
@@ -43,6 +48,7 @@ class CompactionPolicy:
     tail_budget_ratio: float = 0.20
     minimum_savings_ratio: float = 0.10
     ineffective_limit: int = 2
+    cooldown_seconds: float = 60.0
 
     def __post_init__(self) -> None:
         if self.min_recent_turns < 1:
@@ -55,6 +61,15 @@ class CompactionPolicy:
             raise ValueError("minimum_savings_ratio must be within [0, 1]")
         if self.ineffective_limit < 1:
             raise ValueError("ineffective_limit must be at least one")
+        if self.cooldown_seconds < 0:
+            raise ValueError("cooldown_seconds must be non-negative")
+
+
+@dataclass
+class _SessionState:
+    ineffective_results: int = 0
+    auto_circuit_open: bool = False
+    cooldown_until: float | None = None
 
 
 class CompactManager:
@@ -65,13 +80,15 @@ class CompactManager:
         policy: ContextPolicy,
         counter: TokenCounter | None = None,
         compaction_policy: CompactionPolicy | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.summarizer = summarizer
         self.policy = policy
         self.counter = counter or TokenCounter()
         self.compaction_policy = compaction_policy or CompactionPolicy()
-        self._ineffective_results = 0
-        self._auto_circuit_open = False
+        self.monotonic = monotonic
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._states: dict[str, _SessionState] = {}
 
     async def compact(
         self,
@@ -82,111 +99,234 @@ class CompactManager:
         previous_checkpoint: CompactionCheckpoint | None = None,
         transcript_range: tuple[int, int] | None = None,
         context_manager: CacheInvalidator | None = None,
+        session_id: str = "default",
     ) -> CompactionResult:
+        lock = self._locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            return await self._compact_locked(
+                history=history,
+                trigger=trigger,
+                focus=focus,
+                previous_checkpoint=previous_checkpoint,
+                transcript_range=transcript_range,
+                context_manager=context_manager,
+                session_id=session_id,
+            )
+
+    async def _compact_locked(
+        self,
+        *,
+        history: list[dict[str, Any]],
+        trigger: str,
+        focus: str,
+        previous_checkpoint: CompactionCheckpoint | None,
+        transcript_range: tuple[int, int] | None,
+        context_manager: CacheInvalidator | None,
+        session_id: str,
+    ) -> CompactionResult:
+        compaction_id = f"compact-{uuid4().hex}"
         original = deepcopy(history)
-        before_tokens = self._count_history(original)
-        if trigger == "auto" and self._auto_circuit_open:
+        state = self._states.setdefault(session_id, _SessionState())
+        before_tokens = self._safe_count(original)
+        current_time = self.monotonic()
+        if trigger == "auto":
+            if state.cooldown_until is not None and current_time < state.cooldown_until:
+                return self._unchanged(
+                    original,
+                    previous_checkpoint,
+                    before_tokens,
+                    "cooldown_active",
+                    compaction_id,
+                    trigger,
+                    retryable=True,
+                    cooldown_until=state.cooldown_until,
+                )
+            if state.auto_circuit_open:
+                return self._unchanged(
+                    original,
+                    previous_checkpoint,
+                    before_tokens,
+                    "auto_compaction_circuit_open",
+                    compaction_id,
+                    trigger,
+                )
+
+        try:
+            prefix, archived, tail = self._split_history(original)
+            if not archived:
+                return self._unchanged(
+                    original,
+                    previous_checkpoint,
+                    before_tokens,
+                    "insufficient_history",
+                    compaction_id,
+                    trigger,
+                )
+            archived_range = self._resolve_transcript_range(
+                archived, transcript_range, previous_checkpoint
+            )
+            previous_summary = self._validated_previous_summary(previous_checkpoint)
+            evidence_hash = self._evidence_hash(archived)
+            max_tokens = max(
+                1,
+                min(int(self.policy.context_window_tokens * 0.05), 12_000),
+            )
+            summary, failure_reason = await self._produce_summary(
+                archived=archived,
+                previous_summary=previous_summary,
+                focus=focus,
+                max_tokens=max_tokens,
+                archived_range=archived_range,
+            )
+            if summary is None:
+                cooldown_until = self._start_cooldown(state)
+                return self._unchanged(
+                    original,
+                    previous_checkpoint,
+                    before_tokens,
+                    failure_reason,
+                    compaction_id,
+                    trigger,
+                    retryable=True,
+                    cooldown_until=cooldown_until,
+                )
+
+            rendered_summary = summary.render_for_prompt()
+            summary_item = {
+                "role": "system",
+                "kind": "compact_summary",
+                "content": rendered_summary,
+                "created_at": now(),
+            }
+            projected = [*deepcopy(prefix), summary_item, *deepcopy(tail)]
+            after_tokens = self._count_history(projected)
+            savings_ratio = (before_tokens - after_tokens) / before_tokens
+            if savings_ratio < self.compaction_policy.minimum_savings_ratio:
+                state.ineffective_results += 1
+                if state.ineffective_results >= self.compaction_policy.ineffective_limit:
+                    state.auto_circuit_open = True
+                return CompactionResult(
+                    applied=False,
+                    projected_history=deepcopy(original),
+                    checkpoint=previous_checkpoint,
+                    before_tokens=before_tokens,
+                    after_tokens=after_tokens,
+                    archived_items=0,
+                    reason="ineffective_summary",
+                    compaction_id=compaction_id,
+                    trigger=trigger,
+                )
+
+            previous_hash = previous_checkpoint.summary_hash if previous_checkpoint else ""
+            summary_hash = self._summary_hash(previous_hash, evidence_hash, rendered_summary)
+            checkpoint = CompactionCheckpoint(
+                compaction_id=compaction_id,
+                transcript_start=archived_range[0],
+                transcript_end=archived_range[1],
+                summary=summary.model_copy(deep=True),
+                summary_hash=summary_hash,
+                previous_summary_hash=previous_hash,
+                evidence_hash=evidence_hash,
+            )
+            state.ineffective_results = 0
+            state.auto_circuit_open = False
+            state.cooldown_until = None
+            if context_manager is not None:
+                try:
+                    context_manager.invalidate_system_prompt()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass
+            return CompactionResult(
+                applied=True,
+                projected_history=projected,
+                checkpoint=checkpoint,
+                before_tokens=before_tokens,
+                after_tokens=after_tokens,
+                archived_items=len(archived),
+                compaction_id=compaction_id,
+                trigger=trigger,
+            )
+        except asyncio.CancelledError:
+            raise
+        except ValueError as exc:
+            reason = (
+                str(exc)
+                if str(exc)
+                in {
+                    "invalid_transcript_range",
+                    "non_contiguous_transcript_range",
+                    "invalid_previous_checkpoint",
+                }
+                else "compaction_failed"
+            )
             return self._unchanged(
                 original,
                 previous_checkpoint,
                 before_tokens,
-                "auto_compaction_circuit_open",
+                reason,
+                compaction_id,
+                trigger,
+            )
+        except Exception:
+            return self._unchanged(
+                original,
+                previous_checkpoint,
+                before_tokens,
+                "compaction_failed",
+                compaction_id,
+                trigger,
             )
 
-        archived, tail = self._split_history(original)
-        if not archived:
-            return self._unchanged(
-                original, previous_checkpoint, before_tokens, "insufficient_history"
-            )
-        start = transcript_range[0] if transcript_range is not None else 0
-        archived_range = (start, start + len(archived) - 1)
-        max_tokens = max(
-            1,
-            min(int(self.policy.context_window_tokens * 0.05), 12_000),
-        )
-        archived_history = deepcopy(archived)
-        previous_summary = previous_checkpoint.summary if previous_checkpoint is not None else None
-        try:
-            raw_summary = await self.summarizer.summarize(
-                archived_history=archived_history,
-                previous_summary=previous_summary,
-                focus=focus,
-                max_tokens=max_tokens,
-                source_transcript_range=archived_range,
-                repair_feedback=None,
-            )
-            summary = CompactionSummary.model_validate(raw_summary)
-            feedback = self._validate_summary(summary, archived, archived_range)
-        except Exception as exc:
-            return self._unchanged(original, previous_checkpoint, before_tokens, str(exc))
-        if feedback:
+    async def _produce_summary(
+        self,
+        *,
+        archived: list[dict[str, Any]],
+        previous_summary: CompactionSummary | None,
+        focus: str,
+        max_tokens: int,
+        archived_range: tuple[int, int],
+    ) -> tuple[CompactionSummary | None, str]:
+        repair_feedback: str | None = None
+        for attempt in range(2):
             try:
-                repaired = await self.summarizer.summarize(
-                    archived_history=archived_history,
-                    previous_summary=previous_summary,
+                raw_summary = await self.summarizer.summarize(
+                    archived_history=deepcopy(archived),
+                    previous_summary=deepcopy(previous_summary),
                     focus=focus,
                     max_tokens=max_tokens,
                     source_transcript_range=archived_range,
-                    repair_feedback=feedback,
+                    repair_feedback=repair_feedback,
                 )
-                summary = CompactionSummary.model_validate(repaired)
-                feedback = self._validate_summary(summary, archived, archived_range)
-            except Exception as exc:
-                return self._unchanged(original, previous_checkpoint, before_tokens, str(exc))
-            if feedback:
-                return self._unchanged(original, previous_checkpoint, before_tokens, feedback)
-
-        summary_item = {
-            "role": "system",
-            "kind": "compact_summary",
-            "content": summary.render_for_prompt(),
-            "created_at": now(),
-        }
-        projected = [summary_item, *deepcopy(tail)]
-        after_tokens = self._count_history(projected)
-        savings_ratio = (before_tokens - after_tokens) / before_tokens
-        if savings_ratio < self.compaction_policy.minimum_savings_ratio:
-            self._ineffective_results += 1
-            if self._ineffective_results >= self.compaction_policy.ineffective_limit:
-                self._auto_circuit_open = True
-            return CompactionResult(
-                applied=False,
-                projected_history=original,
-                checkpoint=previous_checkpoint,
-                before_tokens=before_tokens,
-                after_tokens=after_tokens,
-                archived_items=0,
-                reason="ineffective_summary",
-            )
-
-        digest = hashlib.sha256(summary.render_for_prompt().encode("utf-8")).hexdigest()
-        checkpoint = CompactionCheckpoint(
-            compaction_id=f"compact-{uuid4().hex}",
-            transcript_start=archived_range[0],
-            transcript_end=archived_range[1],
-            summary=summary,
-            summary_hash=digest,
-        )
-        self._ineffective_results = 0
-        self._auto_circuit_open = False
-        if context_manager is not None:
-            context_manager.invalidate_system_prompt()
-        return CompactionResult(
-            applied=True,
-            projected_history=projected,
-            checkpoint=checkpoint,
-            before_tokens=before_tokens,
-            after_tokens=after_tokens,
-            archived_items=len(archived),
-        )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return None, "summarizer_failed"
+            try:
+                summary = CompactionSummary.model_validate(raw_summary)
+            except ValidationError:
+                if attempt == 0:
+                    repair_feedback = "summary_schema_invalid"
+                    continue
+                return None, "summary_schema_invalid"
+            quality_feedback = self._validate_summary(summary, archived, archived_range)
+            if not quality_feedback:
+                return summary, ""
+            if attempt == 0:
+                repair_feedback = quality_feedback
+                continue
+            return None, "summary_quality_invalid"
+        return None, "summary_schema_invalid"
 
     def _split_history(
         self, history: list[dict[str, Any]]
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        filtered = [item for item in history if item.get("kind") != "compact_summary"]
         turns: list[list[dict[str, Any]]] = []
         prefix: list[dict[str, Any]] = []
         current: list[dict[str, Any]] | None = None
-        for item in history:
+        for item in filtered:
             if item.get("role") == "user":
                 if current is not None:
                     turns.append(current)
@@ -200,7 +340,9 @@ class CompactManager:
         keep = min(len(turns), self.compaction_policy.min_recent_turns)
         max_keep = min(len(turns), self.compaction_policy.max_recent_turns)
         tail_budget = int(
-            self.policy.context_window_tokens * self.compaction_policy.tail_budget_ratio
+            self.policy.effective_limit_tokens
+            * self.policy.compact_ratio
+            * self.compaction_policy.tail_budget_ratio
         )
         while keep < max_keep:
             candidate = [item for turn in turns[-(keep + 1) :] for item in turn]
@@ -210,44 +352,161 @@ class CompactManager:
         archived_turns = turns[:-keep] if keep else turns
         tail_turns = turns[-keep:] if keep else []
         return (
-            [*prefix, *(item for turn in archived_turns for item in turn)],
+            prefix,
+            [item for turn in archived_turns for item in turn],
             [item for turn in tail_turns for item in turn],
         )
+
+    @staticmethod
+    def _resolve_transcript_range(
+        archived: list[dict[str, Any]],
+        supplied: tuple[int, int] | None,
+        previous: CompactionCheckpoint | None,
+    ) -> tuple[int, int]:
+        if supplied is not None:
+            if (
+                len(supplied) != 2
+                or isinstance(supplied[0], bool)
+                or isinstance(supplied[1], bool)
+                or not isinstance(supplied[0], int)
+                or not isinstance(supplied[1], int)
+                or supplied[0] < 0
+                or supplied[1] < supplied[0]
+                or supplied[1] - supplied[0] + 1 != len(archived)
+            ):
+                raise ValueError("invalid_transcript_range")
+            resolved = supplied
+        else:
+            sequences = [item.get("sequence") for item in archived]
+            has_real_sequence = any(value is not None for value in sequences)
+            if has_real_sequence:
+                if not all(
+                    isinstance(value, int) and not isinstance(value, bool) for value in sequences
+                ):
+                    raise ValueError("non_contiguous_transcript_range")
+                numeric = [
+                    value
+                    for value in sequences
+                    if isinstance(value, int) and not isinstance(value, bool)
+                ]
+                if numeric[0] < 0:
+                    raise ValueError("invalid_transcript_range")
+                if numeric != list(range(numeric[0], numeric[0] + len(numeric))):
+                    raise ValueError("non_contiguous_transcript_range")
+                resolved = (numeric[0], numeric[-1])
+            else:
+                start = previous.transcript_end + 1 if previous is not None else 0
+                resolved = (start, start + len(archived) - 1)
+        if previous is not None and resolved[0] != previous.transcript_end + 1:
+            raise ValueError("non_contiguous_transcript_range")
+        return resolved
+
+    @classmethod
+    def _validated_previous_summary(
+        cls, checkpoint: CompactionCheckpoint | None
+    ) -> CompactionSummary | None:
+        if checkpoint is None:
+            return None
+        if (
+            checkpoint.transcript_start < 0
+            or checkpoint.transcript_end < checkpoint.transcript_start
+            or checkpoint.summary.source_transcript_range
+            != (checkpoint.transcript_start, checkpoint.transcript_end)
+        ):
+            raise ValueError("invalid_previous_checkpoint")
+        expected = cls._summary_hash(
+            checkpoint.previous_summary_hash,
+            checkpoint.evidence_hash,
+            checkpoint.summary.render_for_prompt(),
+        )
+        if not checkpoint.evidence_hash or expected != checkpoint.summary_hash:
+            raise ValueError("invalid_previous_checkpoint")
+        return checkpoint.summary.model_copy(deep=True)
+
+    @staticmethod
+    def _normalize_path(value: str) -> str:
+        return posixpath.normpath(value.replace("\\", "/"))
+
+    @classmethod
+    def _validate_summary(
+        cls,
+        summary: CompactionSummary,
+        archived: list[dict[str, Any]],
+        archived_range: tuple[int, int],
+    ) -> str:
+        if summary.source_transcript_range != archived_range:
+            return "source_transcript_range_invalid"
+        todo_ids: set[str] = set()
+        files_read: set[str] = set()
+        files_modified: set[str] = set()
+        tests: set[str] = set()
+        artifacts: set[str] = set()
+        run_ids: set[str] = set()
+        for item in archived:
+            raw_args = item.get("args")
+            args: Mapping[str, Any] = raw_args if isinstance(raw_args, Mapping) else {}
+            for value in (item.get("todo_id"), item.get("turn_id"), args.get("todo_id")):
+                if isinstance(value, str):
+                    todo_ids.add(value)
+            name = item.get("name")
+            path = args.get("path")
+            if isinstance(path, str) and name in {"read_file", "search", "list_files"}:
+                files_read.add(cls._normalize_path(path))
+            if isinstance(path, str) and name in {"write_file", "patch_file"}:
+                files_modified.add(cls._normalize_path(path))
+            command = args.get("command") if name == "run_shell" else None
+            if isinstance(command, str):
+                tests.add(command)
+            for value in (item.get("test_command"), args.get("test_command")):
+                if isinstance(value, str):
+                    tests.add(value)
+            artifact = item.get("artifact_ref")
+            if isinstance(artifact, str):
+                artifacts.add(artifact)
+            run_id = item.get("run_id")
+            if isinstance(run_id, str):
+                run_ids.add(run_id)
+
+        checks = (
+            (summary.active_todos, todo_ids, False),
+            (summary.files_read, files_read, True),
+            (summary.files_modified, files_modified, True),
+            (summary.tests, tests, False),
+            (summary.artifact_refs, artifacts, False),
+            (summary.source_run_ids, run_ids, False),
+        )
+        for references, evidence, normalize_paths in checks:
+            for reference in references:
+                candidate = cls._normalize_path(reference) if normalize_paths else reference
+                if candidate not in evidence:
+                    return f"summary_reference_missing:{reference}"
+        return ""
 
     def _count_history(self, history: list[dict[str, Any]]) -> int:
         rendered = json.dumps(history, ensure_ascii=False, sort_keys=True, default=str)
         return self.counter.count(rendered).tokens
 
+    def _safe_count(self, history: list[dict[str, Any]]) -> int:
+        try:
+            return self._count_history(history)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return 1
+
     @staticmethod
-    def _validate_summary(
-        summary: CompactionSummary,
-        archived: list[dict[str, Any]],
-        archived_range: tuple[int, int],
-    ) -> str:
-        errors: list[str] = []
-        if summary.source_transcript_range != archived_range:
-            errors.append(
-                f"source_transcript_range must be {archived_range}, "
-                f"got {summary.source_transcript_range}"
-            )
+    def _evidence_hash(history: list[dict[str, Any]]) -> str:
+        rendered = json.dumps(history, ensure_ascii=False, sort_keys=True, default=str)
+        return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
 
-        evidence = json.dumps(archived, ensure_ascii=False, sort_keys=True, default=str)
-        for field in (
-            "active_todos",
-            "files_read",
-            "files_modified",
-            "tests",
-            "artifact_refs",
-        ):
-            for reference in getattr(summary, field):
-                if reference not in evidence:
-                    errors.append(f"{field} reference missing from evidence: {reference}")
+    @staticmethod
+    def _summary_hash(previous_hash: str, evidence_hash: str, rendered: str) -> str:
+        payload = f"{previous_hash}\n{evidence_hash}\n{rendered}"
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-        run_ids = {str(item["run_id"]) for item in archived if item.get("run_id") not in (None, "")}
-        for run_id in summary.source_run_ids:
-            if run_id not in run_ids:
-                errors.append(f"source_run_ids reference missing from evidence: {run_id}")
-        return "; ".join(errors)
+    def _start_cooldown(self, state: _SessionState) -> float:
+        state.cooldown_until = self.monotonic() + self.compaction_policy.cooldown_seconds
+        return state.cooldown_until
 
     @staticmethod
     def _unchanged(
@@ -255,5 +514,22 @@ class CompactManager:
         checkpoint: CompactionCheckpoint | None,
         tokens: int,
         reason: str,
+        compaction_id: str,
+        trigger: str,
+        *,
+        retryable: bool = False,
+        cooldown_until: float | None = None,
     ) -> CompactionResult:
-        return CompactionResult(False, history, checkpoint, tokens, tokens, 0, reason)
+        return CompactionResult(
+            False,
+            deepcopy(history),
+            checkpoint,
+            tokens,
+            tokens,
+            0,
+            reason,
+            compaction_id,
+            trigger,
+            retryable,
+            cooldown_until,
+        )

@@ -4,11 +4,23 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    StrictStr,
+    StringConstraints,
+    field_validator,
+)
 
 _HANDOFF_WARNING = "Historical handoff only; the latest user message always wins."
+_Text = Annotated[StrictStr, StringConstraints(max_length=8_000)]
+_Reference = Annotated[StrictStr, StringConstraints(min_length=1, max_length=1_024)]
+_TextItems = Annotated[tuple[_Text, ...], Field(max_length=128)]
+_References = Annotated[tuple[_Reference, ...], Field(max_length=256)]
 
 
 class CompactionSummary(BaseModel):
@@ -16,19 +28,33 @@ class CompactionSummary(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    goal: str
-    user_constraints: list[str] = Field(default_factory=list)
-    decisions: list[str] = Field(default_factory=list)
-    completed_work: list[str] = Field(default_factory=list)
-    active_todos: list[str] = Field(default_factory=list)
-    files_read: list[str] = Field(default_factory=list)
-    files_modified: list[str] = Field(default_factory=list)
-    tests: list[str] = Field(default_factory=list)
-    errors: list[str] = Field(default_factory=list)
-    artifact_refs: list[str] = Field(default_factory=list)
-    next_steps: list[str] = Field(default_factory=list)
-    source_transcript_range: tuple[int, int]
-    source_run_ids: list[str] = Field(default_factory=list)
+    goal: _Text
+    user_constraints: _TextItems = ()
+    decisions: _TextItems = ()
+    completed_work: _TextItems = ()
+    active_todos: _References = ()
+    files_read: _References = ()
+    files_modified: _References = ()
+    tests: _References = ()
+    errors: _TextItems = ()
+    artifact_refs: _References = ()
+    next_steps: _TextItems = ()
+    source_transcript_range: tuple[StrictInt, StrictInt]
+    source_run_ids: _References = ()
+
+    @field_validator("source_transcript_range", mode="before")
+    @classmethod
+    def _normalize_range(cls, value: object) -> object:
+        if isinstance(value, list):
+            return tuple(value)
+        return value
+
+    @field_validator("source_transcript_range")
+    @classmethod
+    def _validate_range(cls, value: tuple[int, int]) -> tuple[int, int]:
+        if value[0] < 0 or value[1] < value[0]:
+            raise ValueError("source transcript range must be non-negative and ordered")
+        return value
 
     def render_for_prompt(self) -> str:
         """Render a deterministic prompt block with an instruction-precedence warning."""
@@ -48,6 +74,8 @@ class CompactionCheckpoint:
     transcript_end: int
     summary: CompactionSummary
     summary_hash: str
+    previous_summary_hash: str = ""
+    evidence_hash: str = ""
 
 
 @dataclass(frozen=True)
@@ -59,3 +87,7 @@ class CompactionResult:
     after_tokens: int
     archived_items: int
     reason: str = ""
+    compaction_id: str = ""
+    trigger: str = "manual"
+    retryable: bool = False
+    cooldown_until: float | None = None
