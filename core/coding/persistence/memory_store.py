@@ -226,6 +226,9 @@ class MemoryStore:
             current = _proposal(row)
             if current.revision != expected:
                 raise MemoryConflictError(f"proposal revision conflict: expected {expected}, got {current.revision}")
+            current_fact_count = int(db.execute("SELECT COUNT(*) FROM memory_facts").fetchone()[0])
+            if current.status == "pending" and current_fact_count != current.base_revision:
+                raise MemoryConflictError("proposal base revision is stale")
             if current.status != "pending":
                 if current.status == status:
                     db.commit()
