@@ -1,9 +1,19 @@
+import json
+import os
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from core.coding.memory import MemoryManager
-from core.coding.persistence.memory_store import MemoryCandidate, MemoryConflictError, MemoryStore
+from core.coding.persistence.memory_store import (
+    MAX_JSON_BYTES,
+    MemoryCandidate,
+    MemoryConflictError,
+    MemoryCorruptionError,
+    MemoryStore,
+    MemoryStoreError,
+)
 
 
 def test_proposal_restart_and_no_mutation_before_approval(tmp_path: Path) -> None:
@@ -93,3 +103,112 @@ def test_same_proposal_id_requires_metadata_match(tmp_path: Path) -> None:
     store.create_proposal([MemoryCandidate("same")], proposal_id="p", run_id="r1")
     with pytest.raises(MemoryConflictError):
         store.create_proposal([MemoryCandidate("same")], proposal_id="p", run_id="r2")
+
+
+def test_store_rejects_symlink_in_storage_path(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+
+    with pytest.raises((ValueError, MemoryStoreError)):
+        MemoryStore(link / "nested", "workspace")
+
+
+def test_store_rejects_database_hardlink_added_after_construction(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "storage", "workspace")
+    os.link(store.path, tmp_path / "database-copy")
+
+    with pytest.raises(MemoryCorruptionError):
+        store.list_facts()
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+def test_store_rejects_unsafe_sqlite_sidecar(tmp_path: Path, suffix: str) -> None:
+    store = MemoryStore(tmp_path / "storage", "workspace")
+    victim = tmp_path / "victim"
+    victim.write_text("safe", encoding="utf-8")
+    sidecar = Path(f"{store.path}{suffix}")
+    sidecar.unlink(missing_ok=True)
+    sidecar.symlink_to(victim)
+
+    with pytest.raises(MemoryCorruptionError):
+        store.list_facts()
+    assert victim.read_text(encoding="utf-8") == "safe"
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+def test_store_rejects_hardlinked_sqlite_sidecar(tmp_path: Path, suffix: str) -> None:
+    store = MemoryStore(tmp_path / "storage", "workspace")
+    sidecar = Path(f"{store.path}{suffix}")
+    sidecar.unlink(missing_ok=True)
+    sidecar.write_bytes(b"")
+    os.link(sidecar, tmp_path / f"sidecar-copy{suffix}")
+
+    with pytest.raises(MemoryCorruptionError):
+        store.list_facts()
+
+
+@pytest.mark.parametrize(
+    "schema_sql",
+    [
+        "CREATE TABLE surprise(value TEXT)",
+        "CREATE VIEW surprise AS SELECT * FROM memory_facts",
+        "CREATE TRIGGER surprise AFTER INSERT ON memory_facts BEGIN SELECT 1; END",
+        "CREATE INDEX surprise ON memory_facts(content)",
+    ],
+)
+def test_store_rejects_noncanonical_schema_objects(tmp_path: Path, schema_sql: str) -> None:
+    store = MemoryStore(tmp_path / "storage", "workspace")
+    with sqlite3.connect(store.path) as db:
+        db.execute(schema_sql)
+
+    with pytest.raises(MemoryStoreError):
+        MemoryStore(tmp_path / "storage", "workspace")
+
+
+@pytest.mark.parametrize("version", [-1, 2])
+def test_store_rejects_unsupported_schema_versions(tmp_path: Path, version: int) -> None:
+    store = MemoryStore(tmp_path / "storage", "workspace")
+    with sqlite3.connect(store.path) as db:
+        db.execute(f"PRAGMA user_version={version}")
+
+    with pytest.raises(MemoryStoreError):
+        MemoryStore(tmp_path / "storage", "workspace")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '[{"content":"one","content":"two"}]',
+        '[{"content":NaN}]',
+        '{}',
+        '[{"content":4}]',
+        '[{"content":"ok","unknown":"field"}]',
+    ],
+)
+def test_store_wraps_malformed_candidate_payload(tmp_path: Path, payload: str) -> None:
+    store = MemoryStore(tmp_path / "storage", "workspace")
+    store.create_proposal([MemoryCandidate("valid")], proposal_id="p")
+    with sqlite3.connect(store.path) as db:
+        db.execute(
+            "UPDATE memory_proposals SET candidates_json=? WHERE proposal_id='p'",
+            (payload,),
+        )
+
+    with pytest.raises(MemoryCorruptionError):
+        store.get_proposal("p")
+
+
+def test_store_rejects_oversized_candidate_payload_on_read(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "storage", "workspace")
+    store.create_proposal([MemoryCandidate("valid")], proposal_id="p")
+    payload = json.dumps([{"content": "x" * MAX_JSON_BYTES}])
+    with sqlite3.connect(store.path) as db:
+        db.execute(
+            "UPDATE memory_proposals SET candidates_json=? WHERE proposal_id='p'",
+            (payload,),
+        )
+
+    with pytest.raises(MemoryCorruptionError):
+        store.get_proposal("p")

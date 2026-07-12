@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
+from datetime import date
 from pathlib import Path
+
+import pytest
 
 from core.coding.memory import (
     DurableMemory,
+    MemoryFact,
     MemoryManager,
     WorkingMemory,
     workspace_id_from_path,
@@ -199,6 +204,47 @@ def test_remember_records_source_ref(tmp_path: Path) -> None:
     assert facts[0].source_ref == "run_abc12345"
     # The index surfaces the run prefix.
     assert "run_abc1" in mem.get_index()
+
+
+@pytest.mark.parametrize(
+    "relative",
+    ["project-conventions.md", "MEMORY.md", f"daily/{date.today().isoformat()}.md"],
+)
+def test_durable_memory_rejects_hardlinked_projection_files(
+    tmp_path: Path, relative: str
+) -> None:
+    storage = tmp_path / "storage"
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    mem = DurableMemory(storage, workspace_id_from_path(workspace))
+    target = mem.root / relative
+    target.parent.mkdir(exist_ok=True)
+    target.write_text("existing", encoding="utf-8")
+    os.link(target, tmp_path / f"copy-{target.name}")
+
+    with pytest.raises(OSError):
+        if relative.startswith("daily/"):
+            mem._append_daily_log(
+                MemoryFact(content="unsafe", created_at="now")
+            )
+        else:
+            mem.remember("unsafe")
+
+
+def test_durable_memory_rejects_daily_directory_replaced_by_symlink(tmp_path: Path) -> None:
+    storage = tmp_path / "storage"
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    mem = DurableMemory(storage, workspace_id_from_path(workspace))
+    daily = mem.root / "daily"
+    daily.rmdir()
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    daily.symlink_to(victim, target_is_directory=True)
+
+    with pytest.raises(OSError):
+        mem.remember("must stay in workspace memory")
+    assert list(victim.iterdir()) == []
 
 
 def test_dream_generates_pending_proposal(tmp_path: Path) -> None:

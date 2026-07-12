@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
+import os
+import re
+import stat
+import uuid
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -34,16 +40,15 @@ class DurableMemory:
     }
 
     def __init__(self, storage_root: Path, workspace_id: str) -> None:
-        memory_root = storage_root / "memory"
-        if memory_root.exists() and memory_root.is_symlink():
-            raise OSError("memory root must not be a symlink")
-        self.root = storage_root / "memory" / workspace_id
-        if self.root.exists() and self.root.is_symlink():
-            raise OSError("memory workspace must not be a symlink")
-        self.root.mkdir(parents=True, exist_ok=True)
-        (self.root / "daily").mkdir(exist_ok=True)
-        if (self.root / "daily").is_symlink():
-            raise OSError("memory daily directory must not be a symlink")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", workspace_id):
+            raise ValueError("invalid workspace id")
+        self._storage_root = _trusted_root(storage_root)
+        self._components = ("memory", workspace_id)
+        workspace_fd = _open_directory(self._storage_root, self._components)
+        os.close(workspace_fd)
+        daily_fd = _open_directory(self._storage_root, (*self._components, "daily"))
+        os.close(daily_fd)
+        self.root = self._storage_root.joinpath(*self._components)
 
     @property
     def index_path(self) -> Path:
@@ -80,9 +85,11 @@ class DurableMemory:
 
     def get_index(self) -> str:
         """Return the MEMORY.md index content."""
-        if self.index_path.is_file():
-            return self.index_path.read_text(encoding="utf-8")
-        return ""
+        directory_fd = self._workspace_fd()
+        try:
+            return _read_optional_text(directory_fd, "MEMORY.md")
+        finally:
+            os.close(directory_fd)
 
     def select_for_context(self, budget: int = 2000) -> str:
         """Return a budgeted string of durable memory for context injection."""
@@ -123,20 +130,18 @@ class DurableMemory:
         self._rebuild_index()
 
     def _append_daily_log(self, fact: MemoryFact) -> None:
-        daily_path = self.root / "daily" / f"{date.today().isoformat()}.md"
-        if daily_path.is_symlink() or (daily_path.exists() and daily_path.stat().st_nlink != 1):
-            raise OSError("memory daily file must not be a symlink")
         entry = f"- [{fact.created_at}] ({fact.topic}) {fact.content}"
         if fact.source_ref:
             entry += f" [ref: {fact.source_ref}]"
         entry += f" [source: {fact.source}]\n"
-        with daily_path.open("a", encoding="utf-8") as f:
-            f.write(entry)
+        daily_fd = _open_directory(self._storage_root, (*self._components, "daily"))
+        try:
+            _append_text(daily_fd, f"{date.today().isoformat()}.md", entry)
+        finally:
+            os.close(daily_fd)
 
     def _append_topic_file(self, fact: MemoryFact) -> None:
-        topic_path = self.root / self.TOPIC_FILES.get(fact.topic, "decisions.md")
-        if topic_path.is_symlink() or (topic_path.exists() and topic_path.stat().st_nlink != 1):
-            raise OSError("memory topic file must not be a symlink")
+        filename = self.TOPIC_FILES.get(fact.topic, "decisions.md")
         entry = json.dumps(
             {
                 "content": fact.content,
@@ -146,16 +151,24 @@ class DurableMemory:
             },
             ensure_ascii=False,
         )
-        with topic_path.open("a", encoding="utf-8") as f:
-            f.write(entry + "\n")
+        directory_fd = self._workspace_fd()
+        try:
+            _append_text(directory_fd, filename, entry + "\n")
+        finally:
+            os.close(directory_fd)
 
     def _read_topic_file(self, topic: str) -> list[MemoryFact]:
         """Parse a topic file into facts (JSON lines, backward-compat with `- content`)."""
-        path = self.root / self.TOPIC_FILES.get(topic, "")
-        if not path.is_file():
+        filename = self.TOPIC_FILES.get(topic, "")
+        directory_fd = self._workspace_fd()
+        try:
+            contents = _read_optional_text(directory_fd, filename)
+        finally:
+            os.close(directory_fd)
+        if not contents:
             return []
         facts: list[MemoryFact] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for line in contents.splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -180,21 +193,155 @@ class DurableMemory:
 
     def _rebuild_index(self) -> None:
         lines = ["# Memory Index", ""]
-        for topic, filename in self.TOPIC_FILES.items():
-            path = self.root / filename
-            if not path.is_file():
-                continue
+        for topic in self.TOPIC_FILES:
             facts = self._read_topic_file(topic)
+            if not facts:
+                continue
             lines.append(f"## {topic} ({len(facts)} facts)")
             for fact in facts:
                 ref = f" [run: {fact.source_ref[:8]}]" if fact.source_ref else ""
                 lines.append(f"  - {fact.content}{ref}")
             lines.append("")
-        if self.index_path.is_symlink() or (self.index_path.exists() and self.index_path.stat().st_nlink != 1):
-            raise OSError("memory index must not be a symlink")
-        self.index_path.write_text("\n".join(lines), encoding="utf-8")
+        directory_fd = self._workspace_fd()
+        try:
+            _replace_text(directory_fd, "MEMORY.md", "\n".join(lines))
+        finally:
+            os.close(directory_fd)
+
+    def _workspace_fd(self) -> int:
+        return _open_directory(self._storage_root, self._components)
 
 
 def workspace_id_from_path(workspace_root: Path) -> str:
     """Derive a stable workspace identifier from the canonical path."""
     return hashlib.sha256(str(workspace_root.resolve()).encode()).hexdigest()[:16]
+
+
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+_FILE_FLAGS = os.O_CLOEXEC | os.O_NOFOLLOW
+
+
+def _trusted_root(root: Path) -> Path:
+    absolute = root.absolute()
+    anchor = Path(absolute.anchor)
+    components = tuple(part for part in absolute.parts if part != absolute.anchor)
+    root_fd = _open_directory(anchor, components, tighten=False)
+    try:
+        opened = os.fstat(root_fd)
+        if opened.st_uid != os.geteuid():
+            raise OSError(f"trusted memory root must be owned by the service user: {root}")
+        os.fchmod(root_fd, 0o700)
+        os.fsync(root_fd)
+        resolved = absolute.resolve(strict=True)
+        metadata = resolved.stat()
+        if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+            raise OSError(f"trusted memory root escaped while resolving: {root}")
+        return resolved
+    finally:
+        os.close(root_fd)
+
+
+def _open_directory(
+    root: Path, components: tuple[str, ...], *, tighten: bool = True
+) -> int:
+    directory_fd = os.open(root, _DIRECTORY_FLAGS)
+    try:
+        for component in components:
+            created = False
+            try:
+                os.mkdir(component, mode=0o700, dir_fd=directory_fd)
+                created = True
+            except FileExistsError:
+                pass
+            if created:
+                os.fsync(directory_fd)
+            try:
+                next_fd = os.open(component, _DIRECTORY_FLAGS, dir_fd=directory_fd)
+            except OSError as exc:
+                if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                    raise OSError(f"symlink memory directory rejected: {component}") from exc
+                raise
+            try:
+                if tighten:
+                    os.fchmod(next_fd, 0o700)
+                os.close(directory_fd)
+            except Exception:
+                os.close(next_fd)
+                raise
+            directory_fd = next_fd
+        return directory_fd
+    except Exception:
+        os.close(directory_fd)
+        raise
+
+
+def _open_file(directory_fd: int, name: str, flags: int) -> int:
+    file_fd = os.open(name, flags | _FILE_FLAGS, 0o600, dir_fd=directory_fd)
+    try:
+        metadata = os.fstat(file_fd)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise OSError(f"memory projection must be one regular inode: {name}")
+        os.fchmod(file_fd, 0o600)
+    except Exception:
+        os.close(file_fd)
+        raise
+    return file_fd
+
+
+def _append_text(directory_fd: int, name: str, content: str) -> None:
+    file_fd = _open_file(directory_fd, name, os.O_WRONLY | os.O_APPEND | os.O_CREAT)
+    try:
+        with os.fdopen(file_fd, "a", encoding="utf-8", closefd=False) as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(file_fd)
+        metadata = os.fstat(file_fd)
+        if metadata.st_nlink != 1:
+            raise OSError(f"memory projection link count changed: {name}")
+    finally:
+        os.close(file_fd)
+
+
+def _read_optional_text(directory_fd: int, name: str) -> str:
+    if not name:
+        return ""
+    try:
+        file_fd = _open_file(directory_fd, name, os.O_RDONLY)
+    except FileNotFoundError:
+        return ""
+    try:
+        with os.fdopen(file_fd, "r", encoding="utf-8", closefd=False) as stream:
+            contents = stream.read()
+        if os.fstat(file_fd).st_nlink != 1:
+            raise OSError(f"memory projection link count changed: {name}")
+        return contents
+    finally:
+        os.close(file_fd)
+
+
+def _replace_text(directory_fd: int, name: str, content: str) -> None:
+    try:
+        existing_fd = _open_file(directory_fd, name, os.O_RDONLY)
+    except FileNotFoundError:
+        existing_fd = None
+    if existing_fd is not None:
+        os.close(existing_fd)
+    temporary = f".{name}.{uuid.uuid4().hex}.tmp"
+    temp_fd = _open_file(
+        directory_fd,
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+    )
+    try:
+        with os.fdopen(temp_fd, "w", encoding="utf-8", closefd=False) as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(temp_fd)
+        os.replace(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    except Exception:
+        with suppress(FileNotFoundError):
+            os.unlink(temporary, dir_fd=directory_fd)
+        raise
+    finally:
+        os.close(temp_fd)
