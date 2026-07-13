@@ -119,6 +119,43 @@ class CloudLoginSessionRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class CloudOAuthTransactionRecord(Base):
+    """Short-lived, one-time OAuth transaction with encrypted private state."""
+
+    __tablename__ = "cloud_oauth_transactions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    state_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    browser_binding_hash: Mapped[str] = mapped_column(String(64), index=True)
+    encrypted_payload: Mapped[str] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class CloudProviderCredentialRecord(Base):
+    """Encrypted provider credential; plaintext tokens never enter browser state."""
+
+    __tablename__ = "cloud_provider_credentials"
+    __table_args__ = (
+        UniqueConstraint("user_id", "provider", name="cloud_credential_user_provider_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("cloud_users.id", ondelete="CASCADE"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(32))
+    encrypted_access_token: Mapped[str] = mapped_column(Text)
+    scopes: Mapped[str] = mapped_column(Text, default="")
+    provider_login: Mapped[str] = mapped_column(String(255), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
 class CloudProjectRecord(Base):
     """Owner-scoped project metadata, separate from a filesystem checkout."""
 

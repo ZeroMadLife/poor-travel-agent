@@ -14,6 +14,7 @@ from agents.itinerary_tool import create_itinerary_tool
 from agents.react_agent import AgentRuntime
 from core.auth import AuthManager
 from core.cloud.auth.repository import CloudRepository
+from core.cloud.github import GitHubOAuthConfig, GitHubOAuthService
 from core.coding.context import ModelCapabilityRegistry
 from core.config.settings import get_settings
 from core.llm import create_llm
@@ -142,6 +143,8 @@ def create_app(
     cloud_dev_login_enabled: bool | None = None,
     cloud_secure_cookies: bool | None = None,
     cloud_app_env: str | None = None,
+    cloud_github_oauth_service: GitHubOAuthService | None = None,
+    cloud_frontend_url: str | None = None,
 ) -> FastAPI:
     """Create the Sage API app.
 
@@ -161,6 +164,8 @@ def create_app(
     app.state.session_store = session_store
     settings = get_settings()
     app_env = cloud_app_env or settings.app_env
+    if app_env == "production" and cloud_repository is None:
+        settings.validate_cloud_production_secrets()
     app.state.cloud_repository = cloud_repository or CloudRepository(AsyncSessionFactory)
     app.state.cloud_app_env = app_env
     app.state.cloud_dev_login_enabled = (
@@ -175,6 +180,27 @@ def create_app(
         if cloud_secure_cookies is None
         else cloud_secure_cookies
     )
+    app.state.cloud_frontend_url = cloud_frontend_url or settings.cloud_frontend_url
+    app.state.cloud_github_oauth_service = cloud_github_oauth_service
+    if app.state.cloud_github_oauth_service is None and all(
+        (
+            settings.github_oauth_client_id,
+            settings.github_oauth_client_secret,
+            settings.github_oauth_transaction_secret,
+            settings.github_token_encryption_secret,
+        )
+    ):
+        app.state.cloud_github_oauth_service = GitHubOAuthService(
+            app.state.cloud_repository,
+            GitHubOAuthConfig(
+                client_id=settings.github_oauth_client_id,
+                client_secret=settings.github_oauth_client_secret,
+                redirect_uri=settings.github_oauth_redirect_uri,
+                scope=settings.github_oauth_scope,
+                transaction_secret=settings.github_oauth_transaction_secret,
+                token_encryption_secret=settings.github_token_encryption_secret,
+            ),
+        )
     repo_root = Path(__file__).resolve().parent.parent
     app.state.coding_model_factory = coding_model_factory or (
         lambda model_id=coding_default_model: create_llm(model_id)

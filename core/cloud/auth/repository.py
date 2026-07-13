@@ -7,7 +7,7 @@ import secrets
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.cloud.auth.models import CloudLoginSession, CloudProject, CloudUser, CloudWorkspace
@@ -15,7 +15,9 @@ from db.models import (
     AuthIdentityRecord,
     CloudInviteRecord,
     CloudLoginSessionRecord,
+    CloudOAuthTransactionRecord,
     CloudProjectRecord,
+    CloudProviderCredentialRecord,
     CloudUserRecord,
     CloudWorkspaceRecord,
 )
@@ -99,6 +101,11 @@ class CloudRepository:
             user = CloudUserRecord(
                 id=str(uuid4()), email=normalized_email, display_name=display_name.strip()
             )
+            session.add(user)
+            # PostgreSQL checks this foreign key immediately. Flush the user
+            # before the invite row references it, while keeping one rollback
+            # boundary if the conditional consume loses a race.
+            await session.flush()
             # A conditional update is the one-time-invite lock. Checking then
             # updating would allow two concurrent registrations to consume it.
             consumed = await session.execute(
@@ -107,15 +114,15 @@ class CloudRepository:
                     CloudInviteRecord.code_hash == _digest(invite_code),
                     CloudInviteRecord.consumed_at.is_(None),
                     (CloudInviteRecord.expires_at.is_(None))
-                    | (CloudInviteRecord.expires_at > now),
+                    | (CloudInviteRecord.expires_at > func.now()),
                     (CloudInviteRecord.email.is_(None))
                     | (CloudInviteRecord.email == normalized_email),
                 )
                 .values(consumed_at=now, consumed_by_user_id=user.id)
             )
             if consumed.rowcount != 1:
+                await session.rollback()
                 raise PermissionError("invite is invalid or already consumed")
-            session.add(user)
             session.add(
                 AuthIdentityRecord(
                     id=str(uuid4()), user_id=user.id, provider=provider,
@@ -174,6 +181,107 @@ class CloudRepository:
         """Test-only invariant probe: stored digest columns never equal the raw token."""
         async with self._session_factory() as session:
             values = (await session.scalars(select(CloudLoginSessionRecord.token_hash))).all()
+            return token in values
+
+    async def create_oauth_transaction(
+        self,
+        *,
+        provider: str,
+        state: str,
+        browser_binding: str,
+        encrypted_payload: str,
+        expires_at: datetime,
+    ) -> None:
+        """Persist only a state digest and an authenticated encrypted payload."""
+        if not state or not encrypted_payload:
+            raise ValueError("OAuth transaction state and payload are required")
+        async with self._session_factory() as session:
+            session.add(
+                CloudOAuthTransactionRecord(
+                    id=str(uuid4()),
+                    provider=provider,
+                    state_hash=_digest(state),
+                    browser_binding_hash=_digest(browser_binding),
+                    encrypted_payload=encrypted_payload,
+                    expires_at=expires_at,
+                )
+            )
+            await session.commit()
+
+    async def consume_oauth_transaction(
+        self, *, provider: str, state: str, browser_binding: str
+    ) -> str:
+        """Atomically consume one non-expired transaction and return its ciphertext."""
+        now = _utc_now()
+        async with self._session_factory() as session:
+            record = await session.scalar(
+                select(CloudOAuthTransactionRecord).where(
+                    CloudOAuthTransactionRecord.provider == provider,
+                    CloudOAuthTransactionRecord.state_hash == _digest(state),
+                    CloudOAuthTransactionRecord.browser_binding_hash
+                    == _digest(browser_binding),
+                )
+            )
+            if record is None:
+                raise PermissionError("OAuth transaction is invalid")
+            consumed = await session.execute(
+                update(CloudOAuthTransactionRecord)
+                .where(
+                    CloudOAuthTransactionRecord.id == record.id,
+                    CloudOAuthTransactionRecord.consumed_at.is_(None),
+                    CloudOAuthTransactionRecord.expires_at > func.now(),
+                )
+                .values(consumed_at=now)
+            )
+            if consumed.rowcount != 1:
+                await session.rollback()
+                raise PermissionError("OAuth transaction is expired or already consumed")
+            encrypted_payload = record.encrypted_payload
+            await session.commit()
+            return encrypted_payload
+
+    async def upsert_provider_credential(
+        self,
+        *,
+        user_id: str,
+        provider: str,
+        encrypted_access_token: str,
+        scopes: str,
+        provider_login: str,
+    ) -> None:
+        """Store one encrypted credential per user and provider."""
+        async with self._session_factory() as session:
+            record = await session.scalar(
+                select(CloudProviderCredentialRecord).where(
+                    CloudProviderCredentialRecord.user_id == user_id,
+                    CloudProviderCredentialRecord.provider == provider,
+                )
+            )
+            if record is None:
+                session.add(
+                    CloudProviderCredentialRecord(
+                        id=str(uuid4()),
+                        user_id=user_id,
+                        provider=provider,
+                        encrypted_access_token=encrypted_access_token,
+                        scopes=scopes,
+                        provider_login=provider_login,
+                    )
+                )
+            else:
+                record.encrypted_access_token = encrypted_access_token
+                record.scopes = scopes
+                record.provider_login = provider_login
+            await session.commit()
+
+    async def raw_provider_token_is_persisted(self, token: str) -> bool:
+        """Test-only invariant probe for encrypted provider credentials."""
+        async with self._session_factory() as session:
+            values = (
+                await session.scalars(
+                    select(CloudProviderCredentialRecord.encrypted_access_token)
+                )
+            ).all()
             return token in values
 
     async def create_project(self, owner_user_id: str, name: str) -> CloudProject:

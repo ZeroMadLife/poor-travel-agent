@@ -33,6 +33,7 @@ redis==5.2.1
 pydantic==2.10.4
 pydantic-settings==2.7.1
 httpx==0.28.1
+cryptography==46.0.3
 tenacity==9.0.0
 python-dotenv==1.0.1
 orjson==3.10.12

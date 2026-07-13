@@ -34,6 +34,31 @@ def test_settings_has_access_codes(monkeypatch) -> None:
     assert settings.app_access_codes == "tour2026,friend01"
 
 
+def test_production_cloud_settings_fail_closed_without_secrets() -> None:
+    """A production process must not silently start with placeholder credentials."""
+    import pytest
+
+    settings = Settings(app_env="production", app_secret_key="change-me-in-production")
+
+    with pytest.raises(RuntimeError, match="APP_SECRET_KEY"):
+        settings.validate_cloud_production_secrets()
+
+
+def test_production_cloud_settings_accept_distinct_configured_secrets() -> None:
+    settings = Settings(
+        app_env="production",
+        app_secret_key="application-secret-that-is-not-a-placeholder",
+        github_oauth_client_id="client-id",
+        github_oauth_client_secret="github-client-secret-that-is-long-enough-value",
+        github_oauth_transaction_secret="transaction-secret-that-is-long-enough",
+        github_token_encryption_secret="token-secret-that-is-long-enough-value",
+        cloud_frontend_url="https://sage.example",
+        github_oauth_redirect_uri="https://sage.example/api/v1/cloud/auth/github/callback",
+    )
+
+    settings.validate_cloud_production_secrets()
+
+
 def test_resolve_llm_doubao(monkeypatch) -> None:
     """resolve_llm 正确解析 doubao provider。"""
     monkeypatch.setenv("DOUBAO_API_KEY", "test-doubao-key")

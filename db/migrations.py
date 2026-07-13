@@ -28,3 +28,13 @@ async def init_db(engine: AsyncEngine | None = None) -> None:
                 ")"
             )
         )
+        await connection.execute(
+            text(
+                "INSERT INTO schema_migrations (revision, applied_at) "
+                "SELECT '20260713_v7_github_oauth', CURRENT_TIMESTAMP "
+                "WHERE NOT EXISTS ("
+                "SELECT 1 FROM schema_migrations "
+                "WHERE revision = '20260713_v7_github_oauth'"
+                ")"
+            )
+        )

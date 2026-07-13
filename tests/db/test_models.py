@@ -94,4 +94,7 @@ async def test_init_db_records_the_v7_cloud_control_plane_revision() -> None:
 
     await engine.dispose()
 
-    assert revisions == ["20260713_v7_cloud_control_plane"]
+    assert revisions == [
+        "20260713_v7_cloud_control_plane",
+        "20260713_v7_github_oauth",
+    ]

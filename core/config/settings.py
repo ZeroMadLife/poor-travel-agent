@@ -118,6 +118,17 @@ class Settings(BaseSettings):
     # Local HTTP development needs a non-Secure cookie; non-development is
     # forced to Secure by the app factory regardless of this value.
     cloud_secure_cookies: bool = False
+    cloud_frontend_url: str = "http://localhost:5173"
+
+    # GitHub OAuth is used for identity only. Repository authorization is
+    # handled separately by a GitHub App so private repository access can be
+    # granted per repository with short-lived installation tokens.
+    github_oauth_client_id: str = ""
+    github_oauth_client_secret: str = ""
+    github_oauth_redirect_uri: str = "http://localhost:8000/api/v1/cloud/auth/github/callback"
+    github_oauth_scope: str = "read:user user:email"
+    github_oauth_transaction_secret: str = ""
+    github_token_encryption_secret: str = ""
 
     langsmith_api_key: str = ""
     langsmith_project: str = "tourswarm"
@@ -138,6 +149,30 @@ class Settings(BaseSettings):
         """Return the Redis connection URL."""
         auth = f":{self.redis_password}@" if self.redis_password else ""
         return f"redis://{auth}{self.redis_host}:{self.redis_port}/{self.redis_db}"
+
+    def validate_cloud_production_secrets(self) -> None:
+        """Fail closed when a production cloud process has placeholder secrets."""
+        if self.app_env != "production":
+            return
+        missing: list[str] = []
+        if not self.app_secret_key or self.app_secret_key == "change-me-in-production":
+            missing.append("APP_SECRET_KEY")
+        for name, value in (
+            ("GITHUB_OAUTH_CLIENT_ID", self.github_oauth_client_id),
+            ("GITHUB_OAUTH_CLIENT_SECRET", self.github_oauth_client_secret),
+            ("GITHUB_OAUTH_TRANSACTION_SECRET", self.github_oauth_transaction_secret),
+            ("GITHUB_TOKEN_ENCRYPTION_SECRET", self.github_token_encryption_secret),
+        ):
+            if not value or (len(value) < 32 and "CLIENT_ID" not in name):
+                missing.append(name)
+        if not self.cloud_frontend_url.startswith("https://"):
+            missing.append("CLOUD_FRONTEND_URL(HTTPS)")
+        if not self.github_oauth_redirect_uri.startswith("https://"):
+            missing.append("GITHUB_OAUTH_REDIRECT_URI(HTTPS)")
+        if self.cloud_dev_login_enabled:
+            missing.append("CLOUD_DEV_LOGIN_ENABLED=false")
+        if missing:
+            raise RuntimeError(f"production cloud secrets are missing: {', '.join(missing)}")
 
 
 @lru_cache
