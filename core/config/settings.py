@@ -155,7 +155,11 @@ class Settings(BaseSettings):
         if self.app_env != "production":
             return
         missing: list[str] = []
-        if not self.app_secret_key or self.app_secret_key == "change-me-in-production":
+        if (
+            not self.app_secret_key
+            or self.app_secret_key == "change-me-in-production"
+            or len(self.app_secret_key) < 32
+        ):
             missing.append("APP_SECRET_KEY")
         for name, value in (
             ("GITHUB_OAUTH_CLIENT_ID", self.github_oauth_client_id),
