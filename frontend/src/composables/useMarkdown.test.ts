@@ -18,3 +18,15 @@ it('keeps protocol and explicit Markdown links safe', () => {
   expect(protocolLink).toContain('rel="noopener noreferrer"')
   expect(explicitLink).toContain('href="https://example.com/docs"')
 })
+
+it('renders fenced code with a language header and copy affordance', () => {
+  const { render } = useMarkdown()
+
+  const output = render('```json\n{"ok": true}\n```')
+
+  expect(output).toContain('class="sage-code-block"')
+  expect(output).toContain('data-language="json"')
+  expect(output).toContain('data-copy-code')
+  expect(output).toContain('aria-label="复制代码"')
+  expect(output).not.toContain('<pre><code class="language-json"><div')
+})

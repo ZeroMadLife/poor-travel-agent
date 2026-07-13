@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { Sparkles, UserRound } from 'lucide-vue-next'
 import type { ChatMessage } from '../../../stores/codingEvents'
 import CodingExecutionLog from './CodingExecutionLog.vue'
@@ -9,6 +10,35 @@ withDefaults(defineProps<{
   renderedContent: string
   showProcess?: boolean
 }>(), { showProcess: true })
+
+const root = ref<HTMLElement | null>(null)
+let copyTimer: ReturnType<typeof setTimeout> | undefined
+
+async function copyCode(event: Event) {
+  const button = event.target instanceof HTMLElement ? event.target.closest<HTMLButtonElement>('[data-copy-code]') : null
+  if (!button || !root.value) return
+  const block = button.closest<HTMLElement>('.sage-code-block')
+  const code = block?.querySelector('code')?.textContent || ''
+  if (!code || !navigator.clipboard?.writeText) return
+  try {
+    await navigator.clipboard.writeText(code)
+  } catch {
+    return
+  }
+  button.textContent = '已复制'
+  button.dataset.copied = 'true'
+  if (copyTimer) clearTimeout(copyTimer)
+  copyTimer = setTimeout(() => {
+    button.textContent = '复制'
+    delete button.dataset.copied
+  }, 1400)
+}
+
+onMounted(() => root.value?.addEventListener('click', copyCode))
+onBeforeUnmount(() => {
+  root.value?.removeEventListener('click', copyCode)
+  if (copyTimer) clearTimeout(copyTimer)
+})
 </script>
 
 <template>
@@ -16,6 +46,7 @@ withDefaults(defineProps<{
     :class="['message-turn', message.role]"
     :data-turn-id="message.id"
     :data-run-id="message.run_id"
+    ref="root"
   >
     <div
       class="message-avatar"
@@ -46,14 +77,14 @@ withDefaults(defineProps<{
 <style scoped>
 .message-turn {
   display: grid;
-  grid-template-columns: 28px minmax(0, 760px);
+  grid-template-columns: 30px minmax(0, 1fr);
   gap: 12px;
   width: 100%;
   margin: 0 0 24px;
 }
 
 .message-turn.user {
-  grid-template-columns: minmax(0, 620px) 30px;
+  grid-template-columns: minmax(0, 820px) 30px;
   justify-content: end;
 }
 
@@ -160,6 +191,52 @@ withDefaults(defineProps<{
   overflow-x: auto;
   font-size: 12.5px;
   line-height: 1.65;
+}
+
+.message-content :deep(.sage-code-block) {
+  margin: 14px 0;
+  overflow: hidden;
+  border: 1px solid var(--sage-border);
+  border-radius: var(--sage-radius);
+  background: var(--sage-code-bg);
+}
+
+.message-content :deep(.code-block-header) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 30px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--sage-border);
+  color: var(--sage-text-muted);
+  background: color-mix(in srgb, var(--sage-surface-raised) 75%, var(--sage-code-bg));
+  font-family: var(--sage-font-mono);
+  font-size: 10px;
+  text-transform: lowercase;
+}
+
+.message-content :deep(.code-copy-button) {
+  min-height: 22px;
+  padding: 0 7px;
+  border: 1px solid var(--sage-border);
+  border-radius: var(--sage-radius-sm);
+  color: var(--sage-text-secondary);
+  background: transparent;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 10px;
+}
+
+.message-content :deep(.code-copy-button:hover),
+.message-content :deep(.code-copy-button[data-copied="true"]) {
+  border-color: var(--sage-border-strong);
+  color: var(--sage-success);
+}
+
+.message-content :deep(.sage-code-block pre) {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
 }
 
 .message-content :deep(code) {

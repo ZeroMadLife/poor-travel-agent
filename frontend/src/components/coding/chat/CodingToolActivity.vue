@@ -109,11 +109,17 @@ function toolSummary(tool: ToolActivity) {
 function formatArgs(args: Record<string, unknown>) {
   return JSON.stringify(args, null, 2)
 }
+
+function statusLabel(status: ToolActivity['status']) {
+  if (status === 'running') return '执行中'
+  if (status === 'error') return '失败'
+  return '已完成'
+}
 </script>
 
 <template>
   <div class="tool-activity" :class="{ settled: allSettled }">
-    <button class="activity-header" @click="toggle">
+    <button class="activity-header" type="button" @click="toggle">
       <component :is="isOpen ? ChevronDown : ChevronRight" :size="14" />
       <Wrench :size="13" />
       <span class="activity-label">
@@ -136,6 +142,7 @@ function formatArgs(args: Record<string, unknown>) {
           <component :is="iconFor(tool)" :size="13" :color="colorFor(tool)" />
           <Terminal v-if="tool.tool === 'run_shell'" :size="12" />
           <span class="tool-name">{{ toolSummary(tool) }}</span>
+          <span class="tool-status" :class="tool.status">{{ statusLabel(tool.status) }}</span>
           <span
             v-if="tool.status === 'running'"
             class="tool-spinner"
@@ -143,10 +150,11 @@ function formatArgs(args: Record<string, unknown>) {
           ></span>
         </div>
         <details class="tool-args-details">
-          <summary>参数</summary>
+          <summary><span>参数</span><code>{{ tool.tool }}</code></summary>
           <pre>{{ formatArgs(tool.args) }}</pre>
         </details>
         <div v-if="tool.content" class="tool-result">
+          <div class="tool-result-label"><span>结果</span><span v-if="tool.status === 'error'" class="tool-result-error">执行失败</span></div>
           <pre><span
             v-for="(line, lineIndex) in resultPreview(tool.content, expandedResults.has(i)).split('\n')"
             :key="lineIndex"
@@ -243,12 +251,25 @@ function formatArgs(args: Record<string, unknown>) {
   font-size: 11px;
 }
 
+.tool-status {
+  margin-left: auto;
+  color: var(--sage-text-muted);
+  font-size: 10px;
+}
+
+.tool-status.running { color: var(--sage-warning); }
+.tool-status.done { color: var(--sage-success); }
+.tool-status.error { color: var(--sage-danger); }
+
 .tool-name {
   font-weight: 600;
   color: var(--sage-text-secondary);
 }
 
-.tool-args-details { margin-top:4px; color:var(--sage-text-muted); font-size:11px; }.tool-args-details summary { width:max-content; cursor:pointer; }.tool-args-details pre { max-height:180px; margin:4px 0 0; padding:5px 7px; overflow:auto; border:1px solid var(--sage-border); border-radius:var(--sage-radius-sm); background:var(--sage-surface); color:var(--sage-text-secondary); font-family:var(--sage-font-mono); font-size:11px; line-height:1.4; white-space:pre-wrap; word-break:break-word; }
+.tool-args-details { margin-top:4px; color:var(--sage-text-muted); font-size:11px; }
+.tool-args-details summary { display:flex; width:max-content; align-items:center; gap:7px; cursor:pointer; list-style-position:inside; }
+.tool-args-details summary code { color:var(--sage-text-muted); font-family:var(--sage-font-mono); font-size:10px; }
+.tool-args-details pre { max-height:180px; margin:4px 0 0; padding:7px 9px; overflow:auto; border:1px solid var(--sage-border); border-radius:var(--sage-radius-sm); background:var(--sage-surface); color:var(--sage-text-secondary); font-family:var(--sage-font-mono); font-size:11px; line-height:1.4; white-space:pre-wrap; word-break:break-word; }
 
 .tool-spinner {
   width: 11px;
@@ -272,6 +293,9 @@ function formatArgs(args: Record<string, unknown>) {
   border-radius: var(--sage-radius-sm);
   border: 1px solid var(--sage-border);
 }
+
+.tool-result-label { display:flex; align-items:center; justify-content:space-between; margin-bottom:4px; color:var(--sage-text-muted); font-size:10px; font-weight:600; text-transform:uppercase; }
+.tool-result-error { color:var(--sage-danger); text-transform:none; }
 
 .tool-result pre {
   margin: 0;
