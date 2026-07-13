@@ -75,6 +75,12 @@ function stop() {
   void store.stopCurrentRun()
 }
 
+async function onModelChange(modelId: string) {
+  // Don't use v-model: only update currentModelId on success to avoid
+  // UI showing a model that failed to switch on the server.
+  await store.changeModel(modelId)
+}
+
 function onKeydown(event: KeyboardEvent) {
   if (event.isComposing || event.keyCode === 229) return
   if (showSkillMenu.value && filteredSkills.value.length > 0) {
@@ -123,10 +129,11 @@ defineExpose({
     <div class="composer-controls">
       <select
         v-if="store.models.length > 0"
-        v-model="store.currentModelId"
+        :value="store.currentModelId"
         class="model-select"
         title="切换模型"
-        @change="store.changeModel(store.currentModelId)"
+        :disabled="store.isThinking"
+        @change="onModelChange(($event.target as HTMLSelectElement).value)"
       >
         <option v-for="model in store.models" :key="model.id" :value="model.id">
           {{ model.label }}

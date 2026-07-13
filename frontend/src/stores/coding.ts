@@ -568,9 +568,10 @@ export const useCodingStore = defineStore('coding', () => {
     if (projectedMessages.length > 0) {
       state.messages = [...state.legacyMessages, ...projectedMessages]
     } else {
-      state.messages = [...state.legacyMessages, ...state.messages.filter(
-        (m) => !('id' in m) || (m.tools && m.tools.length > 0),
-      )]
+      // Timeline unavailable: preserve raw-event messages (built by
+      // applyCodingEvent) without duplicating legacyMessages prefix.
+      const rawMessages = state.messages.slice(state.legacyMessages.length)
+      state.messages = [...state.legacyMessages, ...rawMessages]
     }
     const targetSessionId = projectedTimeline[0]?.session_id ?? ''
     state.pendingApproval = pendingApprovalFromTimeline(projectedTimeline, targetSessionId)
