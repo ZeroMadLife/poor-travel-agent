@@ -17,6 +17,7 @@ import {
 import { useCodingStore } from '../stores/coding'
 import { useMarkdown } from '../composables/useMarkdown'
 import { useWorkbenchPreferences } from '../composables/useWorkbenchPreferences'
+import { wireNaiveUI } from '../composables/useNaiveUI'
 
 const store = useCodingStore()
 const route = useRoute()
@@ -35,6 +36,9 @@ const lastResolvedSessionId = ref<string | null>(null)
 const viewGeneration = ref(0)
 const { render } = useMarkdown()
 const { showToolProcess } = useWorkbenchPreferences()
+
+// Wire Naive UI message/dialog bridge for store-level notifications
+wireNaiveUI()
 
 const routeSessionId = computed(() => {
   const value = route.params.sessionId
