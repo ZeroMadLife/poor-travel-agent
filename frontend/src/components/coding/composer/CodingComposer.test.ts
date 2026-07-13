@@ -287,3 +287,15 @@ it('opens the permission drawer and switches the active mode', async () => {
 
   expect(store.changePermissionMode).toHaveBeenCalledWith('accept_edits')
 })
+
+it('closes the permission drawer from its close control', async () => {
+  const { wrapper } = mountComposer()
+
+  await wrapper.find('.permission-trigger').trigger('click')
+  expect(document.body.querySelector('.permission-drawer')).toBeTruthy()
+
+  ;(document.body.querySelector('.drawer-close') as HTMLButtonElement).click()
+  await nextTick()
+
+  expect(document.body.querySelector('.permission-drawer')).toBeNull()
+})

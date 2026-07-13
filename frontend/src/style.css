@@ -28,6 +28,7 @@
   --sage-radius: 6px;
   --sage-radius-lg: 8px;
   --sage-shadow-drawer: 0 18px 48px rgb(17 24 39 / 18%);
+  --sage-overlay: rgb(17 24 39 / 36%);
   color: var(--sage-text);
   background: var(--sage-bg);
   color-scheme: light;
@@ -62,6 +63,7 @@
   --sage-code-bg: #141517;
   --sage-code-text: #ecf0f1;
   --sage-code-muted: #969da7;
+  --sage-overlay: rgb(0 0 0 / 56%);
   color-scheme: dark;
 }
 

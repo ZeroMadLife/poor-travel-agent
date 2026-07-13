@@ -78,7 +78,7 @@ async function load(planPath: string) {
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgba(17, 24, 39, 0.36);
+  background: var(--sage-overlay);
 }
 
 .plan-preview {
@@ -86,10 +86,10 @@ async function load(planPath: string) {
   grid-template-rows: auto 1fr;
   width: min(760px, 100%);
   max-height: min(720px, 88vh);
-  border: 1px solid #d1d5db;
-  border-radius: 8px;
-  background: #fff;
-  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.24);
+  border: 1px solid var(--sage-border);
+  border-radius: var(--sage-radius-lg);
+  background: var(--sage-surface);
+  box-shadow: var(--sage-shadow-drawer);
 }
 
 .plan-preview-header {
@@ -98,12 +98,12 @@ async function load(planPath: string) {
   justify-content: space-between;
   gap: 16px;
   padding: 12px 14px;
-  border-bottom: 1px solid #e5e7eb;
+  border-bottom: 1px solid var(--sage-border);
 }
 
 .plan-preview-title .eyebrow {
   margin: 0 0 3px;
-  color: #6b7280;
+  color: var(--sage-text-muted);
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
@@ -111,7 +111,7 @@ async function load(planPath: string) {
 
 .plan-preview-title h3 {
   margin: 0;
-  color: #111827;
+  color: var(--sage-text);
   font-size: 14px;
 }
 
@@ -122,39 +122,39 @@ async function load(planPath: string) {
   width: 30px;
   min-height: 30px;
   padding: 0;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  background: #fff;
-  color: #374151;
+  border: 1px solid var(--sage-border);
+  border-radius: var(--sage-radius);
+  background: var(--sage-surface);
+  color: var(--sage-text-secondary);
   cursor: pointer;
 }
 
 .close-btn:hover {
-  background: #f3f4f6;
+  background: var(--sage-surface-muted);
 }
 
 .plan-preview-body {
   overflow: auto;
   padding: 16px 18px;
-  background: #fff;
+  background: var(--sage-surface);
   font-size: 14px;
   line-height: 1.6;
-  color: #374151;
+  color: var(--sage-text-secondary);
 }
 
 .plan-status,
 .plan-error {
   margin: 0;
-  color: #9ca3af;
+  color: var(--sage-text-muted);
   font-size: 13px;
 }
 
 .plan-error {
-  color: #b91c1c;
+  color: var(--sage-danger);
 }
 
 .plan-content :deep(pre) {
-  background: #f3f4f6;
+  background: var(--sage-surface-muted);
   padding: 8px 12px;
   border-radius: 6px;
   overflow-x: auto;
@@ -168,7 +168,7 @@ async function load(planPath: string) {
 .plan-content :deep(h1),
 .plan-content :deep(h2),
 .plan-content :deep(h3) {
-  color: #111827;
+  color: var(--sage-text);
 }
 
 .plan-content :deep(ul),
