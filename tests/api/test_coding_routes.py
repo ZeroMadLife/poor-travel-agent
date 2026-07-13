@@ -161,6 +161,46 @@ def test_resume_coding_session_rehydrates_runtime(tmp_path: Path) -> None:
     assert app.state.coding_sessions[session_id].session["history"][0]["content"] == "读 README.md"
 
 
+def test_resume_recovers_an_interrupted_persisted_run_before_rehydrating(tmp_path: Path) -> None:
+    """A restart turns an abandoned durable lease into a retryable terminal event."""
+    app = create_app(
+        coding_model_factory=FakeModel,
+        coding_workspace_root=tmp_path,
+        coding_storage_root=tmp_path / ".coding",
+    )
+    client = TestClient(app)
+    session_id = client.post("/api/v1/coding/session", json={}).json()["session_id"]
+    coordinator = app.state.coding_run_registry.get(session_id)
+    coordinator.journal.begin_run("abandoned", owner_id="legacy", owner_pid=-1)
+    app.state.coding_sessions.clear()
+
+    response = client.post(f"/api/v1/coding/session/{session_id}/resume")
+    timeline = client.get(f"/api/v1/coding/session/{session_id}/timeline").json()
+
+    assert response.status_code == 200
+    assert timeline["active_run"] is None
+    assert timeline["items"][-1]["status"] == "interrupted"
+    assert timeline["items"][-1]["payload"] == {
+        "event": "run_interrupted", "retryable": True,
+    }
+
+
+def test_resume_unknown_session_does_not_create_timeline_evidence(tmp_path: Path) -> None:
+    """A valid-looking unknown ID must not allocate durable state before its 404."""
+    client = TestClient(
+        create_app(
+            coding_model_factory=FakeModel,
+            coding_workspace_root=tmp_path,
+            coding_storage_root=tmp_path / ".coding",
+        )
+    )
+
+    response = client.post("/api/v1/coding/session/unknown-session/resume")
+
+    assert response.status_code == 404
+    assert not (tmp_path / ".coding" / "evidence" / "unknown-session").exists()
+
+
 def test_resume_keeps_active_runtime_and_pending_approval_bound_to_it(tmp_path: Path) -> None:
     """An active coordinator run must keep its in-memory approval queue on resume."""
     app = create_app(

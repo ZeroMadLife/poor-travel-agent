@@ -278,9 +278,18 @@ async def resume_coding_session(
     model_factory = getattr(request.app.state, "coding_model_factory", None)
     if model_factory is None:
         raise RuntimeError("Coding model factory is not configured")
+    storage_root = Path(request.app.state.coding_storage_root)
+    store = CodingSessionStore(storage_root / "sessions")
+    try:
+        persisted = store.load(session_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404, detail=f"Unknown coding session: {session_id}"
+        ) from exc
+
     sessions: dict[str, CodingRuntime] = request.app.state.coding_sessions
-    coordinator = request.app.state.coding_run_registry.get(session_id)
     active_runtime = sessions.get(session_id)
+    coordinator = await request.app.state.coding_run_registry.hydrate(session_id)
     active_run_id = coordinator.active_run_id or coordinator.journal.active_run_id()
     if active_run_id is not None:
         if active_runtime is None:
@@ -293,40 +302,29 @@ async def resume_coding_session(
             workspace_root=str(active_runtime.workspace.root.resolve()),
             permission_mode=active_runtime.permission_mode,
         )
-    storage_root = Path(request.app.state.coding_storage_root)
     registry: ModelCapabilityRegistry = request.app.state.coding_model_capabilities
-    store = CodingSessionStore(storage_root / "sessions")
-    try:
-        persisted = store.load(session_id)
-        model_id = str(
-            persisted.get("model_spec") or request.app.state.coding_default_model
-        )
-        if model_id not in _catalog_model_ids(request):
-            raise HTTPException(status_code=422, detail="unknown coding model")
-        default_workspace = Path(request.app.state.coding_workspace_root).resolve()
-        persisted_workspace = _resolve_persisted_workspace_root(
-            default_workspace, persisted.get("workspace_root")
-        )
-        persisted["workspace_root"] = str(persisted_workspace)
-        runtime = CodingRuntime(
-            session_id=session_id,
-            workspace_root=persisted_workspace,
-            model=_build_model(model_factory, model_id),
-            storage_root=storage_root,
-            model_factory=model_factory,
-            approval_policy="ask",
-            session_state=persisted,
-            save_on_init=False,
-            model_capabilities=registry,
-            checkpoint_anchor_key=request.app.state.coding_checkpoint_anchor_key,
-            model_spec=model_id,
-        )
-    except FileNotFoundError as exc:
-        raise HTTPException(
-            status_code=404, detail=f"Unknown coding session: {session_id}"
-        ) from exc
+    model_id = str(persisted.get("model_spec") or request.app.state.coding_default_model)
+    if model_id not in _catalog_model_ids(request):
+        raise HTTPException(status_code=422, detail="unknown coding model")
+    default_workspace = Path(request.app.state.coding_workspace_root).resolve()
+    persisted_workspace = _resolve_persisted_workspace_root(
+        default_workspace, persisted.get("workspace_root")
+    )
+    persisted["workspace_root"] = str(persisted_workspace)
+    runtime = CodingRuntime(
+        session_id=session_id,
+        workspace_root=persisted_workspace,
+        model=_build_model(model_factory, model_id),
+        storage_root=storage_root,
+        model_factory=model_factory,
+        approval_policy="ask",
+        session_state=persisted,
+        save_on_init=False,
+        model_capabilities=registry,
+        checkpoint_anchor_key=request.app.state.coding_checkpoint_anchor_key,
+        model_spec=model_id,
+    )
     sessions[session_id] = runtime
-    await request.app.state.coding_run_registry.hydrate(session_id)
     return CodingSessionResponse(
         session_id=session_id,
         workspace_root=str(persisted_workspace),
