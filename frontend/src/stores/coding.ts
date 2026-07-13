@@ -561,7 +561,17 @@ export const useCodingStore = defineStore('coding', () => {
       }
       return result
     })
-    state.messages = [...state.legacyMessages, ...projectedMessages]
+    // When timeline is empty (backend hasn't implemented timeline contract yet),
+    // preserve existing messages built by applyCodingEvent (which contain
+    // tools/activities from raw WebSocket events). Only overwrite when we have
+    // actual timeline projection data.
+    if (projectedMessages.length > 0) {
+      state.messages = [...state.legacyMessages, ...projectedMessages]
+    } else {
+      state.messages = [...state.legacyMessages, ...state.messages.filter(
+        (m) => !('id' in m) || (m.tools && m.tools.length > 0),
+      )]
+    }
     const targetSessionId = projectedTimeline[0]?.session_id ?? ''
     state.pendingApproval = pendingApprovalFromTimeline(projectedTimeline, targetSessionId)
     state.isThinking = state.activeRun !== null
@@ -683,6 +693,7 @@ export const useCodingStore = defineStore('coding', () => {
     stream?.disconnect()
     stream = new CodingStream({
       onEvent: handleTimelineEvent,
+      onRawEvent: handleServerEvent,
       onError: (message) => {
         ensureSession(targetSessionId).errorMessage = message
       },

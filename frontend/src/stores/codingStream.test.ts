@@ -186,22 +186,27 @@ describe('CodingStream', () => {
     expect(onEvent).toHaveBeenCalledTimes(1)
   })
 
-  it('reports and ignores malformed JSON and invalid timeline envelopes', () => {
+  it('reports and ignores malformed JSON, forwards raw events, and rejects invalid timeline envelopes', () => {
     const socket = new FakeSocket()
     const onEvent = vi.fn()
     const onError = vi.fn()
-    const stream = new CodingStream({ createSocket: () => socket, onEvent, onError })
+    const onRawEvent = vi.fn()
+    const stream = new CodingStream({ createSocket: () => socket, onEvent, onError, onRawEvent })
     stream.connect('coding_1', 'ws://local/stream?after=0')
 
     socket.emitRaw('{not-json')
+    // Raw event (no timeline envelope) -- forwarded to onRawEvent, not onError
     socket.emitRaw(JSON.stringify({ type: 'final', content: 'legacy-flat-event' }))
     socket.emitRaw(JSON.stringify({ ...envelope(1), kind: 'unknown' }))
     socket.emitRaw(JSON.stringify({ ...envelope(2), status: 'mystery' }))
     socket.emitRaw(JSON.stringify({ ...envelope(3), timestamp: '' }))
 
     expect(onEvent).not.toHaveBeenCalled()
-    expect(onError).toHaveBeenCalledTimes(5)
-    expect(onError).toHaveBeenLastCalledWith('收到无效的运行事件')
+    // Malformed JSON triggers onError; raw event goes to onRawEvent; invalid envelopes are ignored
+    expect(onError).toHaveBeenCalledTimes(1)
+    expect(onError).toHaveBeenLastCalledWith('无法解析运行事件')
+    expect(onRawEvent).toHaveBeenCalledTimes(1)
+    expect(onRawEvent).toHaveBeenCalledWith({ type: 'final', content: 'legacy-flat-event' })
     stream.disconnect()
   })
 
