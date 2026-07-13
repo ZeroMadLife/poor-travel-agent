@@ -75,6 +75,12 @@ function stop() {
   void store.stopCurrentRun()
 }
 
+async function onModelChange(modelId: string) {
+  // Don't use v-model: only update currentModelId on success to avoid
+  // UI showing a model that failed to switch on the server.
+  await store.changeModel(modelId)
+}
+
 function onKeydown(event: KeyboardEvent) {
   if (event.isComposing || event.keyCode === 229) return
   if (showSkillMenu.value && filteredSkills.value.length > 0) {
@@ -121,6 +127,19 @@ defineExpose({
 <template>
   <div class="composer">
     <div class="composer-controls">
+      <select
+        v-if="store.models.length > 0"
+        :value="store.currentModelId"
+        class="model-select"
+        title="切换模型"
+        :disabled="store.isThinking"
+        @change="onModelChange(($event.target as HTMLSelectElement).value)"
+      >
+        <option v-for="model in store.models" :key="model.id" :value="model.id">
+          {{ model.label }}
+        </option>
+      </select>
+
       <button
         v-if="store.contextConfigured"
         class="compact-hint"
@@ -224,6 +243,22 @@ defineExpose({
   align-items: center;
   gap: 10px;
   margin-bottom: 8px;
+}
+
+.model-select {
+  border: 1px solid var(--sage-border);
+  border-radius: var(--sage-radius);
+  padding: 3px 8px;
+  font-size: 12px;
+  background: var(--sage-surface);
+  color: var(--sage-text-secondary);
+  cursor: pointer;
+  max-width: 160px;
+}
+
+.model-select:focus {
+  outline: none;
+  border-color: var(--sage-focus);
 }
 
 .compact-hint:disabled {

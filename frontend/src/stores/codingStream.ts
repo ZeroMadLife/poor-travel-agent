@@ -1,4 +1,4 @@
-import type { CodingTimelineEvent } from '../types/api'
+import type { CodingServerEvent, CodingTimelineEvent } from '../types/api'
 
 export type WebSocketLike = {
   readyState: number
@@ -14,6 +14,7 @@ export type WebSocketFactory = (url: string) => WebSocketLike
 export type CodingStreamOptions = {
   createSocket?: WebSocketFactory
   onEvent: (sessionId: string, event: CodingTimelineEvent) => void
+  onRawEvent?: (event: CodingServerEvent) => void
   onError: (message: string) => void
 }
 
@@ -41,6 +42,7 @@ export class CodingStream {
   private readonly seenEventOrder: string[] = []
   private readonly createSocket: WebSocketFactory
   private readonly onEvent: (sessionId: string, event: CodingTimelineEvent) => void
+  private readonly onRawEvent: ((event: CodingServerEvent) => void) | null
   private readonly onError: (message: string) => void
 
   constructor(options: CodingStreamOptions) {
@@ -48,6 +50,7 @@ export class CodingStream {
       options.createSocket ||
       ((url: string) => new WebSocket(url) as unknown as WebSocketLike)
     this.onEvent = options.onEvent
+    this.onRawEvent = options.onRawEvent ?? null
     this.onError = options.onError
   }
 
@@ -79,7 +82,12 @@ export class CodingStream {
         return
       }
       if (!isTimelineEvent(candidate)) {
-        this.onError('收到无效的运行事件')
+        // Fallback: if the backend sends raw events (no timeline envelope),
+        // forward to onRawEvent instead of erroring. This keeps the workbench
+        // functional before the timeline backend contract is implemented.
+        if (this.onRawEvent && isRawEvent(candidate)) {
+          this.onRawEvent(candidate as CodingServerEvent)
+        }
         return
       }
       const envelope = candidate
@@ -149,6 +157,12 @@ function isTimelineEvent(value: unknown): value is CodingTimelineEvent {
     typeof item.status === 'string' && TIMELINE_STATUSES.has(item.status) &&
     typeof item.timestamp === 'string' && item.timestamp.length > 0 &&
     Boolean(item.payload) && typeof item.payload === 'object' && !Array.isArray(item.payload)
+}
+
+function isRawEvent(value: unknown): value is CodingServerEvent {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const item = value as Record<string, unknown>
+  return typeof item.type === 'string' && item.type.length > 0
 }
 
 function cursorFromUrl(url: string): number {

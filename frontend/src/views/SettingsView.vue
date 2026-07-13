@@ -7,6 +7,9 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useCodingStore } from '../stores/coding'
 import { useWorkbenchPreferences } from '../composables/useWorkbenchPreferences'
+import { wireNaiveUI } from '../composables/useNaiveUI'
+
+wireNaiveUI()
 
 export type SettingsSection =
   | 'appearance' | 'models' | 'skills' | 'mcp' | 'memory'
