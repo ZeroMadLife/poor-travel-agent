@@ -33,7 +33,11 @@ from core.coding.tool_executor.executor import ToolExecutor
 from core.coding.tool_executor.permissions import PermissionChecker
 from core.coding.tool_executor.policy import ToolPolicyChecker
 from core.coding.tools.base import RegisteredTool
-from core.coding.tools.registry import get_active_tools
+from core.coding.tools.registry import (
+    ToolArgumentValidationError,
+    get_active_tools,
+    validate_tool_preflight,
+)
 
 
 class ApiClient(Protocol):
@@ -64,6 +68,7 @@ class Engine:
     """Turn control loop: model -> parse -> tool -> final."""
 
     MAX_PROTOCOL_RETRIES = 2
+    MAX_TOOL_ARGUMENT_RETRIES = 2
 
     def __init__(
         self,
@@ -127,6 +132,7 @@ class Engine:
         tool_steps = 0
         attempts = 0
         protocol_retries = 0
+        tool_argument_retries = 0
         protocol_correction = ""
 
         last_tool_signature: tuple[str, str] = ("", "")
@@ -215,6 +221,30 @@ class Engine:
 
             if kind in {"tool", "tools"}:
                 tool_payloads = [payload] if kind == "tool" else list(payload)
+                tool_correction = ""
+                try:
+                    for tool_payload in tool_payloads:
+                        self._validate_tool_payload(tool_payload)
+                except ToolArgumentValidationError as exc:
+                    if tool_argument_retries >= self.MAX_TOOL_ARGUMENT_RETRIES:
+                        content = (
+                            f"工具 {exc.tool_name} 多次缺少或使用了无效参数，"
+                            "已停止本次运行。请补充明确的工作区相对路径后重试。"
+                        )
+                        self._append_history(
+                            {"role": "assistant", "content": content, "created_at": now()}
+                        )
+                        yield event_to_dict(FinalEvent(run_id=self.run_id, content=content))
+                        return
+                    tool_argument_retries += 1
+                    tool_correction = self._tool_argument_correction(exc)
+                    yield event_to_dict(RetryEvent(run_id=self.run_id, content=tool_correction))
+
+                if tool_correction:
+                    protocol_correction = tool_correction
+                    continue
+
+                recovered_tool_arguments = tool_argument_retries > 0
                 for tool_payload in tool_payloads:
                     # Detect only repeated *identical* calls. A coding task can
                     # legitimately refine the same file across several writes, so
@@ -250,6 +280,14 @@ class Engine:
                         if event["type"] == "cancelled":
                             return
                     tool_steps += 1
+                protocol_correction = (
+                    "This is the same turn, and the malformed tool step has already been "
+                    "corrected and executed successfully. Continue from the latest tool "
+                    "result without restarting earlier steps. If that result answers the "
+                    "request, return <final> now; never repeat an intentionally malformed call."
+                    if recovered_tool_arguments
+                    else ""
+                )
                 continue
 
             if kind == "retry":
@@ -292,6 +330,26 @@ class Engine:
             if isinstance(event, CancelledEvent):
                 self._append_cancelled_history(event.content)
             yield event_to_dict(event)
+
+    def _validate_tool_payload(self, payload: Any) -> None:
+        """Reject malformed tool arguments before any call or approval is emitted."""
+        if not isinstance(payload, dict):
+            return
+        name = str(payload.get("name", ""))
+        args = payload.get("args", {})
+        if name not in self.tools or not isinstance(args, dict):
+            return
+        validate_tool_preflight(self.workspace, name, args)
+
+    @staticmethod
+    def _tool_argument_correction(error: ToolArgumentValidationError) -> str:
+        schema = json.dumps(error.schema, ensure_ascii=False, sort_keys=True)
+        return (
+            f"Tool {error.tool_name} arguments were not executed because {error}. "
+            f"Its required schema is {schema}. Return one corrected <tool> call with "
+            "workspace-relative paths only; never invent a path, use an absolute path, "
+            "or use '..' traversal."
+        )
 
     def _cancelled_event(self) -> dict[str, Any]:
         content = "已停止当前运行。"

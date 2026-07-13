@@ -46,10 +46,10 @@ withDefaults(defineProps<{
 <style scoped>
 .message-turn {
   display: grid;
-  grid-template-columns: 30px minmax(0, 760px);
-  gap: 10px;
+  grid-template-columns: 28px minmax(0, 760px);
+  gap: 12px;
   width: 100%;
-  margin: 0 0 18px;
+  margin: 0 0 24px;
 }
 
 .message-turn.user {
@@ -71,8 +71,8 @@ withDefaults(defineProps<{
 .message-avatar {
   display: grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   border: 1px solid var(--sage-border);
   border-radius: var(--sage-radius);
   color: var(--sage-success);
@@ -91,7 +91,7 @@ withDefaults(defineProps<{
 }
 
 .message-author {
-  margin: 0 0 5px;
+  margin: 2px 0 8px;
   color: var(--sage-text-muted);
   font-size: 11px;
   font-weight: 700;
@@ -107,13 +107,13 @@ withDefaults(defineProps<{
   max-width: 100%;
   color: var(--sage-text);
   font-size: 14px;
-  line-height: 1.65;
+  line-height: 1.72;
   overflow-wrap: anywhere;
   word-break: break-word;
 }
 
 .message-turn.user .message-content-shell {
-  padding: 9px 12px;
+  padding: 10px 13px;
   border: 1px solid var(--sage-border);
   border-radius: var(--sage-radius-lg);
   background: var(--sage-surface-muted);
@@ -127,18 +127,52 @@ withDefaults(defineProps<{
   margin-bottom: 0;
 }
 
+.message-content :deep(p),
+.message-content :deep(ul),
+.message-content :deep(ol),
+.message-content :deep(blockquote) {
+  margin: 0 0 12px;
+}
+
+.message-content :deep(h1),
+.message-content :deep(h2),
+.message-content :deep(h3) {
+  margin: 22px 0 10px;
+  color: var(--sage-text);
+  line-height: 1.35;
+}
+
+.message-content :deep(h1) { font-size: 20px; }
+.message-content :deep(h2) { font-size: 17px; }
+.message-content :deep(h3) { font-size: 15px; }
+.message-content :deep(ul), .message-content :deep(ol) { padding-left: 22px; }
+.message-content :deep(li + li) { margin-top: 4px; }
+.message-content :deep(a) { color: var(--sage-success); text-underline-offset: 3px; }
+.message-content :deep(blockquote) { padding-left: 12px; border-left: 2px solid var(--sage-border-strong); color: var(--sage-text-secondary); }
+
 .message-content :deep(pre) {
-  padding: 8px 12px;
+  margin: 14px 0;
+  padding: 14px 16px;
   border: 1px solid var(--sage-border);
   border-radius: var(--sage-radius);
   background: var(--sage-code-bg);
   color: var(--sage-code-text);
   overflow-x: auto;
-  font-size: 13px;
+  font-size: 12.5px;
+  line-height: 1.65;
 }
 
 .message-content :deep(code) {
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--sage-font-mono);
+}
+
+.message-content :deep(:not(pre) > code) {
+  padding: 2px 5px;
+  border: 1px solid var(--sage-border);
+  border-radius: var(--sage-radius-sm);
+  background: var(--sage-surface-muted);
+  color: var(--sage-text-secondary);
+  font-size: .92em;
 }
 
 @media (max-width: 640px) {

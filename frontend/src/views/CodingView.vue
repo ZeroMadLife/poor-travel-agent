@@ -412,7 +412,7 @@ onBeforeUnmount(() => {
           <template v-for="turn in store.turns" :key="turn.id">
             <div class="timeline-turn" :data-timeline-turn-id="turn.id">
               <CodingMessageTurn v-for="msg in messagesForRun(turn.run_id)" :key="msg.id" :message="msg" :rendered-content="render(msg.content)" :show-process="showToolProcess" />
-              <details v-if="showToolProcess && (turn.approvals.length || turn.context.length || turn.memory.length || turn.agents.length || turn.terminal)" class="process-details">
+              <details v-if="showToolProcess && (turn.approvals.length || turn.context.length || turn.memory.length || turn.agents.length)" class="process-details">
                 <summary>运行过程</summary>
                 <ul>
                   <li v-for="item in turn.approvals" :key="item.id">{{ processLabel('approval') }} · {{ item.tool }} · {{ item.status }}</li>
@@ -425,7 +425,9 @@ onBeforeUnmount(() => {
             </div>
           </template>
           <CodingApprovalCard v-if="store.pendingApproval" :approval="store.pendingApproval" :busy="store.approvalBusy" @respond="store.respondApproval" />
-          <CodingThinkingIndicator v-if="showThinkingIndicator" :phase="store.thinkingPhase" />
+          <div v-if="showThinkingIndicator" class="active-run-status">
+            <CodingThinkingIndicator :phase="store.thinkingPhase" />
+          </div>
           <button v-if="store.lastDiffInfo?.file_count" class="diff-btn" type="button" @click="store.openDiffDrawer"><GitCompareArrows :size="15" /> 查看变更（{{ store.lastDiffInfo.file_count }} 个文件）</button>
           <CodingPlanApproval v-if="store.planReview" />
           <p v-if="store.errorMessage || deepLinkError" class="error-text" role="alert">{{ store.errorMessage || deepLinkError }}</p>
@@ -460,7 +462,9 @@ onBeforeUnmount(() => {
 .connection-state { display:flex; align-items:center; gap:6px; color:#6b7280; font-size:10px; }.connection-state i { width:7px; height:7px; border-radius:50%; background:#a7afb9; }.connection-state i.connected { background:#16a34a; }
 .plan-banner { display:flex; align-items:center; gap:8px; min-height:34px; padding:0 12px; border-bottom:1px solid #cddcf2; color:#244b82; background:#eff5fd; font-size:11px; }.plan-banner span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.plan-banner button { margin-left:auto; min-height:24px; border:1px solid #adc5e7; border-radius:5px; color:#1d4ed8; background:#fff; font-size:10px; }
 .chat-shell { display:grid; grid-template-columns:256px minmax(0,1fr); min-height:0; overflow:hidden; }.pane-left,.pane-center { min-height:0; }.pane-left { overflow:hidden; }.pane-center { position:relative; display:grid; grid-template-rows:56px minmax(0,1fr) auto; min-width:0; background:#fff; }.session-titlebar { display:flex; align-items:center; justify-content:space-between; gap:16px; min-width:0; padding:0 clamp(16px,4vw,52px); border-bottom:1px solid #edf0f3; }.session-title-copy { display:flex; align-items:center; gap:9px; min-width:0; }.session-title-copy strong { min-width:0; overflow:hidden; color:#283342; font-size:14px; text-overflow:ellipsis; white-space:nowrap; }.session-title-copy span { display:inline-flex; align-items:center; flex:none; color:#748091; font-size:11px; }.session-title-copy span::before { width:6px; height:6px; margin-right:5px; border-radius:50%; background:#a7afb9; content:''; }.session-title-copy span.running { color:#137333; }.session-title-copy span.running::before { background:#16a34a; }.titlebar-actions { display:flex; align-items:center; gap:8px; }.files-toggle { display:inline-grid; place-items:center; width:30px; height:30px; padding:0; border:1px solid transparent; border-radius:6px; color:#52606f; background:#fff; }.files-toggle:hover { border-color:#d8dee6; color:#1d4ed8; background:#f4f7fb; }
-.message-area { min-height:0; overflow-y:auto; padding:18px clamp(16px,4vw,52px) 28px; scrollbar-gutter:stable; }.message-area > * { max-width:880px; margin-left:auto; margin-right:auto; }
+.message-area { min-height:0; overflow-y:auto; padding:22px clamp(18px,5vw,64px) 32px; scrollbar-gutter:stable; }.message-area > * { max-width:880px; margin-left:auto; margin-right:auto; }
+.active-run-status { display:flex; max-width:800px; padding-left:40px; }
+.active-run-status :deep(.thinking-indicator) { margin:0 0 12px; }
 .load-older-btn { display:block; min-height:30px; margin:0 auto 18px; padding:0 12px; border:1px solid #d1d7df; border-radius:6px; color:#52606f; background:#fff; font-size:11px; }.load-older-btn:hover { background:#f5f7f9; }
 .empty-state { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:5px; min-height:48vh; color:#8a939e; text-align:center; }.empty-state strong { color:#4b5563; font-size:14px; }.empty-state span { font-size:12px; }
 .process-details { margin:-9px 0 16px 40px; color:#687585; font-size:11px; }.process-details summary { cursor:pointer; font-weight:600; }.process-details ul { margin:7px 0 0; padding-left:18px; line-height:1.7; }
@@ -474,4 +478,16 @@ onBeforeUnmount(() => {
 /* Visual-system overrides: compact workbench chrome stays neutral across light and dark themes. */
 .sage-view { color:var(--sage-text); background:var(--sage-surface); }.workbench-header { border-color:var(--sage-border); background:var(--sage-surface); }.brand-block strong { color:var(--sage-text); }.brand-block span,.connection-state { color:var(--sage-text-muted); }.header-icon,.files-toggle { color:var(--sage-text-secondary); background:var(--sage-surface); }.header-icon:hover,.header-icon[aria-pressed="true"],.files-toggle:hover { border-color:var(--sage-border-strong); color:var(--sage-text); background:var(--sage-surface-muted); }.connection-state i { background:var(--sage-border-strong); }.connection-state i.connected,.session-title-copy span.running::before { background:var(--sage-success); }.plan-banner { border-color:var(--sage-border); color:var(--sage-text-secondary); background:var(--sage-surface-muted); }.plan-banner button,.load-older-btn { border-color:var(--sage-border); color:var(--sage-text-secondary); background:var(--sage-surface); }.chat-shell,.pane-center { background:var(--sage-surface); }.pane-left,.session-titlebar { border-color:var(--sage-border); }.session-title-copy strong { color:var(--sage-text); }.session-title-copy span { color:var(--sage-text-muted); }.session-title-copy span::before { background:var(--sage-border-strong); }.empty-state { color:var(--sage-text-muted); }.empty-state strong { color:var(--sage-text-secondary); }.process-details { color:var(--sage-text-muted); }.diff-btn { border-color:var(--sage-border-strong); color:var(--sage-text-secondary); background:var(--sage-surface-muted); }.diff-btn:hover,.load-older-btn:hover { background:var(--sage-surface-muted); }.error-text,.drawer-error { color:var(--sage-danger); }
 @media (max-width:1179px) { .pane-left { border-color:var(--sage-border); box-shadow:var(--sage-shadow-drawer); }.session-backdrop { background:rgb(17 18 20 / 42%); }.sheet-close { border-color:var(--sage-border); color:var(--sage-text-secondary); background:var(--sage-surface); } }
+
+/* Hermes-inspired workbench proportions, implemented with Sage tokens and controls. */
+.sage-view { --header-height:42px; }
+.workbench-header { padding-right:12px; padding-left:12px; }
+.brand-block strong { font-size:15px; }
+.chat-shell { grid-template-columns:244px minmax(0,1fr); }
+.pane-center { grid-template-rows:48px minmax(0,1fr) auto; }
+.session-titlebar { padding-right:clamp(18px,5vw,64px); padding-left:clamp(18px,5vw,64px); }
+@media (min-width:1180px) {
+  .workbench-header { display:none; }
+  .sage-view { --header-height:0px; }
+}
 </style>

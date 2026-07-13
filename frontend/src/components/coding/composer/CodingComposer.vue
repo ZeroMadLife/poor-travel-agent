@@ -125,6 +125,7 @@ defineExpose({
 
 <template>
   <div class="composer">
+    <div class="composer-frame">
     <div class="composer-controls">
       <select
         v-if="store.models.length > 0"
@@ -218,29 +219,51 @@ defineExpose({
         <Send :size="15" />
       </button>
     </div>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .composer {
-  border-top: 1px solid var(--sage-border);
+  position: relative;
   background: var(--sage-surface);
-  padding: 9px max(16px, calc((100% - 880px) / 2));
+  padding: 0 max(18px, calc((100% - 880px) / 2)) 14px;
+}
+
+.composer::before { position:absolute; inset:0 0 auto; height:24px; background:linear-gradient(to bottom,transparent,var(--sage-surface)); transform:translateY(-100%); pointer-events:none; content:''; }
+
+.composer-frame {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--sage-border-strong);
+  border-radius: var(--sage-radius-lg);
+  background: var(--sage-surface);
+  overflow: visible;
+}
+
+.composer-frame:focus-within {
+  border-color: var(--sage-focus);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--sage-focus) 14%, transparent);
 }
 
 .composer-controls {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-bottom: 8px;
+  gap: 8px;
+  order: 2;
+  z-index: 2;
+  min-height: 38px;
+  margin: 0;
+  padding: 0 48px 8px 10px;
 }
 
 .model-select {
-  border: 1px solid var(--sage-border);
+  border: 0;
   border-radius: var(--sage-radius);
   padding: 3px 8px;
   font-size: 12px;
-  background: var(--sage-surface);
+  background: transparent;
   color: var(--sage-text-secondary);
   cursor: pointer;
   max-width: 160px;
@@ -270,7 +293,7 @@ defineExpose({
   grid-template-columns: auto auto;
   align-items: center;
   column-gap: 7px;
-  min-width: 170px;
+  min-width: 154px;
   padding: 3px 0;
   color: var(--sage-text-secondary);
 }
@@ -293,7 +316,7 @@ defineExpose({
 
 .compact-hint {
   margin-left: auto;
-  border: 1px solid color-mix(in srgb, var(--sage-warning) 55%, var(--sage-border));
+  border: 0;
   border-radius: var(--sage-radius);
   background: var(--sage-warning-bg);
   color: var(--sage-warning);
@@ -307,6 +330,8 @@ defineExpose({
 }
 
 .composer-input {
+  position: static;
+  order: 1;
   display: flex;
   gap: 8px;
   align-items: flex-end;
@@ -320,13 +345,13 @@ defineExpose({
 .composer-input textarea {
   width: 100%;
   resize: vertical;
-  min-height: 42px;
-  max-height: 180px;
-  border: 1px solid var(--sage-border-strong);
-  border-radius: var(--sage-radius-lg);
+  min-height: 74px;
+  max-height: 240px;
+  border: 0;
+  border-radius: var(--sage-radius-lg) var(--sage-radius-lg) 0 0;
   color: var(--sage-text);
   background: var(--sage-surface);
-  padding: 8px 10px;
+  padding: 14px 14px 8px;
   line-height: 1.5;
   font-size: 13px;
   font-family: inherit;
@@ -334,8 +359,7 @@ defineExpose({
 
 .composer-input textarea:focus {
   outline: none;
-  border-color: var(--sage-focus);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--sage-focus) 16%, transparent);
+  box-shadow: none;
 }
 
 .skill-menu {
@@ -403,30 +427,46 @@ defineExpose({
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
-  border: 0;
-  border-radius: 8px;
-  background: var(--sage-text);
-  color: #fff;
+  position: absolute;
+  right: 9px;
+  bottom: 8px;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--sage-border-strong);
+  border-radius: 50%;
+  background: var(--sage-text-secondary);
+  color: var(--sage-surface);
   cursor: pointer;
+  z-index: 3;
 }
 
 .stop-btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
+  position: absolute;
+  right: 9px;
+  bottom: 8px;
+  width: 32px;
+  height: 32px;
   border: 1px solid var(--sage-danger);
-  border-radius: var(--sage-radius-lg);
+  border-radius: 50%;
   background: var(--sage-surface);
   color: var(--sage-danger);
   cursor: pointer;
+  z-index: 3;
 }
 
 .send-btn:disabled {
-  background: var(--sage-border-strong);
+  border-color: var(--sage-border);
+  background: var(--sage-surface-muted);
+  color: var(--sage-text-muted);
   cursor: not-allowed;
+}
+
+@media (max-width: 720px) {
+  .composer { padding-right:12px; padding-left:12px; }
+  .composer-controls { overflow-x:auto; }
+  .context-budget { min-width:138px; }
 }
 </style>

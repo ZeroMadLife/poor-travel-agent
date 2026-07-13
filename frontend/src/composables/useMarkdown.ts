@@ -18,6 +18,10 @@ const md = new MarkdownIt({
   },
 })
 
+// Keep protocol URLs linkable without treating repository names such as
+// README.md as public domains.
+md.linkify.set({ fuzzyLink: false })
+
 // 外部链接加 target=_blank 和 rel=noopener
 const defaultRender =
   md.renderer.rules.link_open ||

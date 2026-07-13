@@ -48,8 +48,8 @@ function toggle() {
 
 <style scoped>
 .execution-log {
-  max-width: 760px;
-  margin: 0 auto 5px;
+  width: 100%;
+  margin: 0 0 5px;
   border: 1px solid var(--sage-border);
   border-radius: var(--sage-radius);
   background: var(--sage-surface-raised);
