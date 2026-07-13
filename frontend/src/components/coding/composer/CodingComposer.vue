@@ -121,6 +121,18 @@ defineExpose({
 <template>
   <div class="composer">
     <div class="composer-controls">
+      <select
+        v-if="store.models.length > 0"
+        v-model="store.currentModelId"
+        class="model-select"
+        title="切换模型"
+        @change="store.changeModel(store.currentModelId)"
+      >
+        <option v-for="model in store.models" :key="model.id" :value="model.id">
+          {{ model.label }}
+        </option>
+      </select>
+
       <button
         v-if="store.contextConfigured"
         class="compact-hint"
@@ -224,6 +236,22 @@ defineExpose({
   align-items: center;
   gap: 10px;
   margin-bottom: 8px;
+}
+
+.model-select {
+  border: 1px solid var(--sage-border);
+  border-radius: var(--sage-radius);
+  padding: 3px 8px;
+  font-size: 12px;
+  background: var(--sage-surface);
+  color: var(--sage-text-secondary);
+  cursor: pointer;
+  max-width: 160px;
+}
+
+.model-select:focus {
+  outline: none;
+  border-color: var(--sage-focus);
 }
 
 .compact-hint:disabled {
