@@ -1,10 +1,20 @@
 """Coding API route tests."""
 
+import threading
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from api.main import create_app
+
+
+def _receive_runtime_event(websocket):
+    """Unwrap the next runtime event from the durable timeline envelope."""
+    while True:
+        envelope = websocket.receive_json()
+        payload = envelope["payload"]
+        if "type" in payload and payload["type"] not in {"user"}:
+            return payload
 
 
 class FakeModel:
@@ -82,10 +92,10 @@ def test_list_coding_sessions_returns_persisted_sessions(tmp_path: Path) -> None
     )
     created = client.post("/api/v1/coding/session", json={}).json()
     session_id = created["session_id"]
-    # Run a turn so the session is persisted (save_on_init=False) and non-empty.
+    # Run a turn so the session becomes visible in the non-empty session list.
     with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
         websocket.send_json({"content": "读 README.md"})
-        while websocket.receive_json()["type"] != "final":
+        while _receive_runtime_event(websocket)["type"] != "final":
             pass
 
     response = client.get("/api/v1/coding/sessions")
@@ -95,6 +105,35 @@ def test_list_coding_sessions_returns_persisted_sessions(tmp_path: Path) -> None
     assert sessions[0]["session_id"] == session_id
     assert sessions[0]["workspace_root"] == str(tmp_path.resolve())
     assert sessions[0]["runtime_mode"] == "default"
+
+
+def test_coding_session_metadata_can_rename_pin_and_archive(tmp_path: Path) -> None:
+    app = create_app(
+        coding_model_factory=FakeModel,
+        coding_workspace_root=tmp_path,
+        coding_storage_root=tmp_path / ".coding",
+    )
+    client = TestClient(app)
+    session_id = client.post("/api/v1/coding/session", json={}).json()["session_id"]
+    runtime = app.state.coding_sessions[session_id]
+    runtime.session["history"] = [{"role": "user", "content": "原始标题"}]
+    runtime._save_session()
+
+    response = client.patch(
+        f"/api/v1/coding/session/{session_id}/metadata",
+        json={"title": "新标题", "pinned": True},
+    )
+    assert response.status_code == 200
+    assert response.json()["title"] == "新标题"
+    assert response.json()["pinned"] is True
+
+    archived = client.patch(
+        f"/api/v1/coding/session/{session_id}/metadata",
+        json={"archived": True},
+    )
+    assert archived.status_code == 200
+    assert client.get("/api/v1/coding/sessions").json()["sessions"] == []
+    assert client.get("/api/v1/coding/sessions?include_archived=true").json()["sessions"][0]["archived"] is True
 
 
 def test_resume_coding_session_rehydrates_runtime(tmp_path: Path) -> None:
@@ -109,7 +148,7 @@ def test_resume_coding_session_rehydrates_runtime(tmp_path: Path) -> None:
     session_id = client.post("/api/v1/coding/session", json={}).json()["session_id"]
     with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
         websocket.send_json({"content": "读 README.md"})
-        while websocket.receive_json()["type"] != "final":
+        while _receive_runtime_event(websocket)["type"] != "final":
             pass
     app.state.coding_sessions.clear()
 
@@ -120,6 +159,86 @@ def test_resume_coding_session_rehydrates_runtime(tmp_path: Path) -> None:
     assert response.json()["permission_mode"] == "default"
     assert session_id in app.state.coding_sessions
     assert app.state.coding_sessions[session_id].session["history"][0]["content"] == "读 README.md"
+
+
+def test_resume_keeps_active_runtime_and_pending_approval_bound_to_it(tmp_path: Path) -> None:
+    """An active coordinator run must keep its in-memory approval queue on resume."""
+    app = create_app(
+        coding_model_factory=FakeWriteModel,
+        coding_workspace_root=tmp_path,
+        coding_storage_root=tmp_path / ".coding",
+    )
+    with TestClient(app) as client:
+        session_id = client.post(
+            "/api/v1/coding/session", json={"approval_policy": "ask"}
+        ).json()["session_id"]
+        original_runtime = app.state.coding_sessions[session_id]
+        original_run_id = "run-active"
+        original_runtime.active_run_id = original_run_id
+        approval = original_runtime.approval_manager.submit(
+            session_id,
+            "write_file",
+            {"path": "note.txt"},
+            "write_file requires approval.",
+            "tool:write_file",
+        )
+        coordinator = app.state.coding_run_registry.get(session_id)
+        coordinator._active_run_id = original_run_id
+
+        resumed = client.post(f"/api/v1/coding/session/{session_id}/resume")
+        pending = client.get(f"/api/v1/coding/{session_id}/approval/pending")
+        approved = client.post(
+            f"/api/v1/coding/{session_id}/approval/respond",
+            json={"approval_id": approval.approval_id, "choice": "once"},
+        )
+
+    assert resumed.status_code == 200
+    assert resumed.json()["session_id"] == session_id
+    assert app.state.coding_sessions[session_id] is original_runtime
+    assert original_runtime.active_run_id == original_run_id
+    assert pending.status_code == 200
+    assert pending.json()["approval_id"] == approval.approval_id
+    assert approved.status_code == 200
+    assert approval.event.is_set()
+
+
+def test_resume_keeps_runtime_while_startup_lease_is_being_published(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The durable lease closes the gap before RunCoordinator exposes its active id."""
+    app = create_app(
+        coding_model_factory=FakeModel,
+        coding_workspace_root=tmp_path,
+        coding_storage_root=tmp_path / ".coding",
+    )
+    lease_written = threading.Event()
+    allow_start = threading.Event()
+    with TestClient(app) as client:
+        session_id = client.post("/api/v1/coding/session", json={}).json()["session_id"]
+        original_runtime = app.state.coding_sessions[session_id]
+        coordinator = app.state.coding_run_registry.get(session_id)
+        original_begin = coordinator.journal.begin_run
+
+        def blocked_begin(run_id: str, *, owner_id: str, owner_pid: int):
+            result = original_begin(run_id, owner_id=owner_id, owner_pid=owner_pid)
+            lease_written.set()
+            assert allow_start.wait(timeout=2)
+            return result
+
+        monkeypatch.setattr(coordinator.journal, "begin_run", blocked_begin)
+        with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
+            websocket.send_json({"content": "读 README.md"})
+            assert lease_written.wait(timeout=2)
+            assert coordinator.active_run_id is None
+            assert coordinator.journal.active_run_id() is not None
+
+            resumed = client.post(f"/api/v1/coding/session/{session_id}/resume")
+            assert resumed.status_code == 200
+            assert app.state.coding_sessions[session_id] is original_runtime
+
+            allow_start.set()
+            while _receive_runtime_event(websocket)["type"] != "final":
+                pass
 
 
 def test_get_coding_session_messages_returns_persisted_chat_history(tmp_path: Path) -> None:
@@ -135,7 +254,7 @@ def test_get_coding_session_messages_returns_persisted_chat_history(tmp_path: Pa
     session_id = client.post("/api/v1/coding/session", json={}).json()["session_id"]
     with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
         websocket.send_json({"content": "读 README.md"})
-        while websocket.receive_json()["type"] != "final":
+        while _receive_runtime_event(websocket)["type"] != "final":
             pass
 
     response = client.get(f"/api/v1/coding/session/{session_id}/messages")
@@ -192,7 +311,7 @@ def test_coding_websocket_streams_engine_events(tmp_path: Path) -> None:
 
     with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
         websocket.send_json({"content": "读 README.md"})
-        events = [websocket.receive_json() for _ in range(7)]
+        events = [_receive_runtime_event(websocket) for _ in range(7)]
 
     assert [event["type"] for event in events] == [
         "model_requested",
@@ -255,13 +374,13 @@ def test_coding_websocket_waits_for_approval_then_continues(tmp_path: Path) -> N
 
     with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
         websocket.send_json({"content": "写一个 note"})
-        first_events = [websocket.receive_json() for _ in range(3)]
+        first_events = [_receive_runtime_event(websocket) for _ in range(3)]
         approval = first_events[-1]
         response = client.post(
             f"/api/v1/coding/{session_id}/approval/respond",
             json={"approval_id": approval["approval_id"], "choice": "once"},
         )
-        remaining_events = [websocket.receive_json() for _ in range(6)]
+        remaining_events = [_receive_runtime_event(websocket) for _ in range(6)]
 
     assert [event["type"] for event in first_events] == [
         "model_requested",
@@ -281,8 +400,8 @@ def test_coding_websocket_waits_for_approval_then_continues(tmp_path: Path) -> N
     assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "approved"
 
 
-def test_stop_coding_run_marks_runtime_stop_requested(tmp_path: Path) -> None:
-    """POST /run/stop requests cancellation for the active coding run."""
+def test_stop_coding_run_rejects_uncoordinated_runtime_state(tmp_path: Path) -> None:
+    """Runtime state alone cannot authorize cancellation without a server task."""
     app = create_app(
         coding_model_factory=FakeModel,
         coding_workspace_root=tmp_path,
@@ -298,8 +417,8 @@ def test_stop_coding_run_marks_runtime_stop_requested(tmp_path: Path) -> None:
     )
 
     assert response.status_code == 200
-    assert response.json() == {"ok": True}
-    assert app.state.coding_sessions[session_id].stop_requested is True
+    assert response.json() == {"ok": False}
+    assert app.state.coding_sessions[session_id].stop_requested is False
 
 
 def test_stop_coding_run_without_body_requires_run_id(tmp_path: Path) -> None:
@@ -318,27 +437,6 @@ def test_stop_coding_run_without_body_requires_run_id(tmp_path: Path) -> None:
     )
 
     assert response.status_code == 422
-
-
-def test_stop_coding_run_with_matching_run_id(tmp_path: Path) -> None:
-    """POST /run/stop with a run_id matching the active run is accepted."""
-    app = create_app(
-        coding_model_factory=FakeModel,
-        coding_workspace_root=tmp_path,
-        coding_storage_root=tmp_path / ".coding",
-    )
-    client = TestClient(app)
-    session_id = client.post("/api/v1/coding/session", json={}).json()["session_id"]
-    runtime = app.state.coding_sessions[session_id]
-    runtime.active_run_id = "run_active"
-
-    response = client.post(
-        f"/api/v1/coding/{session_id}/run/stop", json={"run_id": "run_active"}
-    )
-
-    assert response.status_code == 200
-    assert response.json() == {"ok": True}
-    assert runtime.stop_requested is True
 
 
 def test_stop_coding_run_rejects_stale_run_id(tmp_path: Path) -> None:
@@ -500,7 +598,7 @@ def test_coding_websocket_streams_plan_ready_then_approve_exits(tmp_path: Path) 
         websocket.send_json({"content": "退出规划模式"})
         events: list[dict] = []
         while True:
-            event = websocket.receive_json()
+            event = _receive_runtime_event(websocket)
             events.append(event)
             if event["type"] == "final":
                 break
@@ -520,8 +618,8 @@ def test_coding_websocket_streams_plan_ready_then_approve_exits(tmp_path: Path) 
     assert runtime.runtime_mode == "default"
 
 
-def test_coding_websocket_resurfaces_pending_plan_review_on_reconnect(tmp_path: Path) -> None:
-    """A reconnecting client re-receives plan_ready_for_review + plan mode."""
+def test_pending_plan_review_remains_available_after_reconnect(tmp_path: Path) -> None:
+    """Plan review state survives socket churn without unjournaled sync events."""
     app = create_app(
         coding_model_factory=FakeModel,
         coding_workspace_root=tmp_path,
@@ -533,16 +631,14 @@ def test_coding_websocket_resurfaces_pending_plan_review_on_reconnect(tmp_path: 
     runtime.enter_plan_mode("Refactor API")
     runtime.request_plan_exit()
 
-    with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
-        mode_sync = websocket.receive_json()
-        review_sync = websocket.receive_json()
+    with client.websocket_connect(f"/api/v1/coding/{session_id}/stream"):
+        pass
 
-    assert mode_sync["type"] == "runtime_mode_changed"
-    assert mode_sync["mode"] == "plan"
-    assert mode_sync["plan_path"] == ".coding/plans/refactor-api-plan.md"
-    assert review_sync["type"] == "plan_ready_for_review"
-    assert review_sync["review_id"]
-    assert "# Refactor" not in review_sync["summary"]  # no plan file was written
+    pending = runtime.plan_review_manager.pending
+    assert pending is not None
+    assert pending.review_id
+    assert pending.plan_path == ".coding/plans/refactor-api-plan.md"
+    assert "# Refactor" not in pending.summary  # no plan file was written
     assert runtime.runtime_mode == "plan"
 
 
@@ -560,7 +656,7 @@ def test_coding_run_history_lists_and_reads_traces(tmp_path: Path) -> None:
     with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
         websocket.send_json({"content": "读 README.md"})
         while True:
-            event = websocket.receive_json()
+            event = _receive_runtime_event(websocket)
             if event["type"] == "final":
                 break
 
@@ -768,7 +864,7 @@ def test_coding_websocket_handles_slash_command(tmp_path: Path) -> None:
         websocket.send_json({"content": "/review"})
         events = []
         while True:
-            event = websocket.receive_json()
+            event = _receive_runtime_event(websocket)
             events.append(event)
             if event["type"] in {"final", "step_limit", "error"}:
                 break
@@ -790,7 +886,7 @@ def test_coding_websocket_unknown_skill_returns_error(tmp_path: Path) -> None:
 
     with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
         websocket.send_json({"content": "/nonexistent"})
-        event = websocket.receive_json()
+        event = _receive_runtime_event(websocket)
 
     assert event["type"] == "error"
     assert "Unknown skill" in event["message"]
@@ -823,7 +919,7 @@ def test_coding_websocket_slash_command_persists_original_text(tmp_path: Path) -
         websocket.send_json({"content": "/review"})
         events = []
         while True:
-            event = websocket.receive_json()
+            event = _receive_runtime_event(websocket)
             events.append(event)
             if event["type"] in {"final", "step_limit", "error"}:
                 break
@@ -869,7 +965,7 @@ def test_coding_websocket_slash_command_with_args_keeps_original(tmp_path: Path)
 
     with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
         websocket.send_json({"content": "/travel-planning 我要去莆田"})
-        while websocket.receive_json()["type"] not in {"final", "step_limit", "error"}:
+        while _receive_runtime_event(websocket)["type"] not in {"final", "step_limit", "error"}:
             pass
 
     # History keeps the original slash command including the user's arguments.
@@ -888,22 +984,21 @@ def test_coding_websocket_slash_command_with_args_keeps_original(tmp_path: Path)
     assert messages[0]["content"] == "/travel-planning 我要去莆田"
 
 
-def test_create_coding_session_does_not_persist_empty_session(tmp_path: Path) -> None:
-    """A freshly created session is not persisted until the first turn runs."""
-    client = TestClient(
-        create_app(
-            coding_model_factory=FakeModel,
-            coding_workspace_root=tmp_path,
-            coding_storage_root=tmp_path / ".coding",
-        )
-    )
-    session_id = client.post("/api/v1/coding/session", json={}).json()["session_id"]
+def test_create_coding_session_persists_recoverable_empty_session(tmp_path: Path) -> None:
+    """A fresh session is discoverable before its first run can crash."""
+    options = {
+        "coding_model_factory": FakeModel,
+        "coding_workspace_root": tmp_path,
+        "coding_storage_root": tmp_path / ".coding",
+    }
+    with TestClient(create_app(**options)) as client:
+        session_id = client.post("/api/v1/coding/session", json={}).json()["session_id"]
 
-    # No empty session shows up in the session list.
-    response = client.get("/api/v1/coding/sessions")
+    with TestClient(create_app(**options)) as restarted:
+        response = restarted.post(f"/api/v1/coding/session/{session_id}/resume")
+
     assert response.status_code == 200
-    session_ids = [item["session_id"] for item in response.json()["sessions"]]
-    assert session_id not in session_ids
+    assert response.json()["session_id"] == session_id
 
 
 def test_get_run_diff_returns_artifact(tmp_path: Path) -> None:
@@ -929,7 +1024,7 @@ def test_get_run_diff_returns_artifact(tmp_path: Path) -> None:
     with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
         websocket.send_json({"content": "写一个 note"})
         while True:
-            event = websocket.receive_json()
+            event = _receive_runtime_event(websocket)
             if event["type"] == "turn_finished":
                 break
 

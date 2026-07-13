@@ -1,6 +1,8 @@
 """FastAPI app factory with two-tier Agent."""
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -143,7 +145,12 @@ def create_app(
         auth: 口令验证器, None 时允许匿名访问
         session_store: 可选持久化会话存储
     """
-    app = FastAPI(title="Sage API")
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        yield
+        await app.state.coding_run_registry.shutdown()
+
+    app = FastAPI(title="Sage API", lifespan=lifespan)
     app.state.agent = agent
     app.state.auth = auth
     app.state.session_store = session_store
@@ -179,6 +186,10 @@ def create_app(
     app.state.coding_workspace_root = Path(coding_workspace_root or repo_root).resolve()
     app.state.coding_storage_root = Path(coding_storage_root or (repo_root / ".coding")).resolve()
     app.state.coding_sessions = {}
+    from api.coding_runs import CodingRunRegistry
+
+    app.state.coding_run_registry = CodingRunRegistry(app.state.coding_storage_root)
+
     from api import coding, routes, ws
 
     app.include_router(routes.router)

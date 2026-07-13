@@ -45,6 +45,16 @@ class CodingSessionSummary(BaseModel):
     updated_at: str = ""
     runtime_mode: str = "default"
     message_count: int = 0
+    pinned: bool = False
+    archived: bool = False
+
+
+class CodingSessionMetadataRequest(BaseModel):
+    """User-visible metadata changes for a coding session."""
+
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+    pinned: bool | None = None
+    archived: bool | None = None
 
 
 class CodingSessionsResponse(BaseModel):
@@ -65,6 +75,37 @@ class CodingSessionMessagesResponse(BaseModel):
     """Replayable chat messages for one local coding-agent session."""
 
     messages: list[CodingSessionMessage]
+
+
+class CodingTimelineEvent(BaseModel):
+    """One durable browser-visible coding event."""
+
+    event_id: str
+    session_id: str
+    run_id: str
+    sequence: int
+    kind: str
+    status: str
+    timestamp: str
+    payload: dict[str, Any]
+
+
+class CodingActiveRun(BaseModel):
+    """The session run currently owned by the server."""
+
+    run_id: str
+    status: Literal["running"] = "running"
+
+
+class CodingTimelineResponse(BaseModel):
+    """Cursor-paginated durable coding timeline."""
+
+    items: list[CodingTimelineEvent]
+    next_cursor: int
+    has_more: bool
+    older_cursor: int | None = None
+    latest_cursor: int = 0
+    active_run: CodingActiveRun | None = None
 
 
 class CodingFileEntry(BaseModel):

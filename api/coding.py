@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
+import re
+from collections.abc import AsyncGenerator
+from contextlib import suppress
 from inspect import signature
 from pathlib import Path
 from typing import Any, Literal, cast
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request, Response, WebSocket
+from starlette.websockets import WebSocketDisconnect
 
 from api.schemas import (
+    CodingActiveRun,
     CodingApprovalRespondRequest,
     CodingApprovalResponse,
     CodingContextCompactRequest,
@@ -37,6 +43,7 @@ from api.schemas import (
     CodingRunSummary,
     CodingSessionMessage,
     CodingSessionMessagesResponse,
+    CodingSessionMetadataRequest,
     CodingSessionRequest,
     CodingSessionResponse,
     CodingSessionsResponse,
@@ -44,6 +51,8 @@ from api.schemas import (
     CodingSkillDetailResponse,
     CodingSkillsResponse,
     CodingSkillSummary,
+    CodingTimelineEvent,
+    CodingTimelineResponse,
     ErrorEvent,
     PermissionModeSwitchRequest,
     UserMessage,
@@ -56,9 +65,121 @@ from core.coding.persistence import (
     MemoryProposal,
     MemoryStoreError,
 )
+from core.coding.persistence.session_event_journal import SessionEvent
+from core.coding.run_coordinator import ActiveRunConflictError, RunEvent
 from core.coding.runtime import CodingRuntime
 
 router = APIRouter()
+_SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+
+
+def _valid_session_id(session_id: str) -> bool:
+    return _SESSION_ID.fullmatch(session_id) is not None
+
+
+def _require_valid_session_id(session_id: str) -> None:
+    if not _valid_session_id(session_id):
+        raise HTTPException(status_code=422, detail="invalid coding session id")
+
+
+async def _runtime_timeline_events(
+    runtime: CodingRuntime,
+    *,
+    content: str,
+    skill_prompt: str | None,
+    command: str,
+    arguments: str,
+    run_id: str,
+) -> AsyncGenerator[RunEvent, None]:
+    """Project a complete runtime generator into durable nonterminal events."""
+    terminal_status = "completed"
+    yield RunEvent(
+        kind="user",
+        status="completed",
+        payload={"type": "user", "content": content},
+    )
+    if skill_prompt:
+        yield RunEvent(
+            kind="system",
+            status="completed",
+            payload={"type": "skill_invoked", "skill": command, "arguments": arguments},
+        )
+    async for event in runtime.run_turn(content, skill_prompt=skill_prompt, run_id=run_id):
+        event_type = str(event.get("type", ""))
+        if event_type == "run_finished":
+            candidate = str(event.get("status", "completed"))
+            if candidate == "retryable":
+                terminal_status = "interrupted"
+            elif candidate in {"completed", "cancelled", "interrupted", "error"}:
+                terminal_status = candidate
+        elif event_type == "error":
+            terminal_status = "error"
+        yield RunEvent(
+            kind=_timeline_kind(event_type),
+            status=_timeline_status(event_type, event),
+            payload=dict(event),
+        )
+    yield RunEvent(
+        kind="terminal",
+        status=terminal_status,
+        payload={
+            "event": "run_completed" if terminal_status == "completed" else f"run_{terminal_status}"
+        },
+    )
+
+
+def _timeline_kind(event_type: str) -> str:
+    if event_type in {"final", "text_delta"}:
+        return "assistant"
+    if event_type.startswith("model_"):
+        return "model"
+    if event_type.startswith("tool_") or event_type == "workspace_diff_ready":
+        return "tool"
+    if "approval" in event_type or event_type == "plan_ready_for_review":
+        return "approval"
+    if event_type.startswith("context_"):
+        return "context"
+    if event_type.startswith("memory_"):
+        return "memory"
+    if event_type.startswith("agent_"):
+        return "agent"
+    if event_type in {"run_finished", "turn_started", "turn_finished"}:
+        return "run"
+    return "system"
+
+
+def _timeline_status(event_type: str, event: dict[str, Any]) -> str:
+    if event_type in {"approval_required", "plan_ready_for_review"}:
+        return "blocked"
+    if event_type in {"model_requested", "tool_call", "turn_started"}:
+        return "running"
+    if event_type in {"error", "context_compaction_failed"}:
+        return "error"
+    if event_type == "run_finished":
+        status = str(event.get("status", "completed"))
+        if status == "retryable":
+            return "interrupted"
+        return status if status in {"completed", "cancelled", "interrupted", "error"} else "completed"
+    return "completed"
+
+
+def _timeline_event_dict(event: SessionEvent) -> dict[str, Any]:
+    return {
+        "event_id": event.event_id,
+        "session_id": event.session_id,
+        "run_id": event.run_id,
+        "sequence": event.sequence,
+        "kind": event.kind,
+        "status": event.status,
+        "timestamp": event.timestamp,
+        "payload": event.payload,
+    }
+
+
+def _observe_server_task(task: asyncio.Task[None]) -> None:
+    """Retrieve a detached task result after Coordinator persisted its terminal."""
+    with suppress(asyncio.CancelledError, Exception):
+        task.result()
 
 
 @router.post("/api/v1/coding/session")
@@ -86,7 +207,7 @@ async def create_coding_session(
         storage_root=storage_root,
         model_factory=model_factory,
         approval_policy=payload.approval_policy,
-        save_on_init=False,
+        save_on_init=True,
         permission_mode="default",
         context_policy=registry.resolve(model_id),
         model_capabilities=registry,
@@ -95,6 +216,7 @@ async def create_coding_session(
     )
     sessions: dict[str, CodingRuntime] = request.app.state.coding_sessions
     sessions[session_id] = runtime
+    request.app.state.coding_run_registry.get(session_id)
     return CodingSessionResponse(
         session_id=session_id,
         workspace_root=str(workspace_root.resolve()),
@@ -103,13 +225,47 @@ async def create_coding_session(
 
 
 @router.get("/api/v1/coding/sessions", response_model=CodingSessionsResponse)
-async def list_coding_sessions(request: Request) -> CodingSessionsResponse:
+async def list_coding_sessions(
+    request: Request,
+    include_archived: bool = False,
+) -> CodingSessionsResponse:
     """Return local coding-agent session history."""
     storage_root = Path(request.app.state.coding_storage_root)
     store = CodingSessionStore(storage_root / "sessions")
     return CodingSessionsResponse(
-        sessions=[CodingSessionSummary(**item) for item in store.list_sessions()]
+        sessions=[
+            CodingSessionSummary(**item)
+            for item in store.list_sessions(include_archived=include_archived)
+        ]
     )
+
+
+@router.patch(
+    "/api/v1/coding/session/{session_id}/metadata",
+    response_model=CodingSessionSummary,
+)
+async def update_coding_session_metadata(
+    session_id: str,
+    payload: CodingSessionMetadataRequest,
+    request: Request,
+) -> CodingSessionSummary:
+    """Update title/pin/archive metadata without touching runtime history."""
+    _require_valid_session_id(session_id)
+    if payload.title is None and payload.pinned is None and payload.archived is None:
+        raise HTTPException(status_code=422, detail="metadata update is empty")
+    store = CodingSessionStore(Path(request.app.state.coding_storage_root) / "sessions")
+    try:
+        summary = store.update_metadata(
+            session_id,
+            title=payload.title,
+            pinned=payload.pinned,
+            archived=payload.archived,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown coding session: {session_id}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return CodingSessionSummary(**summary)
 
 
 @router.post("/api/v1/coding/session/{session_id}/resume")
@@ -118,9 +274,25 @@ async def resume_coding_session(
     request: Request,
 ) -> CodingSessionResponse:
     """Rehydrate a persisted coding runtime session."""
+    _require_valid_session_id(session_id)
     model_factory = getattr(request.app.state, "coding_model_factory", None)
     if model_factory is None:
         raise RuntimeError("Coding model factory is not configured")
+    sessions: dict[str, CodingRuntime] = request.app.state.coding_sessions
+    coordinator = request.app.state.coding_run_registry.get(session_id)
+    active_runtime = sessions.get(session_id)
+    active_run_id = coordinator.active_run_id or coordinator.journal.active_run_id()
+    if active_run_id is not None:
+        if active_runtime is None:
+            raise HTTPException(
+                status_code=409,
+                detail="active coding run has no in-memory runtime",
+            )
+        return CodingSessionResponse(
+            session_id=session_id,
+            workspace_root=str(active_runtime.workspace.root.resolve()),
+            permission_mode=active_runtime.permission_mode,
+        )
     storage_root = Path(request.app.state.coding_storage_root)
     registry: ModelCapabilityRegistry = request.app.state.coding_model_capabilities
     store = CodingSessionStore(storage_root / "sessions")
@@ -153,12 +325,87 @@ async def resume_coding_session(
         raise HTTPException(
             status_code=404, detail=f"Unknown coding session: {session_id}"
         ) from exc
-    sessions: dict[str, CodingRuntime] = request.app.state.coding_sessions
     sessions[session_id] = runtime
+    await request.app.state.coding_run_registry.hydrate(session_id)
     return CodingSessionResponse(
         session_id=session_id,
         workspace_root=str(persisted_workspace),
         permission_mode=runtime.permission_mode,
+    )
+
+
+@router.get(
+    "/api/v1/coding/session/{session_id}/timeline",
+    response_model=CodingTimelineResponse,
+)
+async def get_coding_session_timeline(
+    session_id: str,
+    request: Request,
+    after: int = 0,
+    before: int | None = None,
+    tail: bool = False,
+    limit: int = 100,
+) -> CodingTimelineResponse:
+    """Return forward replay or a bounded tail/older browser history page."""
+    _require_valid_session_id(session_id)
+    if after < 0:
+        raise HTTPException(status_code=422, detail="after must be non-negative")
+    if before is not None and before <= 0:
+        raise HTTPException(status_code=422, detail="before must be positive")
+    if (before is not None and after != 0) or (tail and (before is not None or after != 0)):
+        raise HTTPException(
+            status_code=422,
+            detail="after, before, and tail pagination modes are mutually exclusive",
+        )
+    if not 1 <= limit <= 500:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 500")
+    sessions: dict[str, CodingRuntime] = request.app.state.coding_sessions
+    if session_id not in sessions:
+        store = CodingSessionStore(Path(request.app.state.coding_storage_root) / "sessions")
+        try:
+            store.load(session_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=404, detail=f"Unknown coding session: {session_id}"
+            ) from exc
+    coordinator = await request.app.state.coding_run_registry.hydrate(session_id)
+    if tail or before is not None:
+        backward_page = coordinator.journal.replay_before(
+            before=None if tail else before,
+            limit=limit,
+        )
+        items = backward_page.items
+        next_cursor = backward_page.latest_cursor
+        has_more = backward_page.has_more
+        older_cursor = backward_page.older_cursor
+        latest_cursor = backward_page.latest_cursor
+    else:
+        page = coordinator.journal.replay(after=after, limit=limit)
+        items = page.items
+        next_cursor = page.next_cursor
+        has_more = page.has_more
+        older_cursor = None
+        latest_cursor = coordinator.journal.latest_sequence()
+    active_run_id = coordinator.journal.active_run_id()
+    return CodingTimelineResponse(
+        items=[
+            CodingTimelineEvent(
+                event_id=item.event_id,
+                session_id=item.session_id,
+                run_id=item.run_id,
+                sequence=item.sequence,
+                kind=item.kind,
+                status=item.status,
+                timestamp=item.timestamp,
+                payload=item.payload,
+            )
+            for item in items
+        ],
+        next_cursor=next_cursor,
+        has_more=has_more,
+        older_cursor=older_cursor,
+        latest_cursor=latest_cursor,
+        active_run=CodingActiveRun(run_id=active_run_id) if active_run_id else None,
     )
 
 
@@ -171,6 +418,7 @@ async def get_coding_session_messages(
     request: Request,
 ) -> CodingSessionMessagesResponse:
     """Return persisted chat messages for replaying a coding session."""
+    _require_valid_session_id(session_id)
     storage_root = Path(request.app.state.coding_storage_root)
     store = CodingSessionStore(storage_root / "sessions")
     try:
@@ -195,8 +443,11 @@ async def get_coding_session_messages(
 
 @router.websocket("/api/v1/coding/{session_id}/stream")
 async def coding_stream(websocket: WebSocket, session_id: str) -> None:
-    """Stream coding-agent events over WebSocket."""
+    """Replay and stream durable events without owning the server run task."""
     await websocket.accept()
+    if not _valid_session_id(session_id):
+        await websocket.close(code=1008, reason="invalid coding session id")
+        return
     sessions: dict[str, CodingRuntime] = websocket.app.state.coding_sessions
     runtime = sessions.get(session_id)
     if runtime is None:
@@ -205,68 +456,102 @@ async def coding_stream(websocket: WebSocket, session_id: str) -> None:
         )
         await websocket.close()
         return
+    raw_after = websocket.query_params.get("after", "0")
+    try:
+        after = int(raw_after)
+        if after < 0:
+            raise ValueError
+    except ValueError:
+        await websocket.close(code=1008, reason="after must be a non-negative integer")
+        return
+    coordinator = await websocket.app.state.coding_run_registry.hydrate(session_id)
 
-    # Sync the runtime mode on (re)connect so the frontend knows whether the
-    # session is currently in plan mode. This only fires when a turn is not
-    # actively streaming, since mode changes mid-turn are delivered via the
-    # runtime_mode_changed events yielded by run_turn().
-    if runtime.runtime_mode != "default":
-        await websocket.send_json(
-            {
-                "type": "runtime_mode_changed",
-                "run_id": "",
-                "mode": runtime.runtime_mode,
-                "topic": runtime.plan_mode.topic,
-                "plan_path": runtime.plan_mode.plan_path,
-            }
-        )
+    async def sender() -> None:
+        async for event in coordinator.subscribe(after=after):
+            await websocket.send_json(_timeline_event_dict(event))
 
-    # Re-surface an outstanding plan review on (re)connect so the frontend can
-    # render the approval UI even if the plan_ready_for_review event was missed
-    # (e.g. the turn already finished streaming before the client connected).
-    pending_review = runtime.plan_review_manager.pending
-    if pending_review is not None and not pending_review.event.is_set():
-        await websocket.send_json(
-            {
-                "type": "plan_ready_for_review",
-                "run_id": "",
-                "review_id": pending_review.review_id,
-                "plan_path": pending_review.plan_path,
-                "summary": pending_review.summary,
-            }
-        )
-
-    while True:
-        try:
+    async def receiver() -> None:
+        while True:
             raw: Any = await websocket.receive_json()
-        except Exception:
-            break
-        try:
-            message = UserMessage(**raw)
-        except Exception as exc:
-            await websocket.send_json(ErrorEvent(message=f"Invalid message: {exc}").model_dump())
-            continue
-
-        content = message.content
-        expanded, command, args = runtime.resolve_slash(content)
-        if command and not expanded:
-            await websocket.send_json(ErrorEvent(message=f"Unknown skill: /{command}").model_dump())
-            continue
-        if expanded:
-            await websocket.send_json(
-                {"type": "skill_invoked", "skill": command, "arguments": args}
+            try:
+                message = UserMessage(**raw)
+            except Exception as exc:
+                await _start_rejected_input_run(
+                    coordinator,
+                    message=f"Invalid message: {exc}",
+                )
+                continue
+            content = message.content
+            expanded, command, args = runtime.resolve_slash(content)
+            if command and not expanded:
+                await _start_rejected_input_run(
+                    coordinator,
+                    message=f"Unknown skill: /{command}",
+                    content=content,
+                )
+                continue
+            run_id = f"run_{uuid4().hex[:12]}"
+            stream = _runtime_timeline_events(
+                runtime,
+                content=content,
+                skill_prompt=expanded or None,
+                command=command,
+                arguments=args,
+                run_id=run_id,
             )
-            # Pass original user text to run_turn; the expanded skill prompt is
-            # injected into the LLM request only and is not persisted to history.
-            skill_prompt = expanded
-        else:
-            skill_prompt = None
+            try:
+                task = await coordinator.start_run(run_id, stream)
+                task.add_done_callback(_observe_server_task)
+            except ActiveRunConflictError:
+                await stream.aclose()
+                await _start_rejected_input_run(
+                    coordinator,
+                    message="A run is already in progress for this session",
+                    content=content,
+                )
 
-        try:
-            async for event in runtime.run_turn(content, skill_prompt=skill_prompt):
-                await websocket.send_json(event)
-        except Exception as exc:
-            await websocket.send_json(ErrorEvent(message=f"Coding agent error: {exc}").model_dump())
+    tasks = {asyncio.create_task(sender()), asyncio.create_task(receiver())}
+    try:
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            with suppress(WebSocketDisconnect, asyncio.CancelledError):
+                task.result()
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _start_rejected_input_run(
+    coordinator: Any, *, message: str, content: str = ""
+) -> None:
+    run_id = f"run_{uuid4().hex[:12]}"
+
+    def persist() -> None:
+        if content:
+            coordinator.journal.append(
+                run_id=run_id,
+                kind="user",
+                status="completed",
+                payload={"type": "user", "content": content},
+            )
+        coordinator.journal.append(
+            run_id=run_id,
+            kind="system",
+            status="error",
+            payload={"type": "error", "run_id": run_id, "message": message},
+        )
+        coordinator.journal.append_terminal_once(
+            run_id=run_id,
+            status="error",
+            payload={"event": "input_rejected"},
+        )
+
+    await asyncio.to_thread(persist)
 
 
 @router.get("/api/v1/coding/{session_id}/files", response_model=CodingFilesResponse)
@@ -330,7 +615,7 @@ async def compact_coding_context(
     runtime = _require_runtime(request, session_id)
     if runtime.context_controller is None:
         raise HTTPException(status_code=422, detail="context window is not configured")
-    if runtime.active_run_id is not None or runtime._context_operation_lock.locked():
+    if _coding_operation_busy(request, session_id, runtime):
         raise HTTPException(status_code=409, detail="context operation is busy")
     try:
         result = await runtime.manual_compact(payload.focus)
@@ -396,8 +681,12 @@ async def stop_coding_run(
 ) -> dict[str, bool]:
     """Cancel only the explicitly identified active coding run."""
     runtime = _require_runtime(request, session_id)
-    stopped = runtime.request_stop(run_id=payload.run_id)
-    return {"ok": stopped}
+    coordinator = request.app.state.coding_run_registry.get(session_id)
+    if coordinator.active_run_id != payload.run_id:
+        return {"ok": False}
+    if runtime.active_run_id == payload.run_id:
+        runtime.request_stop(run_id=payload.run_id)
+    return {"ok": await coordinator.cancel(payload.run_id)}
 
 
 @router.post("/api/v1/coding/{session_id}/plan/approve")
@@ -617,7 +906,7 @@ async def switch_coding_model(
     allowed = _catalog_model_ids(request)
     if payload.model_id not in allowed:
         raise HTTPException(status_code=422, detail="unknown coding model")
-    if runtime.active_run_id is not None or runtime._context_operation_lock.locked():
+    if _coding_operation_busy(request, session_id, runtime):
         raise HTTPException(status_code=409, detail="context operation is busy")
     model_factory = request.app.state.coding_model_factory
 
@@ -702,6 +991,17 @@ def _require_runtime(request: Request, session_id: str) -> CodingRuntime:
     if runtime is None:
         raise HTTPException(status_code=404, detail=f"Unknown coding session: {session_id}")
     return runtime
+
+
+def _coding_operation_busy(
+    request: Request, session_id: str, runtime: CodingRuntime
+) -> bool:
+    coordinator = request.app.state.coding_run_registry.get(session_id)
+    return (
+        coordinator.journal.active_run_id() is not None
+        or runtime.active_run_id is not None
+        or runtime._context_operation_lock.locked()
+    )
 
 
 def _session_memory_proposal(

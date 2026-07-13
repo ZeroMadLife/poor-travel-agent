@@ -35,6 +35,8 @@ def test_session_store_lists_session_summaries(tmp_path: Path) -> None:
         {
             "session_id": "s-new",
             "title": "新需求",
+            "pinned": False,
+            "archived": False,
             "workspace_root": "/tmp/new",
             "created_at": "2026-07-08T10:00:00",
             "updated_at": "2026-07-08T10:20:00",
@@ -44,6 +46,8 @@ def test_session_store_lists_session_summaries(tmp_path: Path) -> None:
         {
             "session_id": "s-old",
             "title": "读 README",
+            "pinned": False,
+            "archived": False,
             "workspace_root": "/tmp/old",
             "created_at": "2026-07-08T09:00:00",
             "updated_at": "2026-07-08T09:10:00",
@@ -96,6 +100,27 @@ def test_session_store_empty_session_title_is_新会话(tmp_path: Path) -> None:
     assert (
         _session_title([{"role": "user", "content": "读 README"}], "/tmp/tour-agent") == "读 README"
     )
+
+
+def test_session_store_metadata_is_atomic_and_pinned_first(tmp_path: Path) -> None:
+    store = CodingSessionStore(tmp_path)
+    for session_id, updated_at in (("s-old", "2026-07-08T09:10:00"), ("s-new", "2026-07-08T10:20:00")):
+        store.save({
+            "id": session_id,
+            "workspace_root": "/tmp/repo",
+            "created_at": updated_at,
+            "updated_at": updated_at,
+            "history": [{"role": "user", "content": session_id}],
+        })
+
+    summary = store.update_metadata("s-old", title="  Review harness  ", pinned=True)
+
+    assert summary["title"] == "Review harness"
+    assert summary["pinned"] is True
+    assert [item["session_id"] for item in store.list_sessions()] == ["s-old", "s-new"]
+    archived = store.update_metadata("s-old", archived=True)
+    assert archived["archived"] is True
+    assert store.list_sessions() == [store.list_sessions(include_archived=True)[1]]
 
 
 def test_session_store_returns_replayable_chat_messages(tmp_path: Path) -> None:
