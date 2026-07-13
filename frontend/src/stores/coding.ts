@@ -765,7 +765,9 @@ export const useCodingStore = defineStore('coding', () => {
     isThinking.value = true
     errorMessage.value = ''
     pendingApproval.value = null
-    thinkingPhase.value = ''
+    // Set thinkingPhase immediately so the ThinkingIndicator appears
+    // right away, before turn_started/model_requested events arrive.
+    thinkingPhase.value = '思考中'
     startApprovalPolling()
   }
 
