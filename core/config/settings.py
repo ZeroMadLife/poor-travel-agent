@@ -114,6 +114,11 @@ class Settings(BaseSettings):
     app_secret_key: str = "change-me-in-production"
     app_access_codes: str = ""
 
+    cloud_dev_login_enabled: bool = False
+    # Local HTTP development needs a non-Secure cookie; non-development is
+    # forced to Secure by the app factory regardless of this value.
+    cloud_secure_cookies: bool = False
+
     langsmith_api_key: str = ""
     langsmith_project: str = "tourswarm"
 

@@ -2,7 +2,7 @@
 
 import json
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from db.database import create_engine, create_session_factory
 from db.migrations import init_db
@@ -79,3 +79,19 @@ async def test_session_record_defaults() -> None:
     assert stored_session.status == "active"
     assert stored_session.created_at is not None
     assert stored_session.updated_at is not None
+
+
+async def test_init_db_records_the_v7_cloud_control_plane_revision() -> None:
+    """Existing deployments can run an idempotent, observable V7 schema upgrade."""
+    engine = create_engine("sqlite+aiosqlite:///:memory:")
+    await init_db(engine)
+    await init_db(engine)
+
+    async with engine.connect() as connection:
+        revisions = (
+            await connection.execute(text("SELECT revision FROM schema_migrations"))
+        ).scalars().all()
+
+    await engine.dispose()
+
+    assert revisions == ["20260713_v7_cloud_control_plane"]

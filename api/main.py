@@ -13,6 +13,7 @@ from agents.graph import build_graph
 from agents.itinerary_tool import create_itinerary_tool
 from agents.react_agent import AgentRuntime
 from core.auth import AuthManager
+from core.cloud.auth.repository import CloudRepository
 from core.coding.context import ModelCapabilityRegistry
 from core.config.settings import get_settings
 from core.llm import create_llm
@@ -137,6 +138,10 @@ def create_app(
     coding_model_capabilities: dict[str, object] | ModelCapabilityRegistry | None = None,
     coding_default_model: str = "deepseek:deepseek-v4-flash",
     coding_checkpoint_anchor_key: bytes | None = None,
+    cloud_repository: CloudRepository | None = None,
+    cloud_dev_login_enabled: bool | None = None,
+    cloud_secure_cookies: bool | None = None,
+    cloud_app_env: str | None = None,
 ) -> FastAPI:
     """Create the Sage API app.
 
@@ -154,6 +159,22 @@ def create_app(
     app.state.agent = agent
     app.state.auth = auth
     app.state.session_store = session_store
+    settings = get_settings()
+    app_env = cloud_app_env or settings.app_env
+    app.state.cloud_repository = cloud_repository or CloudRepository(AsyncSessionFactory)
+    app.state.cloud_app_env = app_env
+    app.state.cloud_dev_login_enabled = (
+        settings.cloud_dev_login_enabled
+        if cloud_dev_login_enabled is None
+        else cloud_dev_login_enabled
+    )
+    app.state.cloud_secure_cookies = (
+        True
+        if app_env != "development"
+        else settings.cloud_secure_cookies
+        if cloud_secure_cookies is None
+        else cloud_secure_cookies
+    )
     repo_root = Path(__file__).resolve().parent.parent
     app.state.coding_model_factory = coding_model_factory or (
         lambda model_id=coding_default_model: create_llm(model_id)
@@ -190,11 +211,13 @@ def create_app(
 
     app.state.coding_run_registry = CodingRunRegistry(app.state.coding_storage_root)
 
-    from api import coding, routes, ws
+    from api import cloud_auth, cloud_workspaces, coding, routes, ws
 
     app.include_router(routes.router)
     app.include_router(ws.router)
     app.include_router(coding.router)
+    app.include_router(cloud_auth.router)
+    app.include_router(cloud_workspaces.router)
     return app
 
 

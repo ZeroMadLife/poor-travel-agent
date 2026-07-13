@@ -2,7 +2,7 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from models.itinerary import Itinerary
 
@@ -391,6 +391,71 @@ class AuthResponse(BaseModel):
 
     user_id: str
     valid: bool = True
+
+
+class CloudDevelopmentLoginRequest(BaseModel):
+    """Development-only identity bootstrap; production never enables this route."""
+
+    email: str = Field(min_length=3, max_length=320)
+    display_name: str = Field(default="", max_length=200)
+    invite_code: str = Field(min_length=1, max_length=256)
+
+    @field_validator("email", "invite_code")
+    @classmethod
+    def strip_required_values(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("value must not be blank")
+        return value
+
+    @field_validator("display_name")
+    @classmethod
+    def strip_display_name(cls, value: str) -> str:
+        return value.strip()
+
+
+class CloudCurrentUserResponse(BaseModel):
+    """Authenticated cloud identity without exposing its browser session token."""
+
+    user_id: str
+    email: str
+    display_name: str
+
+
+class CloudProjectCreateRequest(BaseModel):
+    """Metadata required to create a user-owned cloud project."""
+
+    name: str = Field(min_length=1, max_length=200)
+
+    @field_validator("name")
+    @classmethod
+    def strip_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("name must not be blank")
+        return value
+
+
+class CloudProjectResponse(BaseModel):
+    """Opaque project metadata returned to its owner."""
+
+    project_id: str
+    name: str
+
+
+class CloudWorkspaceCreateRequest(BaseModel):
+    """The provider selector is not a filesystem path or repository URL."""
+
+    provider: Literal["cloud"]
+
+
+class CloudWorkspaceResponse(BaseModel):
+    """Opaque control-plane workspace record without execution details."""
+
+    workspace_id: str
+    project_id: str
+    provider: str
+    lifecycle_state: str
 
 
 class SessionSummary(BaseModel):
