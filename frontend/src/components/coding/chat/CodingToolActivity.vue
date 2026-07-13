@@ -135,11 +135,6 @@ function toolSummary(tool: ToolActivity) {
           <span v-if="tool.status === 'running'" class="tool-spinner"></span>
         </div>
         <div v-if="tool.content" class="tool-result">
-          <!-- Tool arguments display -->
-          <details v-if="Object.keys(tool.args || {}).length > 0" class="tool-args-details">
-            <summary class="tool-args-summary">查看完整参数</summary>
-            <pre class="tool-args">{{ JSON.stringify(tool.args, null, 2) }}</pre>
-          </details>
           <pre><span
             v-for="(line, lineIndex) in resultPreview(tool.content, expandedResults.has(i)).split('\n')"
             :key="lineIndex"
@@ -247,29 +242,6 @@ function toolSummary(tool: ToolActivity) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.tool-args-details {
-  margin: 4px 0 8px;
-}
-
-.tool-args-details .tool-args {
-  color: var(--sage-text-secondary);
-  font-family: var(--sage-font-mono);
-  font-size: 11px;
-  overflow-x: auto;
-  white-space: pre;
-  max-height: 200px;
-  padding: 6px 8px;
-  margin: 4px 0 0;
-  border-radius: 4px;
-  background: var(--sage-surface-muted);
-}
-
-.tool-args-summary {
-  cursor: pointer;
-  font-size: 11px;
-  color: var(--sage-text-muted);
 }
 
 .tool-spinner {

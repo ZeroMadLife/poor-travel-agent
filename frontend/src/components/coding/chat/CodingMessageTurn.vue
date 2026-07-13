@@ -38,7 +38,6 @@ withDefaults(defineProps<{
       </div>
       <article v-if="message.content" class="message-content-shell">
         <div class="message-content" v-html="renderedContent"></div>
-        <span v-if="message.isThinking" class="streaming-cursor" aria-hidden="true">▌</span>
       </article>
     </div>
   </section>
@@ -161,13 +160,6 @@ withDefaults(defineProps<{
   .message-avatar {
     width: 26px;
     height: 26px;
-	}
-}
-
-.streaming-cursor {
-  display: inline;
-  color: var(--sage-text);
-  font-weight: 300;
-  animation: sage-cursor-blink 1s ease infinite;
+  }
 }
 </style>

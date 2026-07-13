@@ -108,9 +108,3 @@ button:disabled { cursor: not-allowed; }
 .message-content :deep(.hljs .hljs-attr),
 .message-content :deep(.hljs .hljs-attribute),
 .message-content :deep(.hljs .hljs-property) { color: #61afef; }
-
-/* Streaming typing cursor for assistant messages in-flight */
-@keyframes sage-cursor-blink {
-  0%, 50% { opacity: 1; }
-  51%, 100% { opacity: 0; }
-}
