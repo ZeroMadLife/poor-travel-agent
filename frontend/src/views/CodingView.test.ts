@@ -2,7 +2,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter, RouterView } from 'vue-router'
 import { nextTick } from 'vue'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import CodingView from './CodingView.vue'
 import { useCodingStore } from '../stores/coding'
 import type { CodingTimelineEvent } from '../types/api'
@@ -44,8 +44,6 @@ describe('CodingView chat route lifecycle', () => {
     localStorage.clear()
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1280 })
   })
-
-  afterEach(() => vi.useRealTimers())
 
   async function mountChat(initialPath = '/coding') {
     const router = await createTestRouter(initialPath)
@@ -373,27 +371,28 @@ describe('CodingView chat route lifecycle', () => {
     root.unmount()
   })
 
-  it('reveals a completed response only after the done character transition', async () => {
-    vi.useFakeTimers()
+  it('renders streamed text immediately and clears the pre-response thinking state', async () => {
     const store = useCodingStore()
     store.sessionId = 'session-a'
     const { root, wrapper } = await mountChat('/coding/session/session-a')
 
     store.handleTimelineEvent('session-a', event(1, 'user', { type: 'user', content: '检查项目' }))
     store.handleTimelineEvent('session-a', event(2, 'system', { event: 'run_started' }))
+    store.thinkingPhase = '正在理解任务'
+    await nextTick()
+
+    expect(wrapper().find('.active-run-status').exists()).toBe(true)
+
     store.handleTimelineEvent('session-a', event(3, 'assistant', { type: 'text_delta', delta: '检查完成' }))
     await nextTick()
 
-    expect(wrapper().find('[aria-label="Sage"]').exists()).toBe(false)
+    expect(wrapper().find('[aria-label="Sage"]').exists()).toBe(true)
+    expect(wrapper().text()).toContain('检查完成')
+    expect(wrapper().find('.active-run-status').exists()).toBe(false)
 
     store.handleTimelineEvent('session-a', event(4, 'assistant', { type: 'final', content: '检查完成' }))
     store.handleTimelineEvent('session-a', event(5, 'terminal', { type: 'run_finished' }))
     await nextTick()
-    await vi.advanceTimersByTimeAsync(879)
-
-    expect(wrapper().find('[aria-label="Sage"]').exists()).toBe(false)
-
-    await vi.advanceTimersByTimeAsync(1)
 
     expect(wrapper().find('[aria-label="Sage"]').exists()).toBe(true)
     root.unmount()

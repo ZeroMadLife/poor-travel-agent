@@ -41,9 +41,6 @@ const viewGeneration = ref(0)
 const { render } = useMarkdown()
 const { showToolProcess } = useWorkbenchPreferences()
 let scrollFrame: number | null = null
-let answerRevealTimer: ReturnType<typeof setTimeout> | undefined
-const concealedReplyRunIds = ref(new Set<string>())
-const replyRevealRunId = ref('')
 
 // Wire Naive UI message/dialog bridge for store-level notifications
 wireNaiveUI()
@@ -150,33 +147,8 @@ function assistantMessagesForRun(runId: string) {
   return messagesForRun(runId).filter((message) => message.role === 'assistant')
 }
 
-function assistantMessageVisible(message: ReturnType<typeof assistantMessagesForRun>[number]) {
-  return !message.run_id || !concealedReplyRunIds.value.has(message.run_id)
-}
-
-function markReplyConcealed(runId: string) {
-  if (!runId || concealedReplyRunIds.value.has(runId)) return
-  concealedReplyRunIds.value = new Set(concealedReplyRunIds.value).add(runId)
-}
-
-function revealReplyAfterDoneAnimation(runId: string) {
-  if (!runId || replyRevealRunId.value === runId) return
-  if (answerRevealTimer) window.clearTimeout(answerRevealTimer)
-  replyRevealRunId.value = runId
-  answerRevealTimer = window.setTimeout(() => {
-    concealedReplyRunIds.value = new Set(
-      [...concealedReplyRunIds.value].filter((id) => id !== runId),
-    )
-    if (replyRevealRunId.value === runId) replyRevealRunId.value = ''
-    answerRevealTimer = undefined
-  }, 880)
-}
-
-function resetReplyReveal() {
-  if (answerRevealTimer) window.clearTimeout(answerRevealTimer)
-  answerRevealTimer = undefined
-  concealedReplyRunIds.value = new Set()
-  replyRevealRunId.value = ''
+function runHasAssistantReply(runId: string) {
+  return assistantMessagesForRun(runId).some((message) => message.content.trim())
 }
 
 function isActiveTurn(runId: string) {
@@ -220,20 +192,6 @@ const outputSignature = computed(() => JSON.stringify({
   })),
   optimistic: store.optimisticMessage?.id ?? '',
 }))
-
-const activeReplyState = computed(() => {
-  const candidateRunIds = [
-    store.activeRun?.run_id || '',
-    ...Array.from(concealedReplyRunIds.value).reverse(),
-  ]
-  const runId = candidateRunIds.find((id) => (
-    Boolean(id) && assistantMessagesForRun(id).some((message) => message.content.trim())
-  )) || store.activeRun?.run_id || ''
-  const hasAnswer = Boolean(
-    runId && assistantMessagesForRun(runId).some((message) => message.content.trim()),
-  )
-  return { runId, hasAnswer, isThinking: store.isThinking }
-})
 
 async function loadOlder() {
   const element = messagesRef.value
@@ -455,16 +413,7 @@ watch(outputSignature, () => {
     }
     observedMessageCount.value = nextCount
   }, { flush: 'post' })
-watch(() => store.activeRun?.run_id || '', (runId) => {
-  if (runId) markReplyConcealed(runId)
-}, { flush: 'sync' })
-watch(activeReplyState, ({ runId, hasAnswer, isThinking }) => {
-  if (runId && hasAnswer && !isThinking && concealedReplyRunIds.value.has(runId)) {
-    revealReplyAfterDoneAnimation(runId)
-  }
-}, { flush: 'sync' })
 watch(() => store.sessionId, () => {
-  resetReplyReveal()
   unseenMessageCount.value = 0
   followOutput.value = true
   returnToBottomVisible.value = false
@@ -484,7 +433,6 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   viewGeneration.value += 1
   cancelScrollFrame()
-  resetReplyReveal()
   window.removeEventListener('resize', updateBreakpoint)
   // Runs are owned by the server; closing this view only detaches the observer transport.
   store.disconnect()
@@ -556,11 +504,8 @@ onBeforeUnmount(() => {
                 :show-process="showToolProcess"
               />
               <CodingMessageTurn v-for="msg in userMessagesForRun(turn.run_id)" :key="msg.id" :message="msg" :rendered-content="render(msg.content)" :show-process="showToolProcess" />
-              <div v-if="showThinkingIndicator && isActiveTurn(turn.run_id)" class="active-run-status">
+              <div v-if="showThinkingIndicator && isActiveTurn(turn.run_id) && !runHasAssistantReply(turn.run_id)" class="active-run-status">
                 <CodingThinkingIndicator :phase="store.thinkingPhase" :state="thinkingCharacterState" />
-              </div>
-              <div v-else-if="replyRevealRunId === turn.run_id" class="active-run-status">
-                <CodingThinkingIndicator phase="整理本轮结果" state="done" title="想到了" :show-elapsed="false" />
               </div>
               <CodingApprovalCard v-if="isActiveTurn(turn.run_id) && store.pendingApproval" :approval="store.pendingApproval" :busy="store.approvalBusy" @respond="store.respondApproval" />
               <CodingRunTrace
@@ -571,16 +516,15 @@ onBeforeUnmount(() => {
                 :active="isActiveTurn(turn.run_id)"
                 :pending-tool="pendingToolForRun(turn.run_id)"
               />
-              <template v-for="msg in assistantMessagesForRun(turn.run_id)" :key="msg.id">
-                <CodingMessageTurn
-                  v-if="assistantMessageVisible(msg)"
-                  :message="msg"
-                  :rendered-content="render(msg.content)"
-                  :show-process="false"
-                  :diff-file-count="store.diffInfoByRun[turn.run_id]?.file_count || 0"
-                  @view-diff="store.openRunDiff(turn.run_id)"
-                />
-              </template>
+              <CodingMessageTurn
+                v-for="msg in assistantMessagesForRun(turn.run_id)"
+                :key="msg.id"
+                :message="msg"
+                :rendered-content="render(msg.content)"
+                :show-process="false"
+                :diff-file-count="store.diffInfoByRun[turn.run_id]?.file_count || 0"
+                @view-diff="store.openRunDiff(turn.run_id)"
+              />
             </div>
           </template>
           <CodingMessageTurn
