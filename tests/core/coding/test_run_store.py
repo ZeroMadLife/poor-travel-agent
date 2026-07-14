@@ -27,6 +27,30 @@ def test_run_store_lists_run_summaries_from_trace(tmp_path: Path) -> None:
             "started_at": "2026-07-08T10:00:00",
             "updated_at": "2026-07-08T10:00:00",
             "changed_files": [],
+            "audit": {
+                "run_id": "run_a",
+                "status": "completed",
+                "headline": "运行完成 · 1 项工具",
+                "tool_count": 1,
+                "completed_tool_count": 1,
+                "failed_tool_count": 0,
+                "approval_count": 0,
+                "duration_ms": 0,
+                "changed_files": [],
+                "steps": [
+                    {
+                        "tool": "read_file",
+                        "status": "completed",
+                        "action_summary": "读取文件",
+                        "result_summary": "执行完成",
+                        "duration_ms": 0,
+                        "arguments_preview": "{}",
+                        "result_preview": "已读取文件内容（摘要不展示正文）",
+                        "arguments_truncated": False,
+                        "result_truncated": False,
+                    }
+                ],
+            },
         }
     ]
 
@@ -41,6 +65,7 @@ def test_run_store_reads_trace_events(tmp_path: Path) -> None:
 
     assert detail["run_id"] == "run_a"
     assert detail["events"] == [{"type": "cancelled", "content": "stopped"}]
+    assert detail["audit"]["status"] == "cancelled"
 
 
 def test_run_store_builds_readable_timeline_from_trace(tmp_path: Path) -> None:
@@ -216,3 +241,175 @@ def test_run_tool_count(tmp_path: Path) -> None:
     assert store.run_tool_count("run_b") == 0
     # Missing run directory returns 0.
     assert store.run_tool_count("run_missing") == 0
+
+
+def test_run_audit_projects_tools_approval_duration_and_workspace_diff(tmp_path: Path) -> None:
+    """Audit summary pairs repeated tools by order and keeps one bounded run projection."""
+    store = RunStore(tmp_path)
+    store.start_run("run_a")
+    store.append_trace(
+        "run_a",
+        {"type": "turn_started", "created_at": "2026-07-14T10:00:00+00:00"},
+    )
+    store.append_trace(
+        "run_a",
+        {
+            "type": "approval_required",
+            "tool": "run_shell",
+            "args": {"command": "pytest -q", "timeout": 30},
+            "created_at": "2026-07-14T10:00:01+00:00",
+        },
+    )
+    store.append_trace(
+        "run_a",
+        {"type": "approval_granted", "tool": "run_shell", "created_at": "2026-07-14T10:00:02+00:00"},
+    )
+    store.append_trace(
+        "run_a",
+        {
+            "type": "tool_call",
+            "tool": "run_shell",
+            "args": {"command": "pytest -q", "timeout": 30},
+            "created_at": "2026-07-14T10:00:03+00:00",
+        },
+    )
+    store.append_trace(
+        "run_a",
+        {
+            "type": "tool_result",
+            "tool": "run_shell",
+            "args": {"command": "pytest -q", "timeout": 30},
+            "content": "exit_code: 0\nstdout:\n12 passed\nstderr:\n(empty)",
+            "is_error": False,
+            "created_at": "2026-07-14T10:00:07.250000+00:00",
+        },
+    )
+    store.append_trace(
+        "run_a",
+        {
+            "type": "tool_call",
+            "tool": "run_shell",
+            "args": {"command": "ruff check ."},
+            "created_at": "2026-07-14T10:00:08+00:00",
+        },
+    )
+    store.append_trace(
+        "run_a",
+        {
+            "type": "tool_result",
+            "tool": "run_shell",
+            "args": {"command": "ruff check ."},
+            "content": "exit_code: 1\nstdout:\n(empty)\nstderr:\nsyntax error",
+            "is_error": True,
+            "created_at": "2026-07-14T10:00:09+00:00",
+        },
+    )
+    store.append_trace(
+        "run_a",
+        {"type": "workspace_diff_ready", "changed_files": ["a.py", "b.py"]},
+    )
+    store.append_trace(
+        "run_a",
+        {"type": "run_finished", "status": "error", "duration_ms": 9500},
+    )
+
+    audit = store.get_run("run_a")["audit"]
+
+    assert audit == {
+        "run_id": "run_a",
+        "status": "error",
+        "headline": "运行失败 · 2 项工具 · 修改 2 个文件",
+        "tool_count": 2,
+        "completed_tool_count": 1,
+        "failed_tool_count": 1,
+        "approval_count": 1,
+        "duration_ms": 9500,
+        "changed_files": ["a.py", "b.py"],
+        "steps": [
+            {
+                "tool": "run_shell",
+                "status": "completed",
+                "action_summary": "执行 pytest -q",
+                "result_summary": "退出码 0",
+                "duration_ms": 4250,
+                "arguments_preview": '{"command":"pytest -q","timeout":30}',
+                "result_preview": "exit_code: 0\nstdout:\n12 passed\nstderr:\n(empty)",
+                "arguments_truncated": False,
+                "result_truncated": False,
+            },
+            {
+                "tool": "run_shell",
+                "status": "error",
+                "action_summary": "执行 ruff check .",
+                "result_summary": "退出码 1 · 执行失败",
+                "duration_ms": 1000,
+                "arguments_preview": '{"command":"ruff check ."}',
+                "result_preview": "exit_code: 1\nstdout:\n(empty)\nstderr:\nsyntax error",
+                "arguments_truncated": False,
+                "result_truncated": False,
+            },
+        ],
+    }
+
+
+def test_run_audit_bounds_and_redacts_sensitive_previews(tmp_path: Path) -> None:
+    """Audit previews never expose credential-shaped fields or unbounded output."""
+    store = RunStore(tmp_path)
+    store.start_run("run_secret")
+    store.append_trace(
+        "run_secret",
+        {
+            "type": "tool_call",
+            "tool": "run_shell",
+            "args": {
+                "command": "curl -H 'Authorization: Bearer top-secret' https://example.com",
+                "api_key": "plain-secret",
+            },
+        },
+    )
+    store.append_trace(
+        "run_secret",
+        {
+            "type": "tool_result",
+            "tool": "run_shell",
+            "args": {"command": "curl https://example.com"},
+            "content": "OPENAI_API_KEY=plain-secret\n" + ("x" * 6000) + "\nBearer another-secret",
+            "is_error": False,
+        },
+    )
+
+    step = store.get_run("run_secret")["audit"]["steps"][0]
+    combined = f'{step["arguments_preview"]}\n{step["result_preview"]}'
+
+    assert "top-secret" not in combined
+    assert "plain-secret" not in combined
+    assert "another-secret" not in combined
+    assert "[REDACTED]" in combined
+    assert step["result_truncated"] is True
+    assert "省略" in step["result_preview"]
+    assert len(step["result_preview"].encode("utf-8")) <= 4096
+
+
+def test_run_audit_omits_read_file_body_and_projects_orphan_result(tmp_path: Path) -> None:
+    """Denied/invalid tools may have only a result and still produce an auditable step."""
+    store = RunStore(tmp_path)
+    store.start_run("run_denied")
+    store.append_trace(
+        "run_denied",
+        {
+            "type": "tool_result",
+            "tool": "read_file",
+            "args": {"path": ".env"},
+            "content": "API_KEY=must-not-leak",
+            "is_error": True,
+            "policy_reason": "path_not_allowed",
+        },
+    )
+
+    step = store.get_run("run_denied")["audit"]["steps"][0]
+
+    assert step["tool"] == "read_file"
+    assert step["status"] == "error"
+    assert step["arguments_preview"] == '{"path":".env"}'
+    assert step["result_preview"] == "已读取文件内容（摘要不展示正文）"
+    assert "must-not-leak" not in str(store.get_run("run_denied")["audit"])

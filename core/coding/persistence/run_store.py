@@ -3,8 +3,25 @@
 from __future__ import annotations
 
 import json
+import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+_PREVIEW_LIMIT_BYTES = 4096
+_PREVIEW_HEAD_BYTES = 3000
+_SENSITIVE_KEY_PARTS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+    "credential",
+    "passwd",
+    "password",
+    "secret",
+    "token",
+)
+_OMITTED_ARGUMENT_KEYS = {"content", "diff", "env", "input", "patch", "text"}
 
 
 class RunStore:
@@ -74,6 +91,7 @@ class RunStore:
             "run_id": run_id,
             "events": events,
             "timeline": _timeline_from_events(events),
+            "audit": _audit_summary(run_id, events),
         }
 
     def run_status(self, run_id: str, session_id: str = "") -> str:
@@ -134,6 +152,7 @@ class RunStore:
             "updated_at": str(last.get("created_at") or first.get("created_at") or ""),
         }
         summary["changed_files"] = changed_files
+        summary["audit"] = _audit_summary(run_id, events)
         return summary
 
     def _read_events(self, run_id: str, session_id: str = "") -> list[dict[str, Any]]:
@@ -152,6 +171,290 @@ class RunStore:
             if isinstance(event, dict):
                 events.append(event)
         return events
+
+
+def _audit_summary(run_id: str, events: list[dict[str, Any]]) -> dict[str, Any]:
+    status = _status_from_events(events)
+    changed_files = _changed_files_from_events(events)
+    step_states: list[dict[str, Any]] = []
+    approvals: list[dict[str, Any]] = []
+
+    for event in events:
+        event_type = str(event.get("type", ""))
+        if event_type == "approval_required":
+            approvals.append({"event": event, "used": False})
+            continue
+        if event_type == "tool_call":
+            approval = _matching_approval(approvals, event)
+            if approval is not None:
+                approval["used"] = True
+            step_states.append({"call": event, "result": None, "approval": approval})
+            continue
+        if event_type != "tool_result":
+            continue
+        target = _matching_step(step_states, event)
+        if target is None:
+            approval = _matching_approval(approvals, event)
+            if approval is not None:
+                approval["used"] = True
+            target = {"call": None, "result": None, "approval": approval}
+            step_states.append(target)
+        target["result"] = event
+
+    for approval in approvals:
+        if not approval["used"]:
+            step_states.append({"call": None, "result": None, "approval": approval})
+
+    steps = [_project_audit_step(state) for state in step_states]
+    completed = sum(step["status"] == "completed" for step in steps)
+    failed = sum(step["status"] == "error" for step in steps)
+    duration_ms = _run_duration_ms(events)
+    parts = [_run_status_label(status), f"{len(steps)} 项工具"]
+    if changed_files:
+        parts.append(f"修改 {len(changed_files)} 个文件")
+    return {
+        "run_id": run_id,
+        "status": status,
+        "headline": " · ".join(parts),
+        "tool_count": len(steps),
+        "completed_tool_count": completed,
+        "failed_tool_count": failed,
+        "approval_count": sum(event.get("type") == "approval_required" for event in events),
+        "duration_ms": duration_ms,
+        "changed_files": changed_files,
+        "steps": steps,
+    }
+
+
+def _matching_step(
+    steps: list[dict[str, Any]],
+    result: dict[str, Any],
+) -> dict[str, Any] | None:
+    tool = str(result.get("tool", ""))
+    args = result.get("args")
+    for step in reversed(steps):
+        call = step.get("call")
+        if step.get("result") is not None or not isinstance(call, dict):
+            continue
+        if call.get("tool") == tool and call.get("args") == args:
+            return step
+    for step in reversed(steps):
+        call = step.get("call")
+        if step.get("result") is None and isinstance(call, dict) and call.get("tool") == tool:
+            return step
+    return None
+
+
+def _matching_approval(
+    approvals: list[dict[str, Any]],
+    event: dict[str, Any],
+) -> dict[str, Any] | None:
+    tool = str(event.get("tool", ""))
+    args = event.get("args")
+    for approval in reversed(approvals):
+        payload = approval["event"]
+        if not approval["used"] and payload.get("tool") == tool and payload.get("args") == args:
+            return approval
+    for approval in reversed(approvals):
+        payload = approval["event"]
+        if not approval["used"] and payload.get("tool") == tool:
+            return approval
+    return None
+
+
+def _project_audit_step(state: dict[str, Any]) -> dict[str, Any]:
+    call = state.get("call") if isinstance(state.get("call"), dict) else None
+    result = state.get("result") if isinstance(state.get("result"), dict) else None
+    approval_state = state.get("approval")
+    approval = (
+        approval_state.get("event")
+        if isinstance(approval_state, dict) and isinstance(approval_state.get("event"), dict)
+        else None
+    )
+    source = call or result or approval or {}
+    tool = str(source.get("tool", ""))
+    raw_args = source.get("args")
+    args: dict[str, Any] = (
+        {str(key): value for key, value in raw_args.items()} if isinstance(raw_args, dict) else {}
+    )
+    safe_args = _safe_arguments(tool, args)
+    arguments_preview, arguments_truncated = _bounded_preview(
+        json.dumps(safe_args, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    )
+    status = "waiting" if approval is not None and call is None and result is None else "running"
+    if result is not None:
+        status = "error" if bool(result.get("is_error")) else "completed"
+    result_text = _safe_result_preview(tool, result)
+    result_preview, result_truncated = _bounded_preview(result_text)
+    start_event = call or approval or result or {}
+    return {
+        "tool": tool,
+        "status": status,
+        "action_summary": _tool_action_summary(tool, safe_args),
+        "result_summary": _result_summary(result, status),
+        "duration_ms": _duration_between(start_event, result),
+        "arguments_preview": arguments_preview,
+        "result_preview": result_preview,
+        "arguments_truncated": arguments_truncated,
+        "result_truncated": result_truncated,
+    }
+
+
+def _safe_arguments(tool: str, args: dict[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    for key, value in args.items():
+        normalized = key.lower().replace("-", "_")
+        if any(part in normalized for part in _SENSITIVE_KEY_PARTS):
+            safe[key] = "[REDACTED]"
+        elif normalized in _OMITTED_ARGUMENT_KEYS:
+            safe[key] = "[OMITTED]"
+        else:
+            safe[key] = _sanitize_value(value)
+    if tool in {"write_file", "patch_file"}:
+        for key in tuple(safe):
+            if key.lower() not in {"path", "create", "overwrite"}:
+                safe[key] = "[OMITTED]"
+    return safe
+
+
+def _sanitize_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _redact_text(value)
+    if isinstance(value, list):
+        return [_sanitize_value(item) for item in value]
+    if isinstance(value, dict):
+        return _safe_arguments("", value)
+    return value
+
+
+def _redact_text(text: str) -> str:
+    redacted = re.sub(
+        r"(?i)(authorization\s*:\s*)(?:bearer\s+|basic\s+)?[^\s'\"]+",
+        r"\1[REDACTED]",
+        text,
+    )
+    redacted = re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [REDACTED]", redacted)
+    redacted = re.sub(
+        r"(?i)\b([A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD))\s*=\s*[^\s]+",
+        r"\1=[REDACTED]",
+        redacted,
+    )
+    return redacted
+
+
+def _safe_result_preview(tool: str, result: dict[str, Any] | None) -> str:
+    if tool == "read_file":
+        return "已读取文件内容（摘要不展示正文）"
+    if result is None:
+        return ""
+    return _redact_text(str(result.get("content", "")))
+
+
+def _tool_action_summary(tool: str, args: dict[str, Any]) -> str:
+    path = str(args.get("path", "")).strip()
+    if tool == "read_file":
+        return f"读取 {path}" if path else "读取文件"
+    if tool == "list_files":
+        return f"列出 {path or '.'}"
+    if tool == "search":
+        pattern = str(args.get("pattern", "")).strip()
+        return f"搜索 {pattern or path or '工作区'}"
+    if tool == "write_file":
+        return f"写入 {path or '文件'}"
+    if tool == "patch_file":
+        return f"修改 {path or '文件'}"
+    if tool == "run_shell":
+        command = str(args.get("command", "")).strip()
+        return f"执行 {command or 'shell 命令'}"
+    if tool == "agent":
+        task = str(args.get("task", "")).strip()
+        return f"子任务 {task or '执行'}"
+    return f"调用 {tool or '工具'}"
+
+
+def _result_summary(result: dict[str, Any] | None, status: str) -> str:
+    if result is None:
+        return "等待确认" if status == "waiting" else "执行中"
+    content = str(result.get("content", ""))
+    exit_code = re.search(r"(?m)^exit_code:\s*(-?\d+)\s*$", content)
+    parts: list[str] = []
+    if exit_code:
+        parts.append(f"退出码 {exit_code.group(1)}")
+    if bool(result.get("is_error")):
+        parts.append("执行失败")
+    elif not parts:
+        parts.append("执行完成")
+    return " · ".join(parts)
+
+
+def _changed_files_from_events(events: list[dict[str, Any]]) -> list[str]:
+    for event in reversed(events):
+        if event.get("type") != "workspace_diff_ready":
+            continue
+        files = event.get("changed_files")
+        if isinstance(files, list):
+            return [str(item) for item in files if isinstance(item, str)]
+    return []
+
+
+def _run_duration_ms(events: list[dict[str, Any]]) -> int:
+    for event in reversed(events):
+        if event.get("type") == "run_finished":
+            try:
+                return max(0, int(event.get("duration_ms", 0)))
+            except (TypeError, ValueError):
+                return 0
+    if events:
+        return _duration_between(events[0], events[-1])
+    return 0
+
+
+def _duration_between(start: dict[str, Any] | None, end: dict[str, Any] | None) -> int:
+    if not start or not end:
+        return 0
+    try:
+        started = datetime.fromisoformat(_event_timestamp(start).replace("Z", "+00:00"))
+        finished = datetime.fromisoformat(_event_timestamp(end).replace("Z", "+00:00"))
+        return max(0, int((finished - started).total_seconds() * 1000))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _run_status_label(status: str) -> str:
+    return {
+        "cancelled": "运行已取消",
+        "completed": "运行完成",
+        "error": "运行失败",
+        "running": "正在运行",
+        "step_limit": "达到步骤上限",
+    }.get(status, "运行结束")
+
+
+def _bounded_preview(text: str) -> tuple[str, bool]:
+    encoded = text.encode("utf-8")
+    if len(encoded) <= _PREVIEW_LIMIT_BYTES:
+        return text, False
+    tail_budget = 900
+    omitted = len(encoded) - _PREVIEW_HEAD_BYTES - tail_budget
+    marker = f"\n… 省略 {max(0, omitted)} 字节 …\n".encode()
+    tail_budget = max(0, _PREVIEW_LIMIT_BYTES - _PREVIEW_HEAD_BYTES - len(marker))
+    omitted = len(encoded) - _PREVIEW_HEAD_BYTES - tail_budget
+    marker = f"\n… 省略 {omitted} 字节 …\n".encode()
+    head = _decode_edge(encoded[:_PREVIEW_HEAD_BYTES], from_tail=False)
+    tail = _decode_edge(encoded[-tail_budget:] if tail_budget else b"", from_tail=True)
+    preview = head + marker.decode() + tail
+    while len(preview.encode("utf-8")) > _PREVIEW_LIMIT_BYTES and tail:
+        tail = tail[1:]
+        preview = head + marker.decode() + tail
+    return preview, True
+
+
+def _decode_edge(value: bytes, *, from_tail: bool) -> str:
+    if not value:
+        return ""
+    if from_tail:
+        return value.decode("utf-8", errors="ignore")
+    return value.decode("utf-8", errors="ignore")
 
 
 def _status_from_events(events: list[dict[str, Any]]) -> str:

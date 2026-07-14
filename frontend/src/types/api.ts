@@ -597,6 +597,31 @@ export type CodingMcpServersResponse = {
   servers: CodingMcpServer[]
 }
 
+export type CodingRunAuditStep = {
+  tool: string
+  status: string
+  action_summary: string
+  result_summary: string
+  duration_ms: number
+  arguments_preview: string
+  result_preview: string
+  arguments_truncated: boolean
+  result_truncated: boolean
+}
+
+export type CodingRunAuditSummary = {
+  run_id: string
+  status: string
+  headline: string
+  tool_count: number
+  completed_tool_count: number
+  failed_tool_count: number
+  approval_count: number
+  duration_ms: number
+  changed_files: string[]
+  steps: CodingRunAuditStep[]
+}
+
 export type CodingRunSummary = {
   run_id: string
   status: string
@@ -607,6 +632,7 @@ export type CodingRunSummary = {
   started_at: string
   updated_at: string
   changed_files?: string[]
+  audit?: CodingRunAuditSummary
 }
 
 export type CodingFileDiff = {
@@ -644,6 +670,7 @@ export type CodingRunDetailResponse = {
   run_id: string
   events: Array<Record<string, unknown>>
   timeline: CodingRunTimelineEntry[]
+  audit?: CodingRunAuditSummary
 }
 
 export type SessionSummary = {

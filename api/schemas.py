@@ -465,6 +465,35 @@ class CodingMemoryProposalDecisionRequest(CodingMemoryProposalTransitionRequest)
     proposal_id: str = Field(min_length=1, max_length=128)
 
 
+class CodingRunAuditStep(BaseModel):
+    """One bounded, deterministic tool step projected from persisted evidence."""
+
+    tool: str
+    status: str
+    action_summary: str
+    result_summary: str
+    duration_ms: int = Field(default=0, ge=0)
+    arguments_preview: str = ""
+    result_preview: str = ""
+    arguments_truncated: bool = False
+    result_truncated: bool = False
+
+
+class CodingRunAuditSummary(BaseModel):
+    """Safe run-level audit projection for history and chat surfaces."""
+
+    run_id: str
+    status: str
+    headline: str
+    tool_count: int = Field(ge=0)
+    completed_tool_count: int = Field(ge=0)
+    failed_tool_count: int = Field(ge=0)
+    approval_count: int = Field(ge=0)
+    duration_ms: int = Field(default=0, ge=0)
+    changed_files: list[str] = Field(default_factory=list)
+    steps: list[CodingRunAuditStep] = Field(default_factory=list)
+
+
 class CodingRunSummary(BaseModel):
     """One coding run summary for the workbench run history."""
 
@@ -477,6 +506,7 @@ class CodingRunSummary(BaseModel):
     started_at: str = ""
     updated_at: str = ""
     changed_files: list[str] = Field(default_factory=list)
+    audit: CodingRunAuditSummary
 
 
 class CodingRunsResponse(BaseModel):
@@ -502,6 +532,7 @@ class CodingRunDetailResponse(BaseModel):
     run_id: str
     events: list[dict[str, Any]]
     timeline: list[CodingRunTimelineEntry] = Field(default_factory=list)
+    audit: CodingRunAuditSummary
 
 
 class AuthRequest(BaseModel):

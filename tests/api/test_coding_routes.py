@@ -731,8 +731,12 @@ def test_coding_run_history_lists_and_reads_traces(tmp_path: Path) -> None:
     # no files changed -> changed_files is empty.
     assert run["last_event_type"] == "workspace_diff_ready"
     assert run["changed_files"] == []
+    assert run["audit"]["headline"] == "运行完成 · 1 项工具"
+    assert run["audit"]["steps"][0]["tool"] == "read_file"
+    assert run["audit"]["steps"][0]["result_preview"] == "已读取文件内容（摘要不展示正文）"
     assert detail_response.status_code == 200
     assert detail_response.json()["run_id"] == run["run_id"]
+    assert detail_response.json()["audit"] == run["audit"]
     assert [event["type"] for event in detail_response.json()["events"]][-3:] == [
         "workspace_diff_ready",
         "run_finished",
