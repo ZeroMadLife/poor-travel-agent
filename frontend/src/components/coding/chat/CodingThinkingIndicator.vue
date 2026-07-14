@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import SageThinkingAvatar from './SageThinkingAvatar.vue'
+import SageThinkingCharacter, { type SageCharacterState } from './SageThinkingCharacter.vue'
 
-defineProps<{
+withDefaults(defineProps<{
   phase: string
-}>()
+  state?: SageCharacterState
+}>(), { state: 'thinking' })
 
 const elapsedSeconds = ref(0)
 const elapsedLabel = computed(() => `${elapsedSeconds.value}s`)
@@ -22,7 +23,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="thinking-indicator" role="status" aria-live="polite">
     <span class="thinking-sheen" aria-hidden="true"></span>
-    <SageThinkingAvatar />
+    <SageThinkingCharacter :state="state" :phase="phase" />
     <span class="thinking-copy">
       <span class="thinking-title"><strong>正在思考</strong><span class="thinking-time">{{ elapsedLabel }}</span></span>
       <span class="thinking-phase">{{ phase }}</span>
@@ -40,7 +41,7 @@ onBeforeUnmount(() => {
   gap: 10px;
   max-width: 100%;
   margin: 0 0 12px;
-  padding: 7px 12px 7px 8px;
+  padding: 4px 12px 4px 4px;
   border: 0;
   border-radius: var(--sage-radius);
   background: linear-gradient(100deg, var(--sage-surface) 25%, color-mix(in srgb, var(--sage-warning-bg) 68%, var(--sage-surface)) 50%, var(--sage-surface) 75%);

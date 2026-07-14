@@ -11,6 +11,7 @@ import {
   CodingMessageTurn,
   CodingPlanApproval,
   CodingPlanPreview,
+  CodingRunTrace,
   CodingSidebar,
   CodingThinkingIndicator,
 } from '../components/coding'
@@ -50,6 +51,13 @@ const routeSessionId = computed(() => {
 })
 const showThinkingIndicator = computed(() => {
   return Boolean(store.isThinking && store.thinkingPhase)
+})
+const thinkingCharacterState = computed(() => {
+  if (store.pendingApproval) return 'waiting' as const
+  const activeTools = store.turns.find((turn) => turn.run_id === store.activeRun?.run_id)?.tools ?? []
+  if (activeTools.some((tool) => tool.status === 'running' || tool.status === 'blocked')) return 'tool' as const
+  if (/失败|错误/.test(store.thinkingPhase)) return 'failed' as const
+  return 'thinking' as const
 })
 const currentSession = computed(() => store.codingSessions.find((session) => session.session_id === store.sessionId))
 const currentSessionTitle = computed(() => currentSession.value?.title || '未命名会话')
@@ -147,6 +155,19 @@ function turnHasUser(runId: string) {
   return userMessagesForRun(runId).length > 0
 }
 
+function auditForRun(runId: string) {
+  return store.runs.find((run) => run.run_id === runId)?.audit
+}
+
+function shouldShowRunTrace(runId: string, toolCount: number, approvalCount: number) {
+  const hasEvidence = toolCount > 0 || approvalCount > 0 || Boolean(auditForRun(runId)?.steps.length)
+  return hasEvidence && (showToolProcess.value || isActiveTurn(runId))
+}
+
+function pendingToolForRun(runId: string) {
+  return isActiveTurn(runId) ? store.pendingApproval?.tool || '' : ''
+}
+
 const optimisticAttachedToTurn = computed(() => {
   return Boolean(store.optimisticMessage && store.activeRun &&
     store.turns.some((turn) => turn.run_id === store.activeRun?.run_id))
@@ -179,10 +200,6 @@ async function loadOlder() {
     const next = findTimelineTurn(element, anchorId)
     if (next) element.scrollTop += next.getBoundingClientRect().top - element.getBoundingClientRect().top - anchorOffset
   }
-}
-
-function processLabel(type: string) {
-  return ({ context: '上下文', memory: '记忆', agent: '子智能体', approval: '审批', terminal: '运行终态' } as Record<string, string>)[type] ?? type
 }
 
 function rememberSession(sessionId: string) {
@@ -425,7 +442,7 @@ onBeforeUnmount(() => {
       </button>
       <div class="brand-block"><strong>Sage</strong><span>AI Coding Workbench</span></div>
       <div class="header-spacer"></div>
-      <button class="header-icon process-toggle" type="button" :title="showToolProcess ? '隐藏工具过程' : '显示工具过程'" :aria-label="showToolProcess ? '隐藏工具过程' : '显示工具过程'" :aria-pressed="showToolProcess" @click="showToolProcess = !showToolProcess">
+      <button class="header-icon process-toggle" type="button" :title="showToolProcess ? '隐藏运行摘要' : '显示运行摘要'" :aria-label="showToolProcess ? '隐藏运行摘要' : '显示运行摘要'" :aria-pressed="showToolProcess" @click="showToolProcess = !showToolProcess">
         <Eye v-if="showToolProcess" :size="16" /><EyeOff v-else :size="16" />
       </button>
       <button class="header-icon" type="button" title="打开设置" aria-label="打开设置" @click="openSettings"><Settings :size="17" /></button>
@@ -483,19 +500,18 @@ onBeforeUnmount(() => {
               />
               <CodingMessageTurn v-for="msg in userMessagesForRun(turn.run_id)" :key="msg.id" :message="msg" :rendered-content="render(msg.content)" :show-process="showToolProcess" />
               <div v-if="showThinkingIndicator && isActiveTurn(turn.run_id)" class="active-run-status">
-                <CodingThinkingIndicator :phase="store.thinkingPhase" />
+                <CodingThinkingIndicator :phase="store.thinkingPhase" :state="thinkingCharacterState" />
               </div>
-              <CodingMessageTurn v-for="msg in assistantMessagesForRun(turn.run_id)" :key="msg.id" :message="msg" :rendered-content="render(msg.content)" :show-process="showToolProcess" />
-              <details v-if="showToolProcess && (turn.approvals.length || turn.context.length || turn.memory.length || turn.agents.length)" class="process-details">
-                <summary>运行过程</summary>
-                <ul>
-                  <li v-for="item in turn.approvals" :key="item.id">{{ processLabel('approval') }} · {{ item.tool }} · {{ item.status }}</li>
-                  <li v-for="item in turn.context" :key="item.id">{{ processLabel('context') }} · {{ item.type }} · {{ item.status }}</li>
-                  <li v-for="item in turn.memory" :key="item.id">{{ processLabel('memory') }} · {{ item.type }} · {{ item.status }}</li>
-                  <li v-for="item in turn.agents" :key="item.id">{{ processLabel('agent') }} · {{ item.type }} · {{ item.status }}</li>
-                  <li v-if="turn.terminal" :key="turn.terminal.event_id">{{ processLabel('terminal') }} · {{ turn.terminal.status }}</li>
-                </ul>
-              </details>
+              <CodingApprovalCard v-if="isActiveTurn(turn.run_id) && store.pendingApproval" :approval="store.pendingApproval" :busy="store.approvalBusy" @respond="store.respondApproval" />
+              <CodingRunTrace
+                v-if="shouldShowRunTrace(turn.run_id, turn.tools.length, turn.approvals.length)"
+                :run-id="turn.run_id"
+                :tools="turn.tools"
+                :audit="auditForRun(turn.run_id)"
+                :active="isActiveTurn(turn.run_id)"
+                :pending-tool="pendingToolForRun(turn.run_id)"
+              />
+              <CodingMessageTurn v-for="msg in assistantMessagesForRun(turn.run_id)" :key="msg.id" :message="msg" :rendered-content="render(msg.content)" :show-process="false" />
             </div>
           </template>
           <CodingMessageTurn
@@ -504,9 +520,9 @@ onBeforeUnmount(() => {
             :rendered-content="render(store.optimisticMessage.content)"
             :show-process="showToolProcess"
           />
-          <CodingApprovalCard v-if="store.pendingApproval" :approval="store.pendingApproval" :busy="store.approvalBusy" @respond="store.respondApproval" />
+          <CodingApprovalCard v-if="store.pendingApproval && !store.activeRun" :approval="store.pendingApproval" :busy="store.approvalBusy" @respond="store.respondApproval" />
           <div v-if="showThinkingIndicator && !store.activeRun" class="active-run-status">
-            <CodingThinkingIndicator :phase="store.thinkingPhase" />
+            <CodingThinkingIndicator :phase="store.thinkingPhase" :state="thinkingCharacterState" />
           </div>
           <button v-if="store.lastDiffInfo?.file_count" class="diff-btn" type="button" @click="store.openDiffDrawer"><GitCompareArrows :size="15" /> 查看变更（{{ store.lastDiffInfo.file_count }} 个文件）</button>
           <CodingPlanApproval v-if="store.planReview" />
@@ -547,16 +563,15 @@ onBeforeUnmount(() => {
 .active-run-status :deep(.thinking-indicator) { margin:0 0 12px; }
 .load-older-btn { display:block; min-height:30px; margin:0 auto 18px; padding:0 12px; border:1px solid #d1d7df; border-radius:6px; color:#52606f; background:#fff; font-size:11px; }.load-older-btn:hover { background:#f5f7f9; }
 .empty-state { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:5px; min-height:100%; color:#8a939e; text-align:center; }.empty-state strong { color:#4b5563; font-size:14px; }.empty-state span { font-size:12px; }
-.process-details { margin:-9px 0 16px 40px; color:#687585; font-size:11px; }.process-details summary { cursor:pointer; font-weight:600; }.process-details ul { margin:7px 0 0; padding-left:18px; line-height:1.7; }
 .diff-btn { display:flex; align-items:center; justify-content:center; gap:6px; min-height:32px; margin-bottom:14px; border:1px solid #b9cbe6; border-radius:6px; color:#1d4ed8; background:#f5f8fd; font-size:11px; }.diff-btn:hover { background:#eaf1fb; }.error-text,.drawer-error { color:#b42318; font-size:12px; }.drawer-error { margin:48px 12px 0; }
 .return-to-bottom { position:sticky; bottom:4px; display:flex; align-items:center; gap:6px; min-height:32px; margin-top:16px; padding:0 11px; border:1px solid var(--sage-border-strong); border-radius:var(--sage-radius); color:var(--sage-text); background:var(--sage-surface-raised); box-shadow:var(--sage-shadow); font-size:12px; font-weight:600; }.return-to-bottom:hover { background:var(--sage-surface-muted); }.sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
 .sheet-close,.session-backdrop { display:none; }
 @media (max-width:1179px) { .left-toggle { display:grid; }.chat-shell { display:block; }.pane-center { height:100%; }.pane-left { position:fixed; z-index:32; top:var(--header-height); bottom:0; left:0; width:min(320px,100vw); border-right:1px solid #dfe3e8; box-shadow:12px 0 36px rgba(30,41,59,.16); transform:translateX(-101%); transition:transform .18s ease; }.pane-left.open { transform:translateX(0); }.session-backdrop { position:fixed; z-index:31; inset:var(--header-height) 0 0; display:block; background:rgba(20,28,38,.3); opacity:0; pointer-events:none; }.session-backdrop.visible { opacity:1; pointer-events:auto; }.sheet-close { position:absolute; z-index:5; top:9px; right:9px; display:grid; place-items:center; width:30px; height:30px; padding:0; border:1px solid #d5dbe2; border-radius:6px; color:#52606f; background:#fff; } }
-@media (max-width:767px) { .brand-block span,.connection-state { display:none; }.message-area { padding:14px 12px 22px; }.pane-left { top:0; width:100%; }.session-backdrop { inset:0; }.session-titlebar { padding:0 10px 0 14px; gap:8px; }.session-title-copy { flex:1; }.session-title-copy span { display:none; }.titlebar-actions { flex:none; gap:4px; }.titlebar-actions :deep(.git-badge) { display:none; }.process-details { margin-left:34px; } }
+@media (max-width:767px) { .brand-block span,.connection-state { display:none; }.message-area { padding:14px 12px 22px; }.pane-left { top:0; width:100%; }.session-backdrop { inset:0; }.session-titlebar { padding:0 10px 0 14px; gap:8px; }.session-title-copy { flex:1; }.session-title-copy span { display:none; }.titlebar-actions { flex:none; gap:4px; }.titlebar-actions :deep(.git-badge) { display:none; } }
 @media (prefers-reduced-motion:reduce) { .pane-left { transition:none; } }
 
 /* Visual-system overrides: compact workbench chrome stays neutral across light and dark themes. */
-.sage-view { color:var(--sage-text); background:var(--sage-surface); }.workbench-header { border-color:var(--sage-border); background:var(--sage-surface); }.brand-block strong { color:var(--sage-text); }.brand-block span,.connection-state { color:var(--sage-text-muted); }.header-icon,.files-toggle { color:var(--sage-text-secondary); background:var(--sage-surface); }.header-icon:hover,.header-icon[aria-pressed="true"],.files-toggle:hover { border-color:var(--sage-border-strong); color:var(--sage-text); background:var(--sage-surface-muted); }.connection-state i { background:var(--sage-border-strong); }.connection-state i.connected,.session-title-copy span.running::before { background:var(--sage-success); }.plan-banner { border-color:var(--sage-border); color:var(--sage-text-secondary); background:var(--sage-surface-muted); }.plan-banner button,.load-older-btn { border-color:var(--sage-border); color:var(--sage-text-secondary); background:var(--sage-surface); }.chat-shell,.pane-center { background:var(--sage-surface); }.pane-left,.session-titlebar { border-color:var(--sage-border); }.session-title-copy strong { color:var(--sage-text); }.session-title-copy span { color:var(--sage-text-muted); }.session-title-copy span::before { background:var(--sage-border-strong); }.empty-state { color:var(--sage-text-muted); }.empty-state strong { color:var(--sage-text-secondary); }.process-details { color:var(--sage-text-muted); }.diff-btn { border-color:var(--sage-border-strong); color:var(--sage-text-secondary); background:var(--sage-surface-muted); }.diff-btn:hover,.load-older-btn:hover { background:var(--sage-surface-muted); }.error-text,.drawer-error { color:var(--sage-danger); }
+.sage-view { color:var(--sage-text); background:var(--sage-surface); }.workbench-header { border-color:var(--sage-border); background:var(--sage-surface); }.brand-block strong { color:var(--sage-text); }.brand-block span,.connection-state { color:var(--sage-text-muted); }.header-icon,.files-toggle { color:var(--sage-text-secondary); background:var(--sage-surface); }.header-icon:hover,.header-icon[aria-pressed="true"],.files-toggle:hover { border-color:var(--sage-border-strong); color:var(--sage-text); background:var(--sage-surface-muted); }.connection-state i { background:var(--sage-border-strong); }.connection-state i.connected,.session-title-copy span.running::before { background:var(--sage-success); }.plan-banner { border-color:var(--sage-border); color:var(--sage-text-secondary); background:var(--sage-surface-muted); }.plan-banner button,.load-older-btn { border-color:var(--sage-border); color:var(--sage-text-secondary); background:var(--sage-surface); }.chat-shell,.pane-center { background:var(--sage-surface); }.pane-left,.session-titlebar { border-color:var(--sage-border); }.session-title-copy strong { color:var(--sage-text); }.session-title-copy span { color:var(--sage-text-muted); }.session-title-copy span::before { background:var(--sage-border-strong); }.empty-state { color:var(--sage-text-muted); }.empty-state strong { color:var(--sage-text-secondary); }.diff-btn { border-color:var(--sage-border-strong); color:var(--sage-text-secondary); background:var(--sage-surface-muted); }.diff-btn:hover,.load-older-btn:hover { background:var(--sage-surface-muted); }.error-text,.drawer-error { color:var(--sage-danger); }
 @media (max-width:1179px) { .pane-left { border-color:var(--sage-border); box-shadow:var(--sage-shadow-drawer); }.session-backdrop { background:rgb(17 18 20 / 42%); }.sheet-close { border-color:var(--sage-border); color:var(--sage-text-secondary); background:var(--sage-surface); } }
 
 /* Hermes-inspired workbench proportions, implemented with Sage tokens and controls. */
