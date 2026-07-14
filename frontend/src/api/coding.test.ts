@@ -17,12 +17,55 @@ import {
   stopCodingRun,
   fetchMemoryProposals,
   approveMemoryProposal,
+  createCloudModelProvider,
+  fetchCloudModelProviders,
   rejectMemoryProposal,
+  updateCloudModelProvider,
 } from './coding'
 
 describe('coding API client', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
+  })
+
+  it('treats an unauthenticated account Provider catalog as a local-mode fallback', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 401 }))
+
+    await expect(fetchCloudModelProviders()).resolves.toBeNull()
+  })
+
+  it('submits a Provider key once and omits it from metadata-only updates', async () => {
+    const provider = {
+      id: 'provider-1', name: 'OpenAI', api_mode: 'openai_responses',
+      base_url: 'https://api.openai.com/v1', key_configured: true,
+      key_hint: '••••cret', status: 'untested', last_tested_at: null,
+      models: [{
+        id: 'model-1', runtime_id: 'account:provider-1:gpt-5', model_id: 'gpt-5',
+        display_name: 'GPT-5', context_window_tokens: 128_000,
+        output_reserve_tokens: 16_000, reasoning_supported: true,
+      }],
+    }
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => provider })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await createCloudModelProvider({
+      name: 'OpenAI', api_mode: 'openai_responses',
+      base_url: 'https://api.openai.com/v1', api_key: 'sk-write-only',
+      default_model_id: 'gpt-5',
+      models: [{
+        model_id: 'gpt-5', display_name: 'GPT-5',
+        context_window_tokens: 128_000, output_reserve_tokens: 16_000,
+        reasoning_supported: true,
+      }],
+    })
+    await updateCloudModelProvider('provider-1', { name: 'OpenAI Production' })
+
+    const createOptions = fetchMock.mock.calls[0][1] as RequestInit
+    const updateOptions = fetchMock.mock.calls[1][1] as RequestInit
+    expect(createOptions.credentials).toBe('include')
+    expect(JSON.parse(String(createOptions.body))).toMatchObject({ api_key: 'sk-write-only' })
+    expect(JSON.parse(String(updateOptions.body))).toEqual({ name: 'OpenAI Production' })
+    expect(String(updateOptions.body)).not.toContain('sk-write-only')
   })
 
   it('lists pending memory proposals for a session', async () => {
@@ -64,6 +107,7 @@ describe('coding API client', () => {
 
     expect(response.session_id).toBe('c1')
     expect(fetchMock).toHaveBeenCalledWith(expect.any(URL), {
+      credentials: 'include',
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ workspace_root: '/tmp/repo', approval_policy: 'ask' }),
@@ -152,7 +196,7 @@ describe('coding API client', () => {
     const response = await fetchCodingApprovalPending('c1')
 
     expect(response?.approval_id).toBe('appr_1')
-    expect(fetchMock).toHaveBeenCalledWith(expect.any(URL))
+    expect(fetchMock).toHaveBeenCalledWith(expect.any(URL), { credentials: 'include' })
   })
 
   it('responds to approval', async () => {
@@ -162,6 +206,7 @@ describe('coding API client', () => {
     await respondCodingApproval('c1', 'appr_1', 'once')
 
     expect(fetchMock).toHaveBeenCalledWith(expect.any(URL), {
+      credentials: 'include',
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ approval_id: 'appr_1', choice: 'once' }),
@@ -172,9 +217,14 @@ describe('coding API client', () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true })
     vi.stubGlobal('fetch', fetchMock)
 
-    await stopCodingRun('c1')
+    await stopCodingRun('c1', 'run-current')
 
-    expect(fetchMock).toHaveBeenCalledWith(expect.any(URL), { method: 'POST' })
+    expect(fetchMock).toHaveBeenCalledWith(expect.any(URL), {
+      credentials: 'include',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ run_id: 'run-current' }),
+    })
   })
 
   it('approves a plan via REST', async () => {
@@ -188,7 +238,7 @@ describe('coding API client', () => {
 
     const calledUrl = fetchMock.mock.calls[0][0] as URL
     expect(calledUrl.pathname).toBe('/api/v1/coding/c1/plan/approve')
-    expect(fetchMock.mock.calls[0][1]).toEqual({ method: 'POST' })
+    expect(fetchMock.mock.calls[0][1]).toEqual({ credentials: 'include', method: 'POST' })
     expect(result).toEqual({ status: 'approved', mode: 'default' })
   })
 
@@ -200,7 +250,7 @@ describe('coding API client', () => {
 
     const calledUrl = fetchMock.mock.calls[0][0] as URL
     expect(calledUrl.pathname).toBe('/api/v1/coding/c1/plan/reject')
-    expect(fetchMock.mock.calls[0][1]).toEqual({ method: 'POST' })
+    expect(fetchMock.mock.calls[0][1]).toEqual({ credentials: 'include', method: 'POST' })
   })
 
   it('throws when plan approval fails', async () => {
@@ -279,7 +329,7 @@ describe('coding API client', () => {
     const response = await fetchCodingSessions()
 
     expect(response.sessions[0].title).toBe('读 README')
-    expect(fetchMock).toHaveBeenCalledWith(expect.any(URL))
+    expect(fetchMock).toHaveBeenCalledWith(expect.any(URL), { credentials: 'include' })
   })
 
   it('resumes a coding session', async () => {
@@ -292,7 +342,9 @@ describe('coding API client', () => {
     const response = await resumeCodingSession('s1')
 
     expect(response.session_id).toBe('s1')
-    expect(fetchMock).toHaveBeenCalledWith(expect.any(URL), { method: 'POST' })
+    expect(fetchMock).toHaveBeenCalledWith(expect.any(URL), {
+      credentials: 'include', method: 'POST',
+    })
   })
 
   it('fetches coding session messages', async () => {
@@ -318,6 +370,6 @@ describe('coding API client', () => {
     const response = await fetchCodingSessionMessages('s1')
 
     expect(response.messages[1].content).toBe('README 里是 Sage。')
-    expect(fetchMock).toHaveBeenCalledWith(expect.any(URL))
+    expect(fetchMock).toHaveBeenCalledWith(expect.any(URL), { credentials: 'include' })
   })
 })

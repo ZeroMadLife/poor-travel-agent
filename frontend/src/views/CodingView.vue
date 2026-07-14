@@ -420,6 +420,7 @@ watch(() => [store.sessionId, store.timelineInitialized], restoreScrollAnchor, {
 watch(() => route.fullPath, () => { void synchronizeRoute() })
 
 onMounted(async () => {
+  await store.bootstrapModelCatalog()
   await synchronizeRoute()
   window.addEventListener('resize', updateBreakpoint)
   restoreScrollAnchor()

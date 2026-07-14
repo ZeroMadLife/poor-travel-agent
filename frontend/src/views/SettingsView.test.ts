@@ -89,7 +89,7 @@ it('shows sanitized provider status and real usage empty state', async () => {
     cache_read_tokens: null, cache_creation_tokens: null,
     cache_hit_ratio: null, cost: null, models: [], daily: [],
   }
-  store.loadProviderSettings = vi.fn().mockResolvedValue(undefined)
+  store.loadModelProviderSettings = vi.fn().mockResolvedValue(false)
   store.loadUsage = vi.fn().mockResolvedValue(undefined)
   const { router, root, view } = await mountSettings('/settings/providers')
 
@@ -107,7 +107,7 @@ it('keeps Provider and usage failures isolated', async () => {
   const store = useCodingStore()
   store.providerSettingsError = 'Provider 加载失败'
   store.usageError = '用量加载失败'
-  store.loadProviderSettings = vi.fn().mockResolvedValue(undefined)
+  store.loadModelProviderSettings = vi.fn().mockResolvedValue(false)
   store.loadUsage = vi.fn().mockResolvedValue(undefined)
   const { router, root, view } = await mountSettings('/settings/providers')
 

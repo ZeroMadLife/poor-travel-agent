@@ -33,7 +33,7 @@ it('renders plan markdown content fetched from the api', async () => {
   await new Promise((resolve) => setTimeout(resolve, 0))
   await wrapper.vm.$nextTick()
 
-  expect(fetchMock).toHaveBeenCalledWith(expect.any(URL))
+  expect(fetchMock).toHaveBeenCalledWith(expect.any(URL), { credentials: 'include' })
   const calledUrl = fetchMock.mock.calls[0][0] as URL
   expect(calledUrl.searchParams.get('path')).toBe('.coding/plans/x.md')
 

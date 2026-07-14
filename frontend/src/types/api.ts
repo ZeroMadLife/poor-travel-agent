@@ -479,6 +479,68 @@ export type CodingProviderSettingsUpdate = {
   }>
 }
 
+export type CloudModelApiMode =
+  | 'openai_chat_completions'
+  | 'openai_responses'
+  | 'anthropic_messages'
+
+export type CloudModelInput = {
+  model_id: string
+  display_name: string
+  context_window_tokens: number | null
+  output_reserve_tokens: number | null
+  reasoning_supported: boolean
+}
+
+export type CloudModel = CloudModelInput & {
+  id: string
+  runtime_id: string
+}
+
+export type CloudModelProvider = {
+  id: string
+  name: string
+  api_mode: CloudModelApiMode
+  base_url: string
+  key_configured: boolean
+  key_hint: string
+  status: 'untested' | 'connected' | 'error' | string
+  last_tested_at: string | null
+  models: CloudModel[]
+}
+
+export type CloudModelProvidersResponse = {
+  providers: CloudModelProvider[]
+  default_model: string | null
+}
+
+export type CloudModelProviderCreate = {
+  name: string
+  api_mode: CloudModelApiMode
+  base_url: string
+  api_key: string
+  models: CloudModelInput[]
+  default_model_id?: string | null
+}
+
+export type CloudModelProviderUpdate = Partial<
+  Omit<CloudModelProviderCreate, 'default_model_id' | 'api_key'>
+> & { api_key?: string }
+
+export type CloudModelProviderTestResponse = {
+  ok: boolean
+  status: string
+  tested_at: string
+}
+
+export type CloudModelDiscoveryResponse = { models: string[] }
+
+export type CloudModelDefaultResponse = {
+  provider_id: string
+  model_id: string
+  runtime_model_id: string
+}
+
 export type CodingUsageModelAggregate = {
   model: string
   input_tokens: number | null

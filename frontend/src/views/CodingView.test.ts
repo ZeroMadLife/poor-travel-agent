@@ -76,6 +76,19 @@ describe('CodingView chat route lifecycle', () => {
     root.unmount()
   })
 
+  it('bootstraps the model catalog before resolving the chat route', async () => {
+    const store = useCodingStore()
+    const order: string[] = []
+    store.bootstrapModelCatalog = vi.fn(async () => { order.push('catalog') })
+    store.loadSessions = vi.fn(async () => { order.push('sessions') })
+    store.initialize = vi.fn(async () => { order.push('session'); store.sessionId = 'new-session' })
+    const { root } = await mountChat()
+
+    await vi.waitFor(() => expect(store.initialize).toHaveBeenCalledTimes(1))
+    expect(order).toEqual(['catalog', 'sessions', 'session'])
+    root.unmount()
+  })
+
   it('restores a persisted recent session before creating a new one', async () => {
     localStorage.setItem('sage.coding.recentSessionId', 'saved-session')
     const store = useCodingStore()

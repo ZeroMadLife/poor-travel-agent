@@ -55,6 +55,63 @@ describe('coding store', () => {
     expect(store.sessionsById).toEqual({})
   })
 
+  it('bootstraps the model catalog once before a session exists', async () => {
+    const catalog = deferred<{ ok: boolean; json: () => Promise<unknown> }>()
+    const fetchMock = vi.fn().mockReturnValue(catalog.promise)
+    vi.stubGlobal('fetch', fetchMock)
+    const store = useCodingStore()
+
+    const first = store.bootstrapModelCatalog()
+    const second = store.bootstrapModelCatalog()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    catalog.resolve({
+      ok: true,
+      json: async () => ({
+        models: [{
+          id: 'account:provider-1:model-a', label: 'Model A', provider: 'Account',
+          context_configured: true, context_window_tokens: 128_000,
+          output_reserve_tokens: 16_000, reasoning_modes: ['low', 'high'],
+        }],
+        current: 'account:provider-1:model-a',
+        reasoning_mode: 'off',
+      }),
+    })
+    await Promise.all([first, second])
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(store.models[0].label).toBe('Model A')
+    expect(store.currentModelId).toBe('account:provider-1:model-a')
+  })
+
+  it('queues a forced model refresh behind an in-flight bootstrap', async () => {
+    const initial = deferred<{ ok: boolean; json: () => Promise<unknown> }>()
+    const refreshed = deferred<{ ok: boolean; json: () => Promise<unknown> }>()
+    const fetchMock = vi.fn()
+      .mockReturnValueOnce(initial.promise)
+      .mockReturnValueOnce(refreshed.promise)
+    vi.stubGlobal('fetch', fetchMock)
+    const store = useCodingStore()
+
+    const bootstrap = store.bootstrapModelCatalog()
+    const forced = store.bootstrapModelCatalog(true)
+    initial.resolve({ ok: true, json: async () => ({
+      models: [], current: '', reasoning_mode: 'off',
+    }) })
+    await bootstrap
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    refreshed.resolve({ ok: true, json: async () => ({
+      models: [{
+        id: 'account:p1:model-new', label: 'Model New', provider: 'Account',
+        context_configured: true, context_window_tokens: 128_000,
+        output_reserve_tokens: 16_000, reasoning_modes: [],
+      }],
+      current: 'account:p1:model-new', reasoning_mode: 'off',
+    }) })
+    await forced
+
+    expect(store.currentModelId).toBe('account:p1:model-new')
+  })
+
   it('keeps the latest usage range when responses finish out of order', async () => {
     const sevenDays = deferred<{ ok: boolean; json: () => Promise<unknown> }>()
     const thirtyDays = deferred<{ ok: boolean; json: () => Promise<unknown> }>()
@@ -1309,10 +1366,28 @@ describe('coding store', () => {
     const store = useCodingStore()
     store.sessionId = 'c1'
     store.isThinking = true
+    store.activeRun = { run_id: 'run-current', status: 'running' }
 
     await store.stopCurrentRun()
 
-    expect(fetchMock).toHaveBeenCalledWith(expect.any(URL), { method: 'POST' })
+    expect(fetchMock).toHaveBeenCalledWith(expect.any(URL), {
+      credentials: 'include',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ run_id: 'run-current' }),
+    })
+  })
+
+  it('does not send an unbound stop request without an active run id', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true })
+    vi.stubGlobal('fetch', fetchMock)
+    const store = useCodingStore()
+    store.sessionId = 'c1'
+    store.isThinking = true
+
+    await store.stopCurrentRun()
+
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('loads run history and run detail', async () => {
@@ -1451,7 +1526,9 @@ describe('coding store', () => {
       { role: 'assistant', content: 'README 里是 Sage。' },
     ])
     expect(socketInstances).toHaveLength(1)
-    expect(fetchMock).toHaveBeenCalledWith(expect.any(URL), { method: 'POST' })
+    expect(fetchMock).toHaveBeenCalledWith(expect.any(URL), {
+      credentials: 'include', method: 'POST',
+    })
   })
 
   it('keeps the active session stream connected when resuming another session fails', async () => {
@@ -1737,7 +1814,7 @@ describe('coding store', () => {
     } as never)
     await new Promise((resolve) => setTimeout(resolve, 0))
 
-    expect(fetchMock).toHaveBeenCalledWith(expect.any(URL))
+    expect(fetchMock).toHaveBeenCalledWith(expect.any(URL), { credentials: 'include' })
   })
 
   it('does not let a stale terminal hide a newer active run', () => {

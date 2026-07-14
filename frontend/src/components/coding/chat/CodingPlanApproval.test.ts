@@ -58,7 +58,7 @@ it('calls approveCodingPlan when the approve button is clicked', async () => {
 
   const calledUrl = fetchMock.mock.calls[0][0] as URL
   expect(calledUrl.pathname).toBe('/api/v1/coding/c1/plan/approve')
-  expect(fetchMock.mock.calls[0][1]).toEqual({ method: 'POST' })
+  expect(fetchMock.mock.calls[0][1]).toEqual({ credentials: 'include', method: 'POST' })
 })
 
 it('calls rejectCodingPlan and clears plan review when the reject button is clicked', async () => {
@@ -74,7 +74,7 @@ it('calls rejectCodingPlan and clears plan review when the reject button is clic
 
   const calledUrl = fetchMock.mock.calls[0][0] as URL
   expect(calledUrl.pathname).toBe('/api/v1/coding/c1/plan/reject')
-  expect(fetchMock.mock.calls[0][1]).toEqual({ method: 'POST' })
+  expect(fetchMock.mock.calls[0][1]).toEqual({ credentials: 'include', method: 'POST' })
   // Backend stays in plan mode (no runtime_mode_changed), so the store clears
   // planReview locally.
   expect(store.planReview).toBeNull()

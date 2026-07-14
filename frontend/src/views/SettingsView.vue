@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import {
   Activity, ArrowLeft, Brain, CheckCircle2, ChevronRight, Circle, Code2, FolderGit2,
-  ChartNoAxesCombined, KeyRound, Monitor, PlugZap, Settings2, Sparkles, XCircle,
+  ChartNoAxesCombined, KeyRound, Monitor, PlugZap, Settings2, XCircle,
 } from 'lucide-vue-next'
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useCodingStore } from '../stores/coding'
-import type { CodingProviderSettingsUpdate } from '../types/api'
+import ProviderModelSettings from '../components/coding/settings/ProviderModelSettings.vue'
 import { useWorkbenchPreferences } from '../composables/useWorkbenchPreferences'
 import { wireNaiveUI } from '../composables/useNaiveUI'
 
@@ -18,8 +18,7 @@ export type SettingsSection =
 
 const sections: Array<{ id: SettingsSection; label: string; icon: typeof Monitor }> = [
   { id: 'appearance', label: '外观', icon: Monitor },
-  { id: 'providers', label: 'Provider', icon: KeyRound },
-  { id: 'models', label: '模型', icon: Sparkles },
+  { id: 'providers', label: '模型与 Provider', icon: KeyRound },
   { id: 'usage', label: '用量', icon: ChartNoAxesCombined },
   { id: 'skills', label: 'Skills', icon: Code2 },
   { id: 'mcp', label: 'MCP', icon: PlugZap },
@@ -36,8 +35,6 @@ const store = useCodingStore()
 const { showToolProcess, themeMode } = useWorkbenchPreferences()
 const sessionError = ref('')
 const mobileSectionOpen = ref(false)
-const providerDraft = ref('')
-const providerMessage = ref('')
 const usageRanges = ['7d', '30d', '90d', '365d'] as const
 
 const activeSection = computed(() => route.params.section as SettingsSection)
@@ -90,52 +87,10 @@ function readableUsage(value: number | null | undefined) {
   return value === null || value === undefined ? '--' : value.toLocaleString()
 }
 
-function syncProviderDraft() {
-  const settings = store.providerSettings
-  if (!settings) return
-  providerDraft.value = JSON.stringify({
-    version: settings.version,
-    default_model: settings.default_model,
-    providers: settings.providers.map((provider) => ({
-      id: provider.id,
-      label: provider.label,
-      api_mode: provider.api_mode,
-      base_url: provider.base_url,
-      api_key_env: provider.api_key_env,
-      models: provider.models.map((model) => ({
-        id: model.id,
-        label: model.label,
-        ...(model.context_window_tokens !== null && model.output_reserve_tokens !== null
-          ? {
-              context_window_tokens: model.context_window_tokens,
-              output_reserve_tokens: model.output_reserve_tokens,
-            }
-          : {}),
-        reasoning: model.reasoning,
-      })),
-    })),
-  }, null, 2)
-}
-
-async function saveProviderDraft() {
-  providerMessage.value = ''
-  try {
-    const parsed: unknown = JSON.parse(providerDraft.value)
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('配置根节点必须是 JSON 对象')
-    }
-    const saved = await store.saveProviderSettings(parsed as CodingProviderSettingsUpdate)
-    providerMessage.value = saved ? 'Provider 配置已保存' : store.providerSettingsError
-    if (saved) syncProviderDraft()
-  } catch (error) {
-    providerMessage.value = error instanceof Error ? error.message : String(error)
-  }
-}
-
 onMounted(() => {
   void Promise.all([
-    store.loadSkills(), store.loadMcpServers(), store.loadModels(), store.loadSessions().catch(() => {}),
-    store.loadProviderSettings().then(syncProviderDraft), store.loadUsage(),
+    store.loadSkills(), store.loadMcpServers(), store.bootstrapModelCatalog(), store.loadSessions().catch(() => {}),
+    store.loadModelProviderSettings(), store.loadUsage(),
   ])
   if (store.sessionId) {
     void Promise.all([store.loadRuns(), store.loadMemoryProposals(), store.loadContext(), store.loadGitStatus()])
@@ -171,18 +126,8 @@ onMounted(() => {
           <label class="setting-row"><span><strong>显示工具过程</strong><small>在聊天时间线中显示思考、工具和审批细节</small></span><input v-model="showToolProcess" type="checkbox" aria-label="显示工具过程" /></label>
         </section>
 
-        <section v-else-if="activeSection === 'models'" class="settings-section">
-          <h2>模型</h2><p class="section-note">模型选择会作用于当前会话；没有活动会话时仅展示可用模型。</p>
-          <p v-if="store.models.length === 0" class="empty">暂无可用模型</p>
-          <label v-for="model in store.models" :key="model.id" class="choice-row" :class="{ selected: model.id === store.currentModelId }"><input type="radio" name="model" :value="model.id" :checked="model.id === store.currentModelId" :disabled="!store.sessionId || store.isThinking" @change="store.changeModel(model.id)" /><span><strong>{{ model.label }}</strong><small>{{ model.provider }} · 上下文 {{ readableTokens(model.context_window_tokens) }} · 推理 {{ model.reasoning_modes.length ? model.reasoning_modes.join(' / ') : '不支持' }}</small></span><CheckCircle2 v-if="model.id === store.currentModelId" :size="17" /></label>
-        </section>
-
-        <section v-else-if="activeSection === 'providers'" class="settings-section">
-          <h2>Provider</h2><p class="section-note">只管理非敏感目录。API Key 必须通过服务端环境变量配置，网页不会接收或回显密钥。</p>
-          <p v-if="!store.providerSettings" class="empty">Provider 配置暂不可用</p>
-          <article v-for="provider in store.providerSettings?.providers || []" :key="provider.id" class="resource-row provider-row"><span class="status-dot" :class="{ ready: provider.api_key_configured }"></span><div><strong>{{ provider.label }}</strong><p>{{ provider.api_mode }} · {{ provider.base_url }}</p><small>{{ provider.api_key_env }} · {{ provider.api_key_configured ? '环境变量已配置' : '环境变量未配置' }} · {{ provider.models.length }} 个模型</small></div><span class="read-only">{{ store.providerSettings?.source === 'deployment_json' ? '部署托管' : '项目配置' }}</span></article>
-          <details v-if="store.providerSettings?.editable" class="provider-editor"><summary>编辑 .sage/settings.json</summary><p>仅允许 Provider、模型、context 和 reasoning 描述；请勿粘贴 API Key。</p><textarea v-model="providerDraft" aria-label="Provider JSON 配置" spellcheck="false" autocomplete="off"></textarea><div><button class="command" type="button" @click="saveProviderDraft">保存配置</button><span v-if="providerMessage" :class="{ error: !providerMessage.includes('已保存') }" role="status">{{ providerMessage }}</span></div></details>
-          <p v-if="store.providerSettingsError" class="error" role="alert">{{ store.providerSettingsError }}</p>
+        <section v-else-if="activeSection === 'providers' || activeSection === 'models'" class="settings-section">
+          <ProviderModelSettings />
         </section>
 
         <section v-else-if="activeSection === 'usage'" class="settings-section">
@@ -247,11 +192,6 @@ onMounted(() => {
 <style scoped>
 .settings-view { min-height:100dvh; color:#26313d; background:#f8f9fa; }.settings-header { display:flex; align-items:center; gap:18px; min-height:54px; padding:0 20px; border-bottom:1px solid #dfe3e8; background:#fff; }.settings-header > div { display:flex; gap:8px; color:#7c8794; font-size:12px; }.settings-header strong { color:#202936; font-size:15px; }.back-button { display:inline-flex; align-items:center; gap:6px; min-height:30px; padding:0 8px; border:0; border-radius:6px; color:#596675; background:transparent; font-size:12px; }.back-button:hover { color:#1f2937; background:#f1f3f5; }.settings-shell { display:grid; grid-template-columns:220px minmax(0,960px); justify-content:center; min-height:calc(100dvh - 54px); }.settings-nav { padding:16px 10px; border-right:1px solid #e1e5e9; background:#f5f6f7; }.settings-nav button { display:grid; grid-template-columns:18px minmax(0,1fr) 14px; align-items:center; gap:8px; width:100%; min-height:36px; padding:0 9px; border:0; border-radius:6px; color:#5c6875; background:transparent; font-size:12px; text-align:left; }.settings-nav button:hover { background:#eceff2; color:#29313d; }.settings-nav button.active { color:#1f2937; background:#fff; box-shadow:0 1px 2px rgba(15,23,42,.05); }.settings-nav button svg:last-child { opacity:0; }.settings-nav button.active svg:last-child { opacity:1; }.settings-content { position:relative; min-width:0; padding:42px clamp(20px,5vw,56px); background:#fff; }.content-heading { display:flex; align-items:flex-start; gap:10px; padding-bottom:22px; border-bottom:1px solid #edf0f2; }.content-heading h1 { margin:0; font-size:20px; }.content-heading p { margin:4px 0 0; color:#7b8794; font-size:12px; }.mobile-section-trigger { display:none; margin-left:auto; min-height:30px; border:1px solid #d5dbe2; border-radius:6px; padding:0 8px; color:#536171; background:#fff; font-size:11px; }.mobile-section-sheet { display:none; }.settings-section { padding:26px 0; border-bottom:1px solid #edf0f2; }.settings-section h2 { margin:0 0 7px; color:#29313d; font-size:15px; }.section-note,.empty { margin:0 0 18px; color:#718093; font-size:12px; line-height:1.65; }.setting-row,.choice-row,.resource-row,.session-row,.run-row { display:flex; align-items:center; gap:12px; min-height:54px; border-bottom:1px solid #edf0f2; }.setting-row > span,.choice-row > span,.resource-row > div,.session-row > div,.run-row > span { display:grid; gap:3px; flex:1; min-width:0; }.setting-row strong,.choice-row strong,.resource-row strong,.session-row strong,.run-row strong { font-size:13px; }.setting-row small,.choice-row small,.resource-row small,.session-row small,.run-row small { overflow:hidden; color:#7b8794; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }.setting-row select { min-width:110px; height:30px; border:1px solid #d5dbe2; border-radius:6px; padding:0 7px; color:#34404e; background:#fff; font-size:12px; }.setting-row input[type="checkbox"] { width:16px; height:16px; accent-color:#29313d; }.choice-row { padding:8px 10px; border:1px solid transparent; border-radius:6px; }.choice-row:hover { background:#f8f9fa; }.choice-row.selected { border-color:#dfe3e8; background:#f8f9fa; }.choice-row input { accent-color:#29313d; }.resource-row { padding:10px 0; }.resource-row > svg { color:#637181; }.resource-row p { margin:0; color:#667585; font-size:12px; }.read-only { flex:none; padding:2px 6px; border:1px solid #dfe3e8; border-radius:4px; color:#718093; font-size:10px; }.status-dot { width:8px; height:8px; border-radius:50%; background:#a7afb9; }.status-dot.connected,.status-dot.ready { background:#16a34a; }.memory-row { display:flex; justify-content:space-between; gap:16px; padding:12px 0; border-bottom:1px solid #edf0f2; }.memory-row p { margin:0 0 6px; font-size:12px; line-height:1.55; }.memory-row small { color:#7b8794; font-size:11px; }.memory-actions { display:flex; align-items:flex-start; gap:6px; }.memory-actions button,.session-row button,.command { min-height:28px; border:1px solid #d5dbe2; border-radius:6px; padding:0 9px; color:#455363; background:#fff; font-size:11px; }.memory-actions button:hover,.session-row button:hover,.command:hover { background:#f5f7f9; }.fact-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin:0 0 18px; }.fact-grid > div { min-width:0; padding:10px; border:1px solid #e4e8ec; border-radius:6px; }.fact-grid dt { color:#7b8794; font-size:10px; }.fact-grid dd { overflow:hidden; margin:4px 0 0; color:#334155; font-size:12px; text-overflow:ellipsis; white-space:nowrap; }.fact-grid dd.path { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }.path-list { margin:0; padding:0; list-style:none; }.path-list li { overflow:hidden; padding:7px 0; border-bottom:1px solid #edf0f2; color:#556474; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }.run-row { width:100%; padding:9px 0; border-left:0; border-right:0; border-top:0; background:transparent; color:inherit; text-align:left; }.run-row:hover { background:#f8f9fa; }.run-state { margin-left:auto; color:#7b8794; font-size:11px; }.run-state.running { color:#16803d; }.run-state.error { color:#b42318; }.run-detail { margin:10px 0; border-left:2px solid #e3e7eb; padding-left:10px; }.run-detail p { display:grid; gap:2px; margin:0 0 9px; color:#657384; font-size:11px; }.run-detail strong { color:#34404e; }.terminal-note { display:flex; align-items:center; justify-content:space-between; margin-top:18px; border:1px dashed #cfd6dd; border-radius:6px; padding:10px; color:#5f6d7a; font-size:12px; }.terminal-note small { color:#7b8794; font-size:11px; }.error { color:#b42318; font-size:12px; } code { padding:1px 4px; border-radius:3px; background:#f2f4f6; color:#44505e; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.92em; }
 
-.provider-editor { margin-top:18px; border-top:1px solid var(--sage-border); padding-top:14px; }
-.provider-editor summary { cursor:pointer; color:var(--sage-text-secondary); font-size:12px; font-weight:700; }
-.provider-editor p { color:var(--sage-text-muted); font-size:11px; }
-.provider-editor textarea { width:100%; min-height:320px; resize:vertical; border:1px solid var(--sage-border); border-radius:var(--sage-radius); padding:12px; color:var(--sage-code-text); background:var(--sage-code-bg); font-family:var(--sage-font-mono); font-size:11px; line-height:1.55; }
-.provider-editor > div { display:flex; align-items:center; gap:10px; margin-top:8px; }
 .range-control { display:flex; width:fit-content; margin:0 0 16px; border:1px solid var(--sage-border); border-radius:var(--sage-radius); padding:2px; }
 .range-control button { min-width:42px; height:26px; border:0; border-radius:var(--sage-radius-sm); color:var(--sage-text-muted); background:transparent; font-size:10px; }
 .range-control button.active { color:var(--sage-text); background:var(--sage-surface-muted); font-weight:700; }

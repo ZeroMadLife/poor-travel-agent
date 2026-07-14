@@ -1001,7 +1001,12 @@ async def switch_coding_model(
     runtime = _require_runtime(request, session_id)
     account = await load_account_model_context(request, include_credentials=True)
     if account is not None:
-        runtime.bind_owner(account.user_id)
+        try:
+            runtime.bind_owner(account.user_id)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=404, detail=f"Unknown coding session: {session_id}"
+            ) from exc
     catalog = combined_catalog(request, account)
     allowed = _catalog_model_ids(catalog)
     if payload.model_id not in allowed:

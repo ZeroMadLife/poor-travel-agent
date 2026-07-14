@@ -12,6 +12,7 @@ import {
   fetchCodingMcpServers,
   fetchCodingModels,
   fetchCodingProviderSettings,
+  fetchCloudModelProviders,
   fetchCodingUsage,
   fetchMemoryProposals,
   fetchCodingRun,
@@ -57,6 +58,7 @@ import type {
   CodingTimelineEvent,
   CodingContextSnapshot,
   CodingUsageSummary,
+  CloudModelProvider,
   MemoryProposal,
   PermissionMode,
 } from '../types/api'
@@ -297,11 +299,19 @@ export const useCodingStore = defineStore('coding', () => {
   const mcpServers = ref<CodingMcpServer[]>([])
   const models = ref<CodingModel[]>([])
   const providerSettings = ref<CodingProviderSettings | null>(null)
+  const accountProviders = ref<CloudModelProvider[]>([])
+  const accountDefaultModel = ref<string | null>(null)
+  const accountProviderAuthenticated = ref(false)
+  const accountProviderLoading = ref(false)
+  const accountProviderError = ref('')
   const usageSummary = ref<CodingUsageSummary | null>(null)
   const usageRange = ref<'7d' | '30d' | '90d' | '365d'>('30d')
   const providerSettingsError = ref('')
   const usageError = ref('')
   let usageRequestGeneration = 0
+  let modelRequestGeneration = 0
+  let modelCatalogBootstrapped = false
+  let modelCatalogPromise: Promise<void> | null = null
   const gitStatus = ref<CodingGitStatusResponse>({
     is_git: false,
     branch: '',
@@ -931,8 +941,9 @@ export const useCodingStore = defineStore('coding', () => {
     const targetSessionId = sessionId.value
     if (!targetSessionId) return
     const state = ensureSession(targetSessionId)
-    if (!state.isThinking && !state.activeRun) return
-    await stopCodingRun(targetSessionId)
+    const runId = state.activeRun?.run_id
+    if (!runId) return
+    await stopCodingRun(targetSessionId, runId)
     state.pendingApproval = null
   }
 
@@ -988,15 +999,37 @@ export const useCodingStore = defineStore('coding', () => {
     }
   }
 
-  async function loadModels() {
+  async function loadModels(targetSessionId: string | null = sessionId.value || null) {
+    const generation = ++modelRequestGeneration
     try {
-      const res = await fetchCodingModels(sessionId.value || undefined)
+      const res = await fetchCodingModels(targetSessionId || undefined)
+      if (generation !== modelRequestGeneration) return false
       models.value = res.models
       if (res.current) currentModelId.value = res.current
       else if (res.models.length > 0) currentModelId.value = res.models[0].id
       reasoningMode.value = res.reasoning_mode || 'off'
+      return true
     } catch {
-      models.value = []
+      if (generation === modelRequestGeneration) models.value = []
+      return false
+    }
+  }
+
+  async function bootstrapModelCatalog(force = false) {
+    if (modelCatalogBootstrapped && !force) return
+    if (modelCatalogPromise) {
+      await modelCatalogPromise
+      if (!force) return
+    }
+    if (modelCatalogPromise) return modelCatalogPromise
+    modelCatalogPromise = (async () => {
+      const loaded = await loadModels(null)
+      modelCatalogBootstrapped = loaded
+    })()
+    try {
+      await modelCatalogPromise
+    } finally {
+      modelCatalogPromise = null
     }
   }
 
@@ -1007,6 +1040,34 @@ export const useCodingStore = defineStore('coding', () => {
     } catch (error) {
       providerSettings.value = null
       providerSettingsError.value = error instanceof Error ? error.message : String(error)
+    }
+  }
+
+  async function loadModelProviderSettings() {
+    accountProviderLoading.value = true
+    accountProviderError.value = ''
+    try {
+      const account = await fetchCloudModelProviders()
+      if (account === null) {
+        accountProviders.value = []
+        accountDefaultModel.value = null
+        accountProviderAuthenticated.value = false
+        await loadProviderSettings()
+        return false
+      }
+      accountProviders.value = account.providers
+      accountDefaultModel.value = account.default_model
+      accountProviderAuthenticated.value = true
+      providerSettingsError.value = ''
+      return true
+    } catch (error) {
+      accountProviders.value = []
+      accountDefaultModel.value = null
+      accountProviderAuthenticated.value = false
+      accountProviderError.value = error instanceof Error ? error.message : String(error)
+      return false
+    } finally {
+      accountProviderLoading.value = false
     }
   }
 
@@ -1180,6 +1241,7 @@ export const useCodingStore = defineStore('coding', () => {
     dirCache.clear()
     await Promise.all([
       loadTimeline(targetSessionId),
+      loadModels(targetSessionId),
       loadGitStatus(),
       loadFiles('.', true),
       loadSessions().catch(() => {}),
@@ -1206,6 +1268,7 @@ export const useCodingStore = defineStore('coding', () => {
     dirCache.clear()
     await Promise.all([
       loadTimeline(session.session_id),
+      loadModels(session.session_id),
       loadGitStatus(),
       loadFiles('.', true),
       loadSessions().catch(() => {}),
@@ -1222,6 +1285,7 @@ export const useCodingStore = defineStore('coding', () => {
     const selection = ++selectionGeneration
     await Promise.all([
       loadTimeline(targetSessionId),
+      loadModels(targetSessionId),
       loadGitStatus(),
       loadFiles('.', true),
       loadSessions().catch(() => {}),
@@ -1487,6 +1551,11 @@ export const useCodingStore = defineStore('coding', () => {
     mcpServers,
     models,
     providerSettings,
+    accountProviders,
+    accountDefaultModel,
+    accountProviderAuthenticated,
+    accountProviderLoading,
+    accountProviderError,
     usageSummary,
     usageRange,
     providerSettingsError,
@@ -1518,7 +1587,9 @@ export const useCodingStore = defineStore('coding', () => {
     loadSkills,
     loadMcpServers,
     loadModels,
+    bootstrapModelCatalog,
     loadProviderSettings,
+    loadModelProviderSettings,
     loadUsage,
     saveProviderSettings,
     loadContext,
