@@ -579,7 +579,7 @@ def _row_to_item(row: tuple[Any, ...], path: Path) -> TranscriptItem:
         canonical_args = _canonical_args_json(args)
         if canonical_args.encode("utf-8") != raw_args.encode("utf-8"):
             raise ValueError("args_json is not canonical JSON")
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, RecursionError) as exc:
         raise TranscriptCorruptionError(
             f"invalid args_json for transcript message {message_id!r} at {path}: {exc}"
         ) from exc

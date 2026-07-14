@@ -6,7 +6,8 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any, Literal, cast
 
 import httpx
-from langchain_core.messages import AIMessage, AIMessageChunk, UsageMetadata
+from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.messages.ai import UsageMetadata
 from openai import AsyncOpenAI
 from openai.types.responses.easy_input_message_param import EasyInputMessageParam
 from openai.types.responses.response_input_param import ResponseInputParam
