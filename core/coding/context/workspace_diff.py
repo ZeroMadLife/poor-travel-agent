@@ -23,6 +23,11 @@ IGNORED_DIRS = {
     ".next",
 }
 IGNORED_FILE_PATTERNS = (".env", ".DS_Store", ".pyc", ".so", ".dylib", ".lock")
+SAGE_RUNTIME_FILES = {
+    "usage.sqlite3",
+    "usage.sqlite3-shm",
+    "usage.sqlite3-wal",
+}
 MAX_FILE_SIZE = 256 * 1024  # 256KB - files larger than this are marked "truncated"
 MAX_DIFF_FILES = 50  # Maximum number of changed files to track
 # Small text files (<= this many bytes) have their before-content stored so a
@@ -194,6 +199,8 @@ class WorkspaceDiffTracker:
                 if fpath.is_symlink():
                     continue  # never follow symlinks
                 rel_path = str(fpath.relative_to(self.workspace_root))
+                if self._is_runtime_path(rel_path):
+                    continue
                 try:
                     stat = fpath.stat()
                 except OSError:
@@ -211,6 +218,12 @@ class WorkspaceDiffTracker:
                     snap.exists = False
                 snapshots[rel_path] = snap
         return snapshots
+
+    @staticmethod
+    def _is_runtime_path(rel_path: str) -> bool:
+        """Exclude Sage's mutable usage database without hiding user `.sage` config."""
+        path = Path(rel_path)
+        return len(path.parts) == 2 and path.parts[0] == ".sage" and path.name in SAGE_RUNTIME_FILES
 
     @staticmethod
     def _is_text(content: bytes) -> bool:

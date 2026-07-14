@@ -298,6 +298,13 @@ class Engine:
                 continue
 
             if kind == "retry":
+                if self._can_accept_plain_final(raw, tool_steps, protocol_retries):
+                    final = raw.strip()
+                    self._append_history(
+                        {"role": "assistant", "content": final, "created_at": now()}
+                    )
+                    yield event_to_dict(FinalEvent(run_id=self.run_id, content=final))
+                    return
                 notice = str(payload)
                 if protocol_retries >= self.MAX_PROTOCOL_RETRIES:
                     content = "模型连续返回了无法执行的操作格式，已停止本次运行。请重试，或换用更兼容的模型。"
@@ -319,6 +326,25 @@ class Engine:
         content = self._step_limit_summary(user_message, tool_steps)
         self._append_history({"role": "assistant", "content": content, "created_at": now()})
         yield event_to_dict(StepLimitEvent(run_id=self.run_id, content=content))
+
+    @staticmethod
+    def _can_accept_plain_final(raw: str, tool_steps: int, protocol_retries: int) -> bool:
+        """Accept a guarded plain-text final after a successful tool turn.
+
+        Some OpenAI-compatible providers drop only the final wrapper after a
+        tool result.  The first malformed response remains a retry so we never
+        mistake planning prose for an action.  A second plain response is safe
+        to surface only after at least one tool completed and one correction
+        has already been supplied.
+        """
+        text = raw.strip()
+        return (
+            bool(text)
+            and tool_steps > 0
+            and protocol_retries > 0
+            and "<tool" not in text.lower()
+            and "<final" not in text.lower()
+        )
 
     async def _execute_tool_payload(self, payload: Any) -> AsyncIterator[dict[str, Any]]:
         executor = self.tool_executor or ToolExecutor(

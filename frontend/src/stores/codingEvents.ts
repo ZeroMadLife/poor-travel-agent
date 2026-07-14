@@ -63,6 +63,7 @@ export type CodingEventState = {
   planPath: Ref<string>
   planReview: Ref<PlanReviewState | null>
   lastDiffInfo: Ref<DiffInfo | null>
+  diffInfoByRun: Ref<Record<string, DiffInfo>>
   memoryProposals: Ref<MemoryProposal[]>
   memoryProposalRefresh: Ref<number>
 }
@@ -120,11 +121,18 @@ export function applyCodingEvent(
     return {}
   }
   if (event.type === 'workspace_diff_ready') {
-    state.lastDiffInfo.value = {
+    const diffInfo = {
       run_id: event.run_id || '',
       changed_files: event.changed_files || [],
       file_count: event.file_count || 0,
       truncated: event.truncated || false,
+    }
+    state.lastDiffInfo.value = diffInfo
+    if (diffInfo.run_id) {
+      state.diffInfoByRun.value = {
+        ...state.diffInfoByRun.value,
+        [diffInfo.run_id]: diffInfo,
+      }
     }
     return {}
   }

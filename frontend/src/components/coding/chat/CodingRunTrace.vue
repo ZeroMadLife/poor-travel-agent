@@ -139,6 +139,17 @@ function statusIcon(status: string) {
   if (status === 'completed') return CheckCircle2
   return Circle
 }
+
+function commandPreview(step: CodingRunAuditStep) {
+  if (step.tool !== 'run_shell' || !step.arguments_preview) return ''
+  try {
+    const args = JSON.parse(step.arguments_preview) as Record<string, unknown>
+    const command = typeof args.command === 'string' ? args.command.trim() : ''
+    return command ? redactText(command).slice(0, 220) : ''
+  } catch {
+    return ''
+  }
+}
 </script>
 
 <template>
@@ -163,17 +174,8 @@ function statusIcon(status: string) {
             <span>{{ statusLabel(step.status) }}</span>
             <time v-if="step.duration_ms">{{ formatDuration(step.duration_ms) }}</time>
           </header>
+          <p v-if="commandPreview(step)" class="step-command"><Terminal :size="12" /><code>{{ commandPreview(step) }}</code></p>
           <p v-if="step.result_summary" class="step-result-summary">{{ step.result_summary }}</p>
-          <div class="step-previews">
-            <section v-if="step.arguments_preview" class="preview-panel">
-              <span>参数<span v-if="step.arguments_truncated"> · 已截断</span></span>
-              <pre>{{ step.arguments_preview }}</pre>
-            </section>
-            <section v-if="step.result_preview" class="preview-panel" :class="{ failed: step.status === 'error' }">
-              <span>结果<span v-if="step.result_truncated"> · 已截断</span></span>
-              <pre>{{ step.result_preview }}</pre>
-            </section>
-          </div>
         </li>
       </ol>
       <p v-if="steps.length === 0" class="trace-empty">尚无工具步骤</p>
@@ -198,7 +200,7 @@ function statusIcon(status: string) {
 .run-trace[open] .trace-chevron { transform:rotate(180deg); }
 .trace-content { border-top:1px solid var(--sage-border); }
 .trace-steps { display:grid; gap:0; margin:0; padding:0; list-style:none; }
-.trace-step { min-width:0; padding:11px 12px 12px; border-bottom:1px solid var(--sage-border); }
+.trace-step { min-width:0; padding:9px 12px 10px; border-bottom:1px solid var(--sage-border); }
 .trace-step:last-child { border-bottom:0; }
 .step-header { display:grid; grid-template-columns:16px auto minmax(0,1fr) auto auto; align-items:center; gap:6px; min-height:22px; color:var(--sage-text-muted); }
 .step-header strong { min-width:0; overflow:hidden; color:var(--sage-text-secondary); font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
@@ -206,16 +208,14 @@ function statusIcon(status: string) {
 .trace-step.completed .step-header > svg:first-child { color:var(--sage-success); }
 .trace-step.running .step-header > svg:first-child,.trace-step.waiting .step-header > svg:first-child { color:var(--sage-warning); }
 .trace-step.error .step-header > svg:first-child { color:var(--sage-danger); }
+.step-command { display:flex; align-items:flex-start; gap:5px; margin:5px 0 0 22px; color:var(--sage-text-muted); font-family:var(--sage-font-mono); font-size:10px; line-height:1.45; }
+.step-command svg { flex:none; margin-top:1px; }
+.step-command code { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .step-result-summary { margin:4px 0 0 22px; color:var(--sage-text-muted); font-size:10px; }
-.step-previews { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin:9px 0 0 22px; }
-.preview-panel { min-width:0; overflow:hidden; border:1px solid var(--sage-border); border-radius:var(--sage-radius-sm); background:var(--sage-code-bg); }
-.preview-panel.failed { border-color:color-mix(in srgb,var(--sage-danger) 40%,var(--sage-border)); }
-.preview-panel > span { display:block; padding:5px 8px; border-bottom:1px solid var(--sage-border); color:var(--sage-code-muted); font-family:var(--sage-font-mono); font-size:9px; }
-.preview-panel pre { max-height:220px; margin:0; padding:8px 9px; overflow:auto; color:var(--sage-code-text); font-family:var(--sage-font-mono); font-size:10.5px; line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere; }
 .trace-empty { margin:0; padding:12px; color:var(--sage-text-muted); font-size:11px; }
 .changed-files { display:flex; flex-wrap:wrap; gap:5px 10px; padding:9px 12px; border-top:1px solid var(--sage-border); color:var(--sage-text-muted); font-size:10px; }
 .changed-files strong { color:var(--sage-text-secondary); }
 .changed-files span { font-family:var(--sage-font-mono); overflow-wrap:anywhere; }
-@media (max-width:640px) { .run-trace summary { grid-template-columns:24px minmax(0,1fr) auto 18px; }.trace-files { display:none; }.step-previews { grid-template-columns:1fr; margin-left:0; }.step-header { grid-template-columns:16px auto minmax(0,1fr) auto; }.step-header time { display:none; } }
+@media (max-width:640px) { .run-trace summary { grid-template-columns:24px minmax(0,1fr) auto 18px; }.trace-files { display:none; }.step-header { grid-template-columns:16px auto minmax(0,1fr) auto; }.step-header time { display:none; } }
 @media (prefers-reduced-motion:reduce) { .trace-chevron { transition:none; } }
 </style>

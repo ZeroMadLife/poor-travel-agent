@@ -114,6 +114,7 @@ export type CodingSessionUiState = {
   planPath: string
   planReview: PlanReviewState | null
   lastDiffInfo: DiffInfo | null
+  diffInfoByRun: Record<string, DiffInfo>
   memoryProposals: MemoryProposal[]
   memoryProposalBusy: Record<string, boolean>
   memoryProposalError: string
@@ -162,6 +163,7 @@ function createSessionUiState(): CodingSessionUiState {
     planPath: '',
     planReview: null,
     lastDiffInfo: null,
+    diffInfoByRun: {},
     memoryProposals: [],
     memoryProposalBusy: {},
     memoryProposalError: '',
@@ -274,6 +276,7 @@ export const useCodingStore = defineStore('coding', () => {
   const planPath = sessionField('planPath')
   const planReview = sessionField('planReview')
   const lastDiffInfo = sessionField('lastDiffInfo')
+  const diffInfoByRun = sessionField('diffInfoByRun')
   const diffDrawerVisible = ref(false)
   const currentDiffData = ref<CodingRunDiff | null>(null)
   const codingSessions = ref<CodingSessionSummary[]>([])
@@ -473,6 +476,7 @@ export const useCodingStore = defineStore('coding', () => {
           planPath: toRef(state, 'planPath'),
           planReview: toRef(state, 'planReview'),
           lastDiffInfo: toRef(state, 'lastDiffInfo'),
+          diffInfoByRun: toRef(state, 'diffInfoByRun'),
           memoryProposals: toRef(state, 'memoryProposals'),
           memoryProposalRefresh: toRef(state, 'memoryProposalRefresh'),
         },
@@ -766,6 +770,7 @@ export const useCodingStore = defineStore('coding', () => {
         planPath,
         planReview,
         lastDiffInfo,
+        diffInfoByRun,
         memoryProposals,
         memoryProposalRefresh,
       },
@@ -1339,8 +1344,12 @@ export const useCodingStore = defineStore('coding', () => {
 
   function openDiffDrawer() {
     if (lastDiffInfo.value) {
-      void loadRunDiff(lastDiffInfo.value.run_id)
+      openRunDiff(lastDiffInfo.value.run_id)
     }
+  }
+
+  function openRunDiff(runId: string) {
+    if (runId) void loadRunDiff(runId)
   }
 
   function closeDiffDrawer() {
@@ -1539,6 +1548,7 @@ export const useCodingStore = defineStore('coding', () => {
     planPath,
     planReview,
     lastDiffInfo,
+    diffInfoByRun,
     diffDrawerVisible,
     currentDiffData,
     codingSessions,
@@ -1605,6 +1615,7 @@ export const useCodingStore = defineStore('coding', () => {
     loadRunDetail,
     loadRunDiff,
     openDiffDrawer,
+    openRunDiff,
     closeDiffDrawer,
     loadGitStatus,
     loadFiles,

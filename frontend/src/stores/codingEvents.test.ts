@@ -25,6 +25,7 @@ function state() {
     planPath: ref(''),
     planReview: ref<PlanReviewState | null>(null),
     lastDiffInfo: ref<DiffInfo | null>(null),
+    diffInfoByRun: ref<Record<string, DiffInfo>>({}),
     memoryProposals: ref([]),
     memoryProposalRefresh: ref(0),
   }
@@ -566,6 +567,7 @@ describe('codingEvents', () => {
       file_count: 2,
       truncated: false,
     })
+    expect(current.diffInfoByRun.value.run_abc).toEqual(current.lastDiffInfo.value)
   })
 
   it('handles workspace_diff_ready with missing optional fields', () => {
@@ -585,5 +587,6 @@ describe('codingEvents', () => {
       file_count: 0,
       truncated: false,
     })
+    expect(current.diffInfoByRun.value.run_xyz).toEqual(current.lastDiffInfo.value)
   })
 })

@@ -1,18 +1,27 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
-import { Sparkles, UserRound } from 'lucide-vue-next'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { GitCompareArrows, Sparkles, UserRound } from 'lucide-vue-next'
 import type { ChatMessage } from '../../../stores/codingEvents'
 import CodingExecutionLog from './CodingExecutionLog.vue'
 import CodingToolActivity from './CodingToolActivity.vue'
 
-withDefaults(defineProps<{
+const props = withDefaults(defineProps<{
   message: ChatMessage
   renderedContent: string
   showProcess?: boolean
-}>(), { showProcess: true })
+  diffFileCount?: number
+}>(), { showProcess: true, diffFileCount: 0 })
+
+const emit = defineEmits<{ viewDiff: [] }>()
 
 const root = ref<HTMLElement | null>(null)
 let copyTimer: ReturnType<typeof setTimeout> | undefined
+const hasProcess = computed(() => props.showProcess && Boolean(
+  props.message.activities?.length || props.message.tools?.length,
+))
+const shouldRender = computed(() => (
+  props.message.role === 'user' || Boolean(props.message.content) || hasProcess.value
+))
 
 async function copyCode(event: Event) {
   const button = event.target instanceof HTMLElement ? event.target.closest<HTMLButtonElement>('[data-copy-code]') : null
@@ -43,6 +52,7 @@ onBeforeUnmount(() => {
 
 <template>
   <section
+    v-if="shouldRender"
     :class="['message-turn', message.role]"
     :data-turn-id="message.id"
     :data-run-id="message.run_id"
@@ -58,7 +68,17 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="message-body">
-      <div v-if="message.role === 'user' || message.content" class="message-author">{{ message.role === 'assistant' ? 'Sage' : '你' }}</div>
+      <div v-if="message.role === 'user' || message.content" class="message-meta">
+        <div class="message-author">{{ message.role === 'assistant' ? 'Sage' : '你' }}</div>
+        <button
+          v-if="message.role === 'assistant' && diffFileCount > 0"
+          class="message-diff-button"
+          type="button"
+          :title="`查看本轮 ${diffFileCount} 个变更文件`"
+          :aria-label="`查看本轮 ${diffFileCount} 个变更文件`"
+          @click="emit('viewDiff')"
+        ><GitCompareArrows :size="14" /></button>
+      </div>
       <CodingExecutionLog
         v-if="showProcess && message.activities && message.activities.length > 0"
         :activities="message.activities"
@@ -121,11 +141,38 @@ onBeforeUnmount(() => {
   flex-direction: column;
 }
 
+.message-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .message-author {
   margin: 2px 0 8px;
   color: var(--sage-text-muted);
   font-size: 11px;
   font-weight: 700;
+}
+
+.message-diff-button {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  margin: 0 0 5px auto;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--sage-radius-sm);
+  color: var(--sage-text-muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.message-diff-button:hover {
+  border-color: var(--sage-border);
+  color: var(--sage-success);
+  background: var(--sage-surface-muted);
 }
 
 .activity-row {

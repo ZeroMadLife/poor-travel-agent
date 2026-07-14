@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 import hljs from 'highlight.js'
 import {
   Check,
@@ -21,10 +21,7 @@ const props = defineProps<{
   isThinking: boolean
 }>()
 
-const expandedTools = ref<Set<number>>(new Set(
-  props.tools.map((tool, index) => tool.status === 'running' ? index : -1).filter((index) => index >= 0),
-))
-const touchedTools = ref<Set<number>>(new Set())
+const expandedTools = ref<Set<number>>(new Set())
 const expandedResults = ref<Set<number>>(new Set())
 const copiedPanel = ref('')
 let copyTimer: ReturnType<typeof setTimeout> | undefined
@@ -32,17 +29,6 @@ let copyTimer: ReturnType<typeof setTimeout> | undefined
 const doneCount = computed(() => props.tools.filter((tool) => tool.status === 'done').length)
 const errorCount = computed(() => props.tools.filter((tool) => tool.status === 'error').length)
 const runningCount = computed(() => props.tools.filter((tool) => tool.status === 'running').length)
-
-watch(
-  () => props.tools.map((tool) => tool.status),
-  (statuses) => {
-    const next = new Set(expandedTools.value)
-    statuses.forEach((status, index) => {
-      if (status === 'running' && !touchedTools.value.has(index)) next.add(index)
-    })
-    expandedTools.value = next
-  },
-)
 
 onBeforeUnmount(() => {
   if (copyTimer) clearTimeout(copyTimer)
@@ -53,7 +39,6 @@ function toggleTool(index: number) {
   if (next.has(index)) next.delete(index)
   else next.add(index)
   expandedTools.value = next
-  touchedTools.value = new Set(touchedTools.value).add(index)
 }
 
 function toggleResult(index: number) {

@@ -55,6 +55,7 @@ describe('CodingRunTrace', () => {
     expect(wrapper.findAll('.trace-step')).toHaveLength(2)
     expect(wrapper.text()).toContain('退出码 0')
     expect(wrapper.text()).toContain('src/app.ts')
+    expect(wrapper.text()).not.toContain('12 passed')
     expect(wrapper.findAll('.trace-step details')).toHaveLength(0)
   })
 

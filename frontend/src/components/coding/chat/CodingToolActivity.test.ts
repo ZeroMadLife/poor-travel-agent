@@ -62,6 +62,11 @@ it('renders human readable tool action summaries with collapsed raw arguments', 
   expect(wrapper.text()).toContain('pytest -q')
   expect(wrapper.text()).toContain('修改 src/app.py')
   expect(wrapper.findAll('.tool-row')[0].attributes('aria-expanded')).toBe('false')
+  expect(wrapper.findAll('.tool-row')[1].attributes('aria-expanded')).toBe('false')
+  expect(wrapper.findAll('.code-panel')).toHaveLength(0)
+
+  await wrapper.findAll('.tool-row')[1].trigger('click')
+
   expect(wrapper.findAll('.tool-row')[1].attributes('aria-expanded')).toBe('true')
   expect(wrapper.findAll('.code-panel')).toHaveLength(1)
 })
@@ -122,6 +127,7 @@ it('copies the original parameter and result payloads from icon controls', async
     },
   })
 
+  await wrapper.get('.tool-row').trigger('click')
   await wrapper.get('button[aria-label="复制参数"]').trigger('click')
   await wrapper.get('button[aria-label="复制结果"]').trigger('click')
 

@@ -2,17 +2,19 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import SageThinkingCharacter, { type SageCharacterState } from './SageThinkingCharacter.vue'
 
-withDefaults(defineProps<{
+const props = withDefaults(defineProps<{
   phase: string
   state?: SageCharacterState
-}>(), { state: 'thinking' })
+  title?: string
+  showElapsed?: boolean
+}>(), { state: 'thinking', title: '正在思考', showElapsed: true })
 
 const elapsedSeconds = ref(0)
 const elapsedLabel = computed(() => `${elapsedSeconds.value}s`)
 let timer: ReturnType<typeof setInterval> | undefined
 
 onMounted(() => {
-  timer = setInterval(() => { elapsedSeconds.value += 1 }, 1_000)
+  if (props.showElapsed) timer = setInterval(() => { elapsedSeconds.value += 1 }, 1_000)
 })
 
 onBeforeUnmount(() => {
@@ -25,7 +27,7 @@ onBeforeUnmount(() => {
     <span class="thinking-sheen" aria-hidden="true"></span>
     <SageThinkingCharacter :state="state" :phase="phase" />
     <span class="thinking-copy">
-      <span class="thinking-title"><strong>正在思考</strong><span class="thinking-time">{{ elapsedLabel }}</span></span>
+      <span class="thinking-title"><strong>{{ title }}</strong><span v-if="showElapsed" class="thinking-time">{{ elapsedLabel }}</span></span>
       <span class="thinking-phase">{{ phase }}</span>
     </span>
   </div>

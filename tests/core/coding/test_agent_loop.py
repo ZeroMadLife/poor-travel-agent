@@ -109,6 +109,26 @@ async def test_agent_loop_keeps_protocol_corrections_out_of_session_history(tmp_
     )
 
 
+async def test_agent_loop_accepts_plain_final_after_tool_protocol_recovery(tmp_path: Path) -> None:
+    """A provider that drops only the final tag can still finish a tool turn."""
+    (tmp_path / "README.md").write_text("# Sage\n", encoding="utf-8")
+    engine = _engine(
+        tmp_path,
+        [
+            '<tool>{"name":"read_file","args":{"path":"README.md"}}</tool>',
+            "README says Sage.",
+            "README says Sage.",
+        ],
+    )
+
+    events = [event async for event in engine.run_turn("read README")]
+
+    assert [event["type"] for event in events if event["type"] == "retry"] == ["retry"]
+    assert events[-1]["type"] == "final"
+    assert events[-1]["content"] == "README says Sage."
+    assert engine.history[-1]["content"] == "README says Sage."
+
+
 async def test_agent_loop_stops_after_bounded_protocol_retries(tmp_path: Path) -> None:
     """Repeated malformed model output ends in a clear final response, not a long retry loop."""
 

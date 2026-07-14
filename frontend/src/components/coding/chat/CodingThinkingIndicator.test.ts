@@ -48,3 +48,14 @@ it('shows public elapsed time without rendering internal reasoning text', async 
   expect(wrapper.text()).not.toContain('chain-of-thought')
   wrapper.unmount()
 })
+
+it('renders the completed character state without an elapsed timer', () => {
+  const wrapper = mount(CodingThinkingIndicator, {
+    props: { phase: '整理本轮结果', state: 'done', title: '想到了', showElapsed: false },
+    global: { stubs },
+  })
+
+  expect(wrapper.text()).toContain('想到了')
+  expect(wrapper.find('.sage-character').attributes('data-state')).toBe('done')
+  expect(wrapper.find('.thinking-time').exists()).toBe(false)
+})

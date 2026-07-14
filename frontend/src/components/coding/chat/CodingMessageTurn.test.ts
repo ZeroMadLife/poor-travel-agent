@@ -87,4 +87,30 @@ describe('CodingMessageTurn', () => {
 
     expect(wrapper.get('.message-body').findComponent({ name: 'CodingExecutionLog' }).exists()).toBe(true)
   })
+
+  it('does not render an empty assistant shell before any visible response exists', () => {
+    const wrapper = mount(CodingMessageTurn, {
+      props: {
+        message: { role: 'assistant', content: '' },
+        renderedContent: '',
+        showProcess: false,
+      },
+    })
+
+    expect(wrapper.find('.message-turn').exists()).toBe(false)
+  })
+
+  it('emits a run diff request from the assistant response header', async () => {
+    const wrapper = mount(CodingMessageTurn, {
+      props: {
+        message: { role: 'assistant', content: '完成' },
+        renderedContent: '<p>完成</p>',
+        diffFileCount: 2,
+      },
+    })
+
+    await wrapper.get('[aria-label="查看本轮 2 个变更文件"]').trigger('click')
+
+    expect(wrapper.emitted('viewDiff')).toHaveLength(1)
+  })
 })

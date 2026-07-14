@@ -107,6 +107,24 @@ def test_ignored_secrets_not_in_diff(tmp_path: Path) -> None:
     assert ".coding/state.json" not in paths
 
 
+def test_sage_usage_database_not_in_diff_but_sage_config_is(tmp_path: Path) -> None:
+    """Runtime usage writes must not be reported as a source-code change."""
+    sage_dir = tmp_path / ".sage"
+    sage_dir.mkdir()
+    (sage_dir / "usage.sqlite3").write_bytes(b"before")
+    (sage_dir / "config.toml").write_text("[model]\nname = 'sage'\n", encoding="utf-8")
+    tracker = WorkspaceDiffTracker(tmp_path)
+    tracker.snapshot_before_run()
+
+    (sage_dir / "usage.sqlite3").write_bytes(b"after")
+    (sage_dir / "usage.sqlite3-wal").write_bytes(b"journal")
+    (sage_dir / "config.toml").write_text("[model]\nname = 'updated'\n", encoding="utf-8")
+
+    diff = tracker.snapshot_after_run("run_usage")
+
+    assert [change.path for change in diff.changed_files] == [".sage/config.toml"]
+
+
 def test_binary_file_marked_binary(tmp_path: Path) -> None:
     """A file with null bytes is marked binary and has no diff content."""
     (tmp_path / "README.md").write_text("# Sage\n", encoding="utf-8")
