@@ -52,6 +52,7 @@ def test_production_cloud_settings_accept_distinct_configured_secrets() -> None:
         github_oauth_client_secret="github-client-secret-that-is-long-enough-value",
         github_oauth_transaction_secret="transaction-secret-that-is-long-enough",
         github_token_encryption_secret="token-secret-that-is-long-enough-value",
+        model_provider_encryption_secret="provider-secret-that-is-long-enough-value",
         cloud_frontend_url="https://sage.example",
         github_oauth_redirect_uri="https://sage.example/api/v1/cloud/auth/github/callback",
     )
