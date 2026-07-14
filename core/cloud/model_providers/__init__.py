@@ -6,12 +6,16 @@ from core.cloud.model_providers.models import (
     CloudModelDefault,
     CloudModelProvider,
     ModelInput,
+    ProviderDestination,
     RuntimeProviderCredential,
 )
 from core.cloud.model_providers.network import (
+    ProviderPinnedTransport,
     ProviderProbe,
     ProviderProbeError,
     assert_provider_destination_allowed,
+    create_provider_http_client,
+    resolve_provider_destination,
     validate_provider_base_url,
 )
 from core.cloud.model_providers.repository import ModelProviderRepository
@@ -30,10 +34,14 @@ __all__ = [
     "CompositeModelFactory",
     "ModelInput",
     "ModelProviderRepository",
+    "ProviderDestination",
+    "ProviderPinnedTransport",
     "ProviderProbe",
     "ProviderProbeError",
     "RuntimeProviderCredential",
     "assert_provider_destination_allowed",
+    "create_provider_http_client",
     "parse_account_model_id",
+    "resolve_provider_destination",
     "validate_provider_base_url",
 ]

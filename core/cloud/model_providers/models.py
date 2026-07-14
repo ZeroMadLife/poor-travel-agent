@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
 
@@ -49,12 +49,20 @@ class CloudModelDefault:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderDestination:
+    base_url: str
+    hostname: str
+    addresses: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeProviderCredential:
     provider_id: str
     api_mode: ApiMode
     base_url: str
-    api_key: str
+    api_key: str = field(repr=False)
     models: tuple[CloudModel, ...]
+    destination: ProviderDestination | None = None
 
 
 @dataclass(frozen=True, slots=True)

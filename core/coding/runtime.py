@@ -99,6 +99,7 @@ class CodingRuntime:
         reasoning_mode: str = "off",
         model_reasoning_modes: Mapping[str, tuple[str, ...] | list[str]] | None = None,
         usage_store: UsageStore | None = None,
+        owner_user_id: str | None = None,
     ) -> None:
         self.session_id = session_id
         self.workspace = WorkspaceContext(root=Path(workspace_root))
@@ -131,6 +132,11 @@ class CodingRuntime:
         )
         self.session["id"] = session_id
         self.session["workspace_root"] = str(self.workspace.root)
+        persisted_owner = str(self.session.get("owner_user_id", "")).strip()
+        requested_owner = (owner_user_id or "").strip()
+        self.owner_user_id = persisted_owner or requested_owner or None
+        if persisted_owner and requested_owner and persisted_owner != requested_owner:
+            raise ValueError("coding session owner does not match persisted state")
         self.session.setdefault("history", [])
         self.session.setdefault("runtime_mode", {"mode": "default"})
         self.session.setdefault("todos", {"next_id": 1, "items": []})
@@ -1230,6 +1236,19 @@ class CodingRuntime:
         self.session["permission_mode"] = self.permission_mode
         self.session["model_spec"] = self.model_spec
         self.session["reasoning_mode"] = self.reasoning_mode
+        if self.owner_user_id is not None:
+            self.session["owner_user_id"] = self.owner_user_id
+
+    def bind_owner(self, owner_user_id: str) -> None:
+        """Persist an owner when an authenticated account adopts a local session."""
+        normalized = owner_user_id.strip()
+        if not normalized:
+            raise ValueError("coding session owner is required")
+        if self.owner_user_id is not None and self.owner_user_id != normalized:
+            raise ValueError("coding session belongs to another account")
+        if self.owner_user_id is None:
+            self.owner_user_id = normalized
+            self._save_session()
 
     def _reasoning_modes_for(self, model_spec: str) -> tuple[str, ...]:
         return self.model_reasoning_modes.get(model_spec, ())

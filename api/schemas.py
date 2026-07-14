@@ -2,7 +2,7 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from models.itinerary import Itinerary
 
@@ -629,11 +629,11 @@ class CloudModelProviderCreateRequest(BaseModel):
         "openai_chat_completions", "openai_responses", "anthropic_messages"
     ]
     base_url: str = Field(min_length=1, max_length=500)
-    api_key: str = Field(min_length=1, max_length=10_000)
+    api_key: SecretStr
     models: list[CloudModelInput] = Field(min_length=1, max_length=256)
     default_model_id: str | None = Field(default=None, max_length=255)
 
-    @field_validator("name", "base_url", "api_key", "default_model_id")
+    @field_validator("name", "base_url", "default_model_id")
     @classmethod
     def strip_provider_create_values(cls, value: str | None) -> str | None:
         return value.strip() if value is not None else None
@@ -647,10 +647,10 @@ class CloudModelProviderUpdateRequest(BaseModel):
         "openai_chat_completions", "openai_responses", "anthropic_messages"
     ] | None = None
     base_url: str | None = Field(default=None, min_length=1, max_length=500)
-    api_key: str | None = Field(default=None, min_length=1, max_length=10_000)
+    api_key: SecretStr | None = None
     models: list[CloudModelInput] | None = Field(default=None, min_length=1, max_length=256)
 
-    @field_validator("name", "base_url", "api_key")
+    @field_validator("name", "base_url")
     @classmethod
     def strip_provider_update_values(cls, value: str | None) -> str | None:
         return value.strip() if value is not None else None

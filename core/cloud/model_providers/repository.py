@@ -8,6 +8,7 @@ from typing import cast
 from uuid import uuid4
 
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.cloud.model_providers.models import (
@@ -61,10 +62,14 @@ class ModelProviderRepository:
             raise ValueError("API key is required")
         _validate_api_mode(api_mode)
         async with self._session_factory() as session:
+            normalized_name = _required(name, "provider name")
+            await _ensure_provider_name_available(
+                session, owner_user_id=owner_user_id, name=normalized_name
+            )
             record = CloudModelProviderRecord(
                 id=provider_id,
                 owner_user_id=owner_user_id,
-                name=_required(name, "provider name"),
+                name=normalized_name,
                 api_mode=api_mode,
                 base_url=base_url,
                 encrypted_api_key=self._cipher.encrypt(
@@ -80,14 +85,25 @@ class ModelProviderRepository:
                 selected = _model_record_by_model_id(model_records, default_model_id)
                 if selected is None:
                     raise ValueError("default model is not configured under this Provider")
-                session.add(
-                    CloudModelPreferenceRecord(
-                        user_id=owner_user_id,
-                        provider_id=provider_id,
-                        model_record_id=selected.id,
-                    )
+                preference = await session.get(
+                    CloudModelPreferenceRecord, owner_user_id
                 )
-            await session.commit()
+                if preference is None:
+                    session.add(
+                        CloudModelPreferenceRecord(
+                            user_id=owner_user_id,
+                            provider_id=provider_id,
+                            model_record_id=selected.id,
+                        )
+                    )
+                else:
+                    preference.provider_id = provider_id
+                    preference.model_record_id = selected.id
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                raise _bounded_integrity_error(exc) from exc
             return _to_provider(record, model_records)
 
     async def list_providers(self, owner_user_id: str) -> list[CloudModelProvider]:
@@ -125,7 +141,14 @@ class ModelProviderRepository:
                 return None
             connection_changed = False
             if name is not None:
-                record.name = _required(name, "provider name")
+                normalized_name = _required(name, "provider name")
+                await _ensure_provider_name_available(
+                    session,
+                    owner_user_id=owner_user_id,
+                    name=normalized_name,
+                    exclude_provider_id=provider_id,
+                )
+                record.name = normalized_name
             if api_mode is not None:
                 _validate_api_mode(api_mode)
                 connection_changed = connection_changed or api_mode != record.api_mode
@@ -141,6 +164,7 @@ class ModelProviderRepository:
                 record.key_hint = _key_hint(normalized_key)
                 connection_changed = True
             if models is not None:
+                requested = _validated_model_inputs(models)
                 preference = await session.scalar(
                     select(CloudModelPreferenceRecord).where(
                         CloudModelPreferenceRecord.user_id == owner_user_id,
@@ -154,36 +178,44 @@ class ModelProviderRepository:
                         )
                     )
                 ).all()
+                existing_by_model_id = {item.model_id: item for item in existing_models}
                 if preference is not None:
                     selected = next(
                         (item for item in existing_models if item.id == preference.model_record_id),
                         None,
                     )
-                    requested_ids = {item.model_id for item in models}
-                    if selected is not None and selected.model_id not in requested_ids:
+                    if selected is not None and selected.model_id not in requested:
                         raise ValueError("default model must be changed before it is removed")
-                replacement_models = _new_model_records(provider_id, models)
-                session.add_all(replacement_models)
-                await session.flush()
-                if preference is not None:
-                    selected_model_id = next(
-                        item.model_id for item in existing_models if item.id == preference.model_record_id
-                    )
-                    selected = cast(
-                        CloudModelRecord,
-                        _model_record_by_model_id(replacement_models, selected_model_id),
-                    )
-                    preference.model_record_id = selected.id
-                    await session.flush()
-                existing_ids = [item.id for item in existing_models]
-                if existing_ids:
+                for model_id, value in requested.items():
+                    existing = existing_by_model_id.get(model_id)
+                    if existing is None:
+                        session.add(
+                            _new_model_record(provider_id, value)
+                        )
+                        continue
+                    existing.display_name = value.display_name.strip() or model_id
+                    existing.context_window_tokens = value.context_window_tokens
+                    existing.output_reserve_tokens = value.output_reserve_tokens
+                    existing.reasoning_supported = value.reasoning_supported
+                removed_ids = [
+                    item.id
+                    for item in existing_models
+                    if item.model_id not in requested
+                ]
+                if removed_ids:
                     await session.execute(
-                        delete(CloudModelRecord).where(CloudModelRecord.id.in_(existing_ids))
+                        delete(CloudModelRecord).where(
+                            CloudModelRecord.id.in_(removed_ids)
+                        )
                     )
             if connection_changed:
                 record.status = "untested"
                 record.last_tested_at = None
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                raise _bounded_integrity_error(exc) from exc
             model_records = list(
                 (
                     await session.scalars(
@@ -316,6 +348,33 @@ async def _owned_provider_record(
     )
 
 
+async def _ensure_provider_name_available(
+    session: AsyncSession,
+    *,
+    owner_user_id: str,
+    name: str,
+    exclude_provider_id: str | None = None,
+) -> None:
+    statement = select(CloudModelProviderRecord.id).where(
+        CloudModelProviderRecord.owner_user_id == owner_user_id,
+        CloudModelProviderRecord.name == name,
+    )
+    if exclude_provider_id is not None:
+        statement = statement.where(CloudModelProviderRecord.id != exclude_provider_id)
+    if await session.scalar(statement) is not None:
+        raise ValueError("Provider name already exists")
+
+
+def _bounded_integrity_error(exc: IntegrityError) -> ValueError:
+    constraint_name = getattr(getattr(exc.orig, "diag", None), "constraint_name", "")
+    if constraint_name == "cloud_model_provider_owner_name_key" or (
+        "cloud_model_providers.owner_user_id, cloud_model_providers.name"
+        in str(exc.orig)
+    ):
+        return ValueError("Provider name already exists")
+    return ValueError("Provider configuration conflicts with an existing record")
+
+
 async def _provider_with_models(
     session: AsyncSession, record: CloudModelProviderRecord
 ) -> CloudModelProvider:
@@ -332,10 +391,19 @@ async def _provider_with_models(
 def _new_model_records(
     provider_id: str, models: Sequence[ModelInput]
 ) -> list[CloudModelRecord]:
+    return [
+        _new_model_record(provider_id, value)
+        for value in _validated_model_inputs(models).values()
+    ]
+
+
+def _validated_model_inputs(
+    models: Sequence[ModelInput],
+) -> dict[str, ModelInput]:
     if not models:
         raise ValueError("at least one model is required")
     seen: set[str] = set()
-    records: list[CloudModelRecord] = []
+    values: dict[str, ModelInput] = {}
     for value in models:
         model_id = _required(value.model_id, "model id")
         if model_id in seen:
@@ -352,18 +420,21 @@ def _new_model_records(
             and value.output_reserve_tokens >= value.context_window_tokens
         ):
             raise ValueError("output reserve must be less than context window")
-        records.append(
-            CloudModelRecord(
-                id=str(uuid4()),
-                provider_id=provider_id,
-                model_id=model_id,
-                display_name=value.display_name.strip() or model_id,
-                context_window_tokens=value.context_window_tokens,
-                output_reserve_tokens=value.output_reserve_tokens,
-                reasoning_supported=value.reasoning_supported,
-            )
-        )
-    return records
+        values[model_id] = value
+    return values
+
+
+def _new_model_record(provider_id: str, value: ModelInput) -> CloudModelRecord:
+    model_id = _required(value.model_id, "model id")
+    return CloudModelRecord(
+        id=str(uuid4()),
+        provider_id=provider_id,
+        model_id=model_id,
+        display_name=value.display_name.strip() or model_id,
+        context_window_tokens=value.context_window_tokens,
+        output_reserve_tokens=value.output_reserve_tokens,
+        reasoning_supported=value.reasoning_supported,
+    )
 
 
 def _to_provider(

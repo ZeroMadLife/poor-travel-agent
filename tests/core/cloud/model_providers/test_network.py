@@ -6,6 +6,8 @@ import httpx
 import pytest
 
 from core.cloud.model_providers import (
+    ProviderDestination,
+    ProviderPinnedTransport,
     ProviderProbe,
     ProviderProbeError,
     RuntimeProviderCredential,
@@ -58,7 +60,9 @@ async def test_probe_uses_auth_header_without_leaking_upstream_body() -> None:
     probe = ProviderProbe(
         app_env="production",
         resolver=_public_resolver,
-        client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        client_factory=lambda _destination: httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ),
     )
 
     with pytest.raises(ProviderProbeError) as error:
@@ -78,7 +82,9 @@ async def test_probe_discovers_bounded_openai_and_anthropic_model_catalogs() -> 
     probe = ProviderProbe(
         app_env="production",
         resolver=_public_resolver,
-        client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        client_factory=lambda _destination: httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ),
     )
 
     openai_models = await probe.discover(_credential())
@@ -105,10 +111,43 @@ async def test_probe_rejects_dns_resolution_to_private_address_before_http() -> 
     probe = ProviderProbe(
         app_env="production",
         resolver=private_resolver,
-        client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        client_factory=lambda _destination: httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ),
     )
 
     with pytest.raises(ProviderProbeError, match="not allowed"):
         await probe.test(_credential())
 
     assert called is False
+
+
+async def test_pinned_transport_connects_to_validated_ip_with_original_host_and_sni() -> None:
+    seen: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"data": []})
+
+    destination = ProviderDestination(
+        base_url="https://api.example.com/v1",
+        hostname="api.example.com",
+        addresses=("93.184.216.34",),
+    )
+    transport = ProviderPinnedTransport(
+        destination,
+        inner=httpx.MockTransport(handler),
+    )
+    async with httpx.AsyncClient(transport=transport, trust_env=False) as client:
+        response = await client.get("https://api.example.com/v1/models")
+
+    assert response.status_code == 200
+    assert seen[0].url.host == "93.184.216.34"
+    assert seen[0].headers["host"] == "api.example.com"
+    assert seen[0].extensions["sni_hostname"] == "api.example.com"
+
+
+def test_runtime_credential_repr_never_contains_api_key() -> None:
+    credential = _credential()
+
+    assert "top-secret-key" not in repr(credential)

@@ -68,7 +68,7 @@ async def create_model_provider(
             name=payload.name,
             api_mode=payload.api_mode,
             base_url=base_url,
-            api_key=payload.api_key,
+            api_key=_validated_api_key(payload.api_key.get_secret_value()),
             models=[_model_input(item) for item in payload.models],
             default_model_id=payload.default_model_id,
         )
@@ -94,7 +94,11 @@ async def update_model_provider(
             name=payload.name,
             api_mode=payload.api_mode,
             base_url=base_url,
-            api_key=payload.api_key,
+            api_key=(
+                _validated_api_key(payload.api_key.get_secret_value())
+                if payload.api_key is not None
+                else None
+            ),
             models=(
                 [_model_input(item) for item in payload.models]
                 if payload.models is not None
@@ -204,6 +208,13 @@ def _validated_base_url(request: Request, base_url: str) -> str:
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _validated_api_key(value: str) -> str:
+    normalized = value.strip()
+    if not normalized or len(normalized) > 10_000:
+        raise HTTPException(status_code=422, detail="API key is invalid")
+    return normalized
 
 
 def _model_input(value: CloudModelInput) -> ModelInput:

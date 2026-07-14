@@ -12,9 +12,11 @@ from pathlib import Path
 from typing import Any, Literal, cast
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Query, Request, Response, WebSocket
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, WebSocket
+from starlette.requests import HTTPConnection
 from starlette.websockets import WebSocketDisconnect
 
+from api.cloud_dependencies import SESSION_COOKIE
 from api.cloud_model_context import (
     combined_capabilities,
     combined_catalog,
@@ -70,6 +72,7 @@ from api.schemas import (
     PermissionModeSwitchRequest,
     UserMessage,
 )
+from core.cloud.auth.repository import CloudRepository
 from core.coding.context import ContextBusyError
 from core.coding.persistence import (
     CodingSessionStore,
@@ -83,8 +86,41 @@ from core.coding.provider_settings import SageProviderSettings, SageProviderSett
 from core.coding.run_coordinator import ActiveRunConflictError, RunEvent
 from core.coding.runtime import CodingRuntime
 
-router = APIRouter()
 _SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+
+
+async def _enforce_coding_session_owner(connection: HTTPConnection) -> None:
+    session_id = str(
+        connection.path_params.get("session_id", "")
+        or connection.query_params.get("session_id", "")
+    )
+    if not session_id:
+        return
+    sessions: dict[str, CodingRuntime] = connection.app.state.coding_sessions
+    runtime = sessions.get(session_id)
+    owner_user_id = runtime.owner_user_id if runtime is not None else None
+    if owner_user_id is None:
+        store = CodingSessionStore(
+            Path(connection.app.state.coding_storage_root) / "sessions"
+        )
+        try:
+            persisted = store.load(session_id)
+        except (FileNotFoundError, ValueError):
+            return
+        owner_user_id = str(persisted.get("owner_user_id", "")).strip() or None
+    if owner_user_id is None:
+        return
+    cloud = getattr(connection.app.state, "cloud_repository", None)
+    user = (
+        await cloud.authenticated_user(connection.cookies.get(SESSION_COOKIE, ""))
+        if isinstance(cloud, CloudRepository)
+        else None
+    )
+    if user is None or user.user_id != owner_user_id:
+        raise HTTPException(status_code=404, detail=f"Unknown coding session: {session_id}")
+
+
+router = APIRouter(dependencies=[Depends(_enforce_coding_session_owner)])
 
 
 def _valid_session_id(session_id: str) -> bool:
@@ -238,6 +274,7 @@ async def create_coding_session(
         reasoning_mode="off",
         model_reasoning_modes=reasoning_modes,
         usage_store=request.app.state.coding_usage_store,
+        owner_user_id=account.user_id if account is not None else None,
     )
     sessions: dict[str, CodingRuntime] = request.app.state.coding_sessions
     sessions[session_id] = runtime
@@ -257,12 +294,19 @@ async def list_coding_sessions(
     """Return local coding-agent session history."""
     storage_root = Path(request.app.state.coding_storage_root)
     store = CodingSessionStore(storage_root / "sessions")
-    return CodingSessionsResponse(
-        sessions=[
-            CodingSessionSummary(**item)
-            for item in store.list_sessions(include_archived=include_archived)
-        ]
-    )
+    account = await load_account_model_context(request)
+    current_user_id = account.user_id if account is not None else None
+    visible: list[CodingSessionSummary] = []
+    for item in store.list_sessions(include_archived=include_archived):
+        try:
+            state = store.load(str(item["session_id"]))
+        except FileNotFoundError:
+            continue
+        owner_user_id = str(state.get("owner_user_id", "")).strip() or None
+        if owner_user_id is not None and owner_user_id != current_user_id:
+            continue
+        visible.append(CodingSessionSummary(**item))
+    return CodingSessionsResponse(sessions=visible)
 
 
 @router.patch(
@@ -936,8 +980,10 @@ async def list_coding_models(
         reasoning_mode = runtime.reasoning_mode
     elif len(request.app.state.coding_sessions) == 1:
         runtime = next(iter(request.app.state.coding_sessions.values()))
-        current = runtime.model_spec
-        reasoning_mode = runtime.reasoning_mode
+        current_user_id = account.user_id if account is not None else None
+        if runtime.owner_user_id is None or runtime.owner_user_id == current_user_id:
+            current = runtime.model_spec
+            reasoning_mode = runtime.reasoning_mode
     return CodingModelsResponse(
         models=models,
         current=current,
@@ -954,6 +1000,8 @@ async def switch_coding_model(
     """Switch the model used by a coding session."""
     runtime = _require_runtime(request, session_id)
     account = await load_account_model_context(request, include_credentials=True)
+    if account is not None:
+        runtime.bind_owner(account.user_id)
     catalog = combined_catalog(request, account)
     allowed = _catalog_model_ids(catalog)
     if payload.model_id not in allowed:

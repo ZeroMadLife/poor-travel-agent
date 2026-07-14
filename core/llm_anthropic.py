@@ -3,6 +3,8 @@
 import os
 from typing import Any
 
+import httpx
+from anthropic import AsyncAnthropic
 from langchain_anthropic import ChatAnthropic
 from pydantic import SecretStr
 
@@ -14,6 +16,7 @@ def create_anthropic_llm(
     api_key_env: str | None = None,
     api_key: str | None = None,
     base_url: str | None = None,
+    http_async_client: httpx.AsyncClient | None = None,
     **kwargs: Any,
 ) -> ChatAnthropic:
     provider, separator, model = model_spec.partition(":")
@@ -35,13 +38,21 @@ def create_anthropic_llm(
         if not resolved_model:
             raise ValueError(f"LLM provider '{provider}' 缺少模型名称")
         kwargs.setdefault("stream_usage", True)
-        return ChatAnthropic(
+        chat = ChatAnthropic(
             api_key=SecretStr(resolved_api_key),
             base_url=base_url,
             model_name=resolved_model,
             temperature=temperature,
             **kwargs,
         )
+        if http_async_client is not None:
+            chat.__dict__["_async_client"] = AsyncAnthropic(
+                api_key=resolved_api_key,
+                base_url=base_url,
+                http_client=http_async_client,
+                max_retries=0,
+            )
+        return chat
     if provider == "deepseek_anthropic":
         api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
         if not api_key:

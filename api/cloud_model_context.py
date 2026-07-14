@@ -13,6 +13,7 @@ from core.cloud.model_providers import (
     AccountModelFactory,
     CompositeModelFactory,
     ModelProviderRepository,
+    ProviderProbe,
 )
 from core.coding.context import ModelCapabilityRegistry
 
@@ -71,11 +72,9 @@ async def load_account_model_context(
         default_model=default.runtime_model_id if default is not None else None,
         capabilities=capabilities,
         reasoning_modes=reasoning_modes,
-        factory=(
-            AccountModelFactory(await providers.runtime_credentials(user.user_id))
-            if include_credentials
-            else None
-        ),
+        factory=await _account_factory(request, providers, user.user_id)
+        if include_credentials
+        else None,
     )
 
 
@@ -120,3 +119,15 @@ def combined_model_factory(request: Request, account: AccountModelContext | None
     if account.factory is None:
         raise RuntimeError("account model credentials were not loaded")
     return CompositeModelFactory(local, account.factory)
+
+
+async def _account_factory(
+    request: Request,
+    providers: ModelProviderRepository,
+    owner_user_id: str,
+) -> AccountModelFactory:
+    probe = getattr(request.app.state, "cloud_model_provider_probe", None)
+    if not isinstance(probe, ProviderProbe):
+        raise RuntimeError("model Provider probe is unavailable")
+    credentials = await providers.runtime_credentials(owner_user_id)
+    return AccountModelFactory([await probe.pin(item) for item in credentials])

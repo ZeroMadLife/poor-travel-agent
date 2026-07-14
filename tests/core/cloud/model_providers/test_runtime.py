@@ -8,7 +8,12 @@ import pytest
 from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
 
-from core.cloud.model_providers import AccountModelFactory, CloudModel, RuntimeProviderCredential
+from core.cloud.model_providers import (
+    AccountModelFactory,
+    CloudModel,
+    ProviderDestination,
+    RuntimeProviderCredential,
+)
 from core.llm_responses import ResponsesAPIChatModel
 
 
@@ -28,6 +33,11 @@ def _credential(mode: str, provider_id: str, *, reasoning: bool = True) -> Runti
         base_url=f"https://{provider_id}.example/v1",
         api_key=f"secret-{provider_id}",
         models=(model,),
+        destination=ProviderDestination(
+            base_url=f"https://{provider_id}.example/v1",
+            hostname=f"{provider_id}.example",
+            addresses=("93.184.216.34",),
+        ),
     )
 
 

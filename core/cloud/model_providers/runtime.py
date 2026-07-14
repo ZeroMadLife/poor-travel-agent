@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from core.cloud.model_providers.models import RuntimeProviderCredential
+from core.cloud.model_providers.network import create_provider_http_client
 from core.llm import create_llm
 
 _ANTHROPIC_BUDGETS = {"low": 1024, "medium": 4096, "high": 8192}
@@ -27,12 +28,17 @@ class AccountModelFactory:
             raise ValueError("account model is unavailable")
         if reasoning_mode != "off" and not model.reasoning_supported:
             raise ValueError("unsupported reasoning mode")
+        if credential.destination is None:
+            raise ValueError("account model Provider destination is not pinned")
         kwargs: dict[str, Any] = {}
         if credential.api_mode == "anthropic_messages" and reasoning_mode != "off":
             budget = _ANTHROPIC_BUDGETS.get(reasoning_mode)
             if budget is None:
                 raise ValueError("unsupported reasoning mode")
             kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        kwargs["http_async_client"] = create_provider_http_client(
+            credential.destination
+        )
         return create_llm(
             f"account:{model_id}",
             api_key=credential.api_key,

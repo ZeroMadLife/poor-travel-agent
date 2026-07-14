@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Sequence
 from typing import Any, Literal, cast
 
+import httpx
 from langchain_core.messages import AIMessage, AIMessageChunk, UsageMetadata
 from openai import AsyncOpenAI
 from openai.types.responses.easy_input_message_param import EasyInputMessageParam
@@ -24,12 +25,18 @@ class ResponsesAPIChatModel:
         model: str,
         reasoning_effort: str | None = None,
         client: AsyncOpenAI | None = None,
+        http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self.model = model
         self.model_name = model
         self.base_url = base_url
         self.reasoning_effort = reasoning_effort
-        self._client = client or AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self._client = client or AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            http_client=http_client,
+            max_retries=0,
+        )
 
     async def ainvoke(self, messages: Sequence[object]) -> AIMessage:
         request: dict[str, Any] = {

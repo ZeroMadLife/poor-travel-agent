@@ -67,6 +67,7 @@ def create_openai_llm(
     provider_config: ProviderConfig | None = None,
     api_key: str | None = None,
     base_url: str | None = None,
+    http_async_client: Any | None = None,
     **kwargs: Any,
 ) -> ChatOpenAI:
     """Create a ChatOpenAI instance from a provider:model spec.
@@ -121,5 +122,6 @@ def create_openai_llm(
         base_url=resolved_base_url,
         model=resolved_model,
         temperature=temperature,
+        http_async_client=http_async_client,
         **kwargs,
     )

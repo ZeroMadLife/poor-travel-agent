@@ -6,12 +6,13 @@ import asyncio
 import ipaddress
 import socket
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-from core.cloud.model_providers.models import RuntimeProviderCredential
+from core.cloud.model_providers.models import ProviderDestination, RuntimeProviderCredential
 
 _MAX_DISCOVERED_MODELS = 500
 _Resolver = Callable[..., Sequence[tuple[Any, ...]]]
@@ -40,34 +41,119 @@ def validate_provider_base_url(value: str, *, app_env: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
 
 
+async def resolve_provider_destination(
+    value: str,
+    *,
+    app_env: str,
+    resolver: _Resolver = socket.getaddrinfo,
+) -> ProviderDestination:
+    """Resolve a Provider host and reject private or metadata destinations."""
+    normalized = validate_provider_base_url(value, app_env=app_env)
+    parsed = urlsplit(normalized)
+    hostname = parsed.hostname or ""
+    if app_env == "development" and _is_loopback_hostname(hostname):
+        addresses = await _resolve_addresses(
+            hostname,
+            parsed.port or (443 if parsed.scheme == "https" else 80),
+            resolver,
+        )
+        if not addresses:
+            addresses = (hostname,)
+        return ProviderDestination(normalized, hostname, addresses)
+    addresses = await _resolve_addresses(
+        hostname,
+        parsed.port or (443 if parsed.scheme == "https" else 80),
+        resolver,
+    )
+    if not addresses:
+        raise ProviderProbeError("Provider host could not be resolved")
+    if any(_is_forbidden_ip(address) for address in addresses):
+        raise ProviderProbeError("Provider destination is not allowed")
+    return ProviderDestination(normalized, hostname, addresses)
+
+
 async def assert_provider_destination_allowed(
     value: str,
     *,
     app_env: str,
     resolver: _Resolver = socket.getaddrinfo,
 ) -> str:
-    """Resolve a Provider host and reject private or metadata destinations."""
-    normalized = validate_provider_base_url(value, app_env=app_env)
-    parsed = urlsplit(normalized)
-    hostname = parsed.hostname or ""
-    if app_env == "development" and _is_loopback_hostname(hostname):
-        return normalized
+    destination = await resolve_provider_destination(
+        value, app_env=app_env, resolver=resolver
+    )
+    return destination.base_url
+
+
+async def _resolve_addresses(
+    hostname: str,
+    port: int,
+    resolver: _Resolver,
+) -> tuple[str, ...]:
     try:
         addresses = await asyncio.to_thread(
             resolver,
             hostname,
-            parsed.port or (443 if parsed.scheme == "https" else 80),
+            port,
             0,
             socket.SOCK_STREAM,
         )
     except OSError as exc:
         raise ProviderProbeError("Provider host could not be resolved") from exc
-    resolved = {str(item[4][0]).split("%", 1)[0] for item in addresses if len(item) > 4}
-    if not resolved:
-        raise ProviderProbeError("Provider host could not be resolved")
-    if any(_is_forbidden_ip(address) for address in resolved):
-        raise ProviderProbeError("Provider destination is not allowed")
-    return normalized
+    return tuple(
+        sorted(
+            {
+                str(item[4][0]).split("%", 1)[0]
+                for item in addresses
+                if len(item) > 4
+            }
+        )
+    )
+
+
+class ProviderPinnedTransport(httpx.AsyncBaseTransport):
+    """Bind an allowed hostname to its validated address for the real TCP request."""
+
+    def __init__(
+        self,
+        destination: ProviderDestination,
+        *,
+        inner: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._destination = destination
+        self._inner = inner or httpx.AsyncHTTPTransport(trust_env=False, retries=0)
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        hostname = (request.url.host or "").lower().rstrip(".")
+        if hostname != self._destination.hostname:
+            raise httpx.UnsupportedProtocol("Provider request host changed after validation")
+        address = self._destination.addresses[0]
+        pinned = httpx.Request(
+            request.method,
+            request.url.copy_with(host=address),
+            headers={**dict(request.headers), "host": request.url.netloc.decode("ascii")},
+            stream=request.stream,
+            extensions={
+                **request.extensions,
+                "sni_hostname": self._destination.hostname,
+            },
+        )
+        return await self._inner.handle_async_request(pinned)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+def create_provider_http_client(
+    destination: ProviderDestination,
+    *,
+    timeout: float = 30.0,
+) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        transport=ProviderPinnedTransport(destination),
+        timeout=timeout,
+        follow_redirects=False,
+        trust_env=False,
+    )
 
 
 class ProviderProbe:
@@ -77,30 +163,38 @@ class ProviderProbe:
         self,
         *,
         app_env: str,
-        client_factory: Callable[[], httpx.AsyncClient] | None = None,
+        client_factory: Callable[[ProviderDestination], httpx.AsyncClient] | None = None,
         resolver: _Resolver = socket.getaddrinfo,
     ) -> None:
         self._app_env = app_env
         self._client_factory = client_factory or (
-            lambda: httpx.AsyncClient(timeout=10.0, follow_redirects=False)
+            lambda destination: create_provider_http_client(destination, timeout=10.0)
         )
         self._resolver = resolver
 
     async def test(self, credential: RuntimeProviderCredential) -> None:
         await self.discover(credential, limit=1)
 
-    async def discover(
-        self, credential: RuntimeProviderCredential, *, limit: int = _MAX_DISCOVERED_MODELS
-    ) -> list[str]:
-        base_url = await assert_provider_destination_allowed(
+    async def pin(
+        self, credential: RuntimeProviderCredential
+    ) -> RuntimeProviderCredential:
+        destination = await resolve_provider_destination(
             credential.base_url,
             app_env=self._app_env,
             resolver=self._resolver,
         )
-        url = _models_url(base_url, credential.api_mode)
+        return replace(credential, destination=destination)
+
+    async def discover(
+        self, credential: RuntimeProviderCredential, *, limit: int = _MAX_DISCOVERED_MODELS
+    ) -> list[str]:
+        pinned = await self.pin(credential)
+        if pinned.destination is None:  # pragma: no cover - pin always sets it
+            raise ProviderProbeError("Provider destination is not available")
+        url = _models_url(pinned.destination.base_url, pinned.api_mode)
         headers = _auth_headers(credential)
         try:
-            async with self._client_factory() as client:
+            async with self._client_factory(pinned.destination) as client:
                 response = await client.get(url, headers=headers)
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
             raise ProviderProbeError("Provider connection failed") from exc

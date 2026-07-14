@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from starlette.testclient import WebSocketDenialResponse
 
 from api.main import create_app
 from core.cloud.auth.repository import CloudRepository
@@ -45,7 +46,9 @@ async def harness() -> AsyncIterator[Harness]:
         probe=ProviderProbe(
             app_env="production",
             resolver=_public_resolver,
-            client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            client_factory=lambda _destination: httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ),
         ),
         engine=engine,
     )
@@ -192,6 +195,47 @@ async def test_provider_routes_reject_ssrf_and_default_deletion(harness: Harness
     assert deletion.status_code == 409
 
 
+async def test_invalid_provider_key_is_not_reflected_by_validation_errors(
+    harness: Harness,
+) -> None:
+    client = await _client_for_user(
+        harness, "key-validation-invite", "key-validation@example.com"
+    )
+    payload = _create_payload()
+    submitted_key = "sensitive-" + ("x" * 10_001)
+    payload["api_key"] = submitted_key
+
+    response = client.post("/api/v1/cloud/model-providers", json=payload)
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "API key is invalid"}
+    assert submitted_key not in response.text
+
+
+async def test_duplicate_provider_names_return_a_bounded_validation_error(
+    harness: Harness,
+) -> None:
+    client = await _client_for_user(
+        harness, "duplicate-name-invite", "duplicate-name@example.com"
+    )
+    first = client.post("/api/v1/cloud/model-providers", json=_create_payload())
+    duplicate = client.post("/api/v1/cloud/model-providers", json=_create_payload())
+
+    second_payload = _create_payload()
+    second_payload["name"] = "Anthropic Account"
+    second = client.post("/api/v1/cloud/model-providers", json=second_payload)
+    renamed = client.patch(
+        f"/api/v1/cloud/model-providers/{second.json()['id']}",
+        json={"name": "OpenAI Account"},
+    )
+
+    assert first.status_code == 200
+    assert duplicate.status_code == 422
+    assert duplicate.json() == {"detail": "Provider name already exists"}
+    assert renamed.status_code == 422
+    assert renamed.json() == {"detail": "Provider name already exists"}
+
+
 async def test_account_default_model_bootstraps_coding_and_survives_resume(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -227,6 +271,54 @@ async def test_account_default_model_bootstraps_coding_and_survives_resume(
     assert client.app.state.coding_sessions[session_id].model_spec == runtime_model_id
     assert client.app.state.coding_sessions[session_id].reasoning_mode == "high"
     assert client.app.state.coding_sessions[session_id].model.reasoning_effort == "high"
+
+
+async def test_account_model_sessions_are_hidden_from_other_users(
+    harness: Harness, tmp_path: Path
+) -> None:
+    owner = await _client_for_user(
+        harness,
+        "session-owner-invite",
+        "session-owner@example.com",
+        coding_workspace_root=tmp_path,
+    )
+    owner.post("/api/v1/cloud/model-providers", json=_create_payload())
+    created = owner.post("/api/v1/coding/session", json={})
+    session_id = created.json()["session_id"]
+
+    await harness.cloud.create_invite(
+        "session-other-invite", email="session-other@example.com"
+    )
+    other = TestClient(owner.app)
+    login = other.post(
+        "/api/v1/cloud/auth/dev/login",
+        json={
+            "email": "session-other@example.com",
+            "display_name": "Other",
+            "invite_code": "session-other-invite",
+        },
+    )
+
+    assert login.status_code == 200
+    assert owner.get(f"/api/v1/coding/{session_id}/files").status_code == 200
+    assert other.get(f"/api/v1/coding/{session_id}/files").status_code == 404
+    assert other.get(
+        f"/api/v1/coding/session/{session_id}/timeline"
+    ).status_code == 404
+    assert other.get(
+        "/api/v1/coding/models", params={"session_id": session_id}
+    ).status_code == 404
+    assert not other.get("/api/v1/coding/models").json()["current"].startswith(
+        "account:"
+    )
+    assert other.post(
+        f"/api/v1/coding/session/{session_id}/resume"
+    ).status_code == 404
+    with pytest.raises(WebSocketDenialResponse) as denied, other.websocket_connect(
+        f"/api/v1/coding/{session_id}/stream"
+    ):
+        pass
+    assert denied.value.status_code == 404
 
 
 async def test_anonymous_coding_catalog_does_not_expose_account_models(

@@ -106,3 +106,65 @@ async def test_default_provider_cannot_be_deleted_or_drop_its_default_model(
 
     assert default is not None
     assert default.runtime_model_id.endswith(":model-b")
+
+
+async def test_model_metadata_updates_in_place_and_preserves_default(
+    repository: ModelProviderRepository,
+) -> None:
+    provider = await repository.create_provider(
+        owner_user_id="user-a",
+        name="Editable",
+        api_mode="openai_responses",
+        base_url="https://provider.example/v1",
+        api_key="secret-key-value",
+        models=[ModelInput("model-a", "Model A", 128_000, 16_000, False)],
+        default_model_id="model-a",
+    )
+
+    updated = await repository.update_provider(
+        owner_user_id="user-a",
+        provider_id=provider.id,
+        models=[
+            ModelInput("model-a", "Model A New", 256_000, 32_000, True),
+            ModelInput("model-b", "Model B"),
+        ],
+    )
+
+    assert updated is not None
+    assert [(model.model_id, model.display_name) for model in updated.models] == [
+        ("model-a", "Model A New"),
+        ("model-b", "Model B"),
+    ]
+    assert updated.models[0].reasoning_supported is True
+    assert (await repository.get_default("user-a")).runtime_model_id == (
+        f"account:{provider.id}:model-a"
+    )
+
+
+async def test_creating_a_new_default_provider_replaces_account_preference(
+    repository: ModelProviderRepository,
+) -> None:
+    first = await repository.create_provider(
+        owner_user_id="user-a",
+        name="First",
+        api_mode="openai_chat_completions",
+        base_url="https://first.example/v1",
+        api_key="first-secret",
+        models=[ModelInput("model-a", "Model A")],
+        default_model_id="model-a",
+    )
+
+    second = await repository.create_provider(
+        owner_user_id="user-a",
+        name="Second",
+        api_mode="anthropic_messages",
+        base_url="https://second.example/v1",
+        api_key="second-secret",
+        models=[ModelInput("model-b", "Model B")],
+        default_model_id="model-b",
+    )
+
+    default = await repository.get_default("user-a")
+    assert default is not None
+    assert default.runtime_model_id == f"account:{second.id}:model-b"
+    assert default.provider_id != first.id

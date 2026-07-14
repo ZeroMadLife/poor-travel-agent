@@ -26,6 +26,7 @@ def create_llm(
     api_key: str | None = None,
     base_url: str | None = None,
     api_mode: str | None = None,
+    http_async_client: Any | None = None,
     **kwargs: Any,
 ) -> ChatOpenAI | ChatAnthropic | ResponsesAPIChatModel:
     """Create an LLM client from a provider:model spec.
@@ -57,6 +58,7 @@ def create_llm(
                 temperature,
                 api_key=api_key,
                 base_url=base_url,
+                http_async_client=http_async_client,
                 **kwargs,
             )
         if api_mode == "openai_responses":
@@ -66,6 +68,7 @@ def create_llm(
                 base_url=base_url,
                 model=model.strip(),
                 reasoning_effort=reasoning_effort,
+                http_client=http_async_client,
             )
         if api_mode != "openai_chat_completions":
             raise ValueError("unsupported Provider API mode")
@@ -75,6 +78,7 @@ def create_llm(
             provider_config=ProviderConfig("", "", base_url, model.strip()),
             api_key=api_key,
             base_url=base_url,
+            http_async_client=http_async_client,
             **({**kwargs, **({"reasoning_effort": reasoning_mode} if reasoning_mode != "off" else {})}),
         )
     if provider_settings is not None:
