@@ -12,6 +12,11 @@ from core.knowledge import KnowledgeSourceRoot, KnowledgeStore
 from core.knowledge.parsing import (
     DocumentParseError,
     DocumentRequiresOcrError,
+    ExternalParseCoordinator,
+    ExternalParsePolicyError,
+    ExternalParseProgress,
+    ExternalParsingFailedError,
+    ExternalParsingTransientError,
     ParserNotFoundError,
 )
 
@@ -20,7 +25,7 @@ from .repository import KnowledgeJobConflictError, KnowledgeJobRepository
 from .scanner import read_source_revision, scan_knowledge_directory
 from .types import KnowledgeJob, KnowledgeJobItem, QueueMessage
 
-PIPELINE_VERSION = "p2.2-b2-multiformat-v1"
+PIPELINE_VERSION = "p2.2-b3-external-parsing-v1"
 logger = logging.getLogger(__name__)
 
 
@@ -38,6 +43,7 @@ class KnowledgeJobService:
         lease_seconds: float = 30.0,
         retry_base_seconds: float = 1.0,
         poll_seconds: float = 0.25,
+        external_parser: ExternalParseCoordinator | None = None,
     ) -> None:
         self.store = store
         self.repository = repository
@@ -47,6 +53,7 @@ class KnowledgeJobService:
         self.lease_seconds = lease_seconds
         self.retry_base_seconds = retry_base_seconds
         self.poll_seconds = poll_seconds
+        self.external_parser = external_parser
         self._source_ids: dict[str, str] = {}
         self._task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
@@ -207,8 +214,35 @@ class KnowledgeJobService:
             if current_revision != item.source_revision:
                 raise KnowledgeJobConflictError("source revision changed; create a new batch")
             await self.repository.start_parsing(item.item_id, worker_id=self.worker_id)
+            source = await asyncio.to_thread(
+                self.store.load_source, job.source_root_id, item.relative_path
+            )
+            request = source.parse_request()
+            try:
+                document = await asyncio.to_thread(self.store.parser_registry.parse, request)
+            except DocumentRequiresOcrError:
+                if self.external_parser is None:
+                    raise
+
+                async def report(progress: ExternalParseProgress) -> None:
+                    await self.repository.record_parser_progress(
+                        item.item_id,
+                        worker_id=self.worker_id,
+                        adapter_id=progress.adapter_id,
+                        adapter_version=progress.adapter_version,
+                        stage=progress.stage,
+                        completed_units=progress.completed_units,
+                        total_units=progress.total_units,
+                        reason_code=progress.reason_code,
+                    )
+
+                document = await self.external_parser.parse(
+                    job.source_root_id,
+                    request,
+                    progress=report,
+                )
             prepared = await asyncio.to_thread(
-                self.store.prepare_ingest, job.source_root_id, item.relative_path
+                self.store.prepare_parsed_source, source, document
             )
             if prepared.source_revision != item.source_revision:
                 raise KnowledgeJobConflictError("source revision changed; create a new batch")
@@ -276,6 +310,12 @@ def _safe_error(exc: Exception) -> str:
 def _error_code(exc: Exception) -> str:
     if isinstance(exc, DocumentRequiresOcrError):
         return "requires_ocr"
+    if isinstance(exc, ExternalParsePolicyError):
+        return "external_parse_forbidden"
+    if isinstance(exc, ExternalParsingFailedError):
+        return "external_parse_failed"
+    if isinstance(exc, ExternalParsingTransientError):
+        return "external_parse_unavailable"
     if isinstance(exc, ParserNotFoundError):
         return "unsupported_format"
     if isinstance(exc, DocumentParseError):
@@ -292,5 +332,10 @@ def _error_code(exc: Exception) -> str:
 def _is_retryable(exc: Exception) -> bool:
     return not isinstance(
         exc,
-        ValueError | ParserNotFoundError | KnowledgeJobConflictError | FileNotFoundError,
+        ValueError
+        | ParserNotFoundError
+        | KnowledgeJobConflictError
+        | FileNotFoundError
+        | ExternalParsingFailedError
+        | ExternalParsePolicyError,
     )

@@ -1,6 +1,17 @@
 """Parser Registry and stable parsed-document contracts."""
 
 from .errors import DocumentParseError, DocumentRequiresOcrError
+from .external import (
+    ExternalAdapterError,
+    ExternalParseAdapter,
+    ExternalParseCoordinator,
+    ExternalParsePolicy,
+    ExternalParsePolicyError,
+    ExternalParseProgress,
+    ExternalParsingFailedError,
+    ExternalParsingTransientError,
+    ProgressCallback,
+)
 from .html import HtmlParser
 from .markdown import MarkdownParser
 from .pdf import TextPdfParser
@@ -34,6 +45,14 @@ __all__ = [
     "DocumentParseError",
     "DocumentParser",
     "DocumentRequiresOcrError",
+    "ExternalAdapterError",
+    "ExternalParseAdapter",
+    "ExternalParseCoordinator",
+    "ExternalParsePolicy",
+    "ExternalParsePolicyError",
+    "ExternalParseProgress",
+    "ExternalParsingFailedError",
+    "ExternalParsingTransientError",
     "HtmlParser",
     "MarkdownParser",
     "ParseArtifact",
@@ -44,6 +63,7 @@ __all__ = [
     "ParserConflictError",
     "ParserNotFoundError",
     "ParserRegistry",
+    "ProgressCallback",
     "TextPdfParser",
     "default_parser_registry",
     "deserialize_document",

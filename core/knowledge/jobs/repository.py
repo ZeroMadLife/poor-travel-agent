@@ -308,6 +308,40 @@ class KnowledgeJobRepository:
             )
             return _item_view(item)
 
+    async def record_parser_progress(
+        self,
+        item_id: str,
+        *,
+        worker_id: str,
+        adapter_id: str,
+        adapter_version: str,
+        stage: str,
+        completed_units: int | None = None,
+        total_units: int | None = None,
+        reason_code: str | None = None,
+    ) -> None:
+        """Persist sanitized external-parser progress under the active lease."""
+        async with self._session_factory() as session, session.begin():
+            item, job = await self._locked_item_and_job(session, item_id)
+            self._require_lease(item, worker_id)
+            if item.status != "parsing":
+                raise KnowledgeJobConflictError("parser progress requires parsing status")
+            await self._append_event(
+                session,
+                job,
+                item=item,
+                kind="parser",
+                status=stage,
+                detail={
+                    "relative_path": item.relative_path,
+                    "adapter_id": adapter_id,
+                    "adapter_version": adapter_version,
+                    "completed_units": completed_units,
+                    "total_units": total_units,
+                    "reason_code": reason_code,
+                },
+            )
+
     async def claim_idempotency(self, item_id: str) -> IdempotencyClaim:
         async with self._session_factory() as session, session.begin():
             item = await session.get(KnowledgeIngestItemRecord, item_id)

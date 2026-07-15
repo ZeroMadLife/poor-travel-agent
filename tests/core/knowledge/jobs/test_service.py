@@ -17,6 +17,15 @@ from core.knowledge.jobs import (
     KnowledgeJobService,
     RedisKnowledgeJobQueue,
 )
+from core.knowledge.parsing import (
+    ExternalParseCoordinator,
+    ExternalParsePolicy,
+    ExternalParseProgress,
+    ParsedBlock,
+    ParsedDocument,
+    ParseProvenance,
+    ParseRequest,
+)
 
 
 async def _service(
@@ -72,7 +81,7 @@ async def test_batch_import_persists_progress_and_skips_duplicate_revision(
     assert len(await service.repository.list_items(first.job_id, limit=1)) == 1
     assert await _finish(service, first.job_id) == "completed"
     completed = await service.repository.get_job(first.job_id)
-    assert completed.pipeline_version == "p2.2-b2-multiformat-v1"
+    assert completed.pipeline_version == "p2.2-b3-external-parsing-v1"
     assert completed.total_items == 3
     assert completed.succeeded_items == 3
     assert completed.latest_sequence >= 6
@@ -109,12 +118,12 @@ async def test_item_retries_to_dead_letter_then_can_be_retried_individually(
     note = vault / "retry.md"
     note.write_text("# Retry\n\nStable source.\n", encoding="utf-8")
     service = await _service(knowledge_store, job_infrastructure)
-    original_prepare = store.prepare_ingest
+    original_load = store.load_source
 
     def fail_transiently(_: str, __: str) -> None:
         raise RuntimeError("temporary parser outage")
 
-    monkeypatch.setattr(store, "prepare_ingest", fail_transiently)
+    monkeypatch.setattr(store, "load_source", fail_transiently)
 
     job = await service.create_batch("vault")
     assert await _finish(service, job.job_id) == "completed_with_errors"
@@ -123,7 +132,7 @@ async def test_item_retries_to_dead_letter_then_can_be_retried_individually(
     assert failed.attempts == 3
     assert "knowledge ingestion failed" in (failed.error or "")
 
-    monkeypatch.setattr(store, "prepare_ingest", original_prepare)
+    monkeypatch.setattr(store, "load_source", original_load)
     await service.retry_item(job.job_id, failed.item_id)
     assert await _finish(service, job.job_id) == "completed"
     [retried] = await service.repository.list_items(job.job_id)
@@ -154,6 +163,89 @@ async def test_scanned_pdf_is_dead_lettered_once_with_requires_ocr_code(
     failure = next(event for event in events if event.status == "dead_letter")
     assert failure.detail["error_code"] == "requires_ocr"
     assert failure.detail["retryable"] is False
+
+
+async def test_scanned_pdf_uses_authorized_external_parser_and_persists_progress(
+    knowledge_store: tuple[KnowledgeStore, Path],
+    job_infrastructure: tuple[KnowledgeJobRepository, RedisKnowledgeJobQueue, Any],
+) -> None:
+    class OcrAdapter:
+        adapter_id = "test.ocr"
+        adapter_version = "1.0.0"
+        media_types = frozenset({"application/pdf"})
+
+        async def parse(
+            self,
+            request: ParseRequest,
+            *,
+            progress: Any,
+        ) -> ParsedDocument:
+            await progress(
+                ExternalParseProgress(
+                    adapter_id=self.adapter_id,
+                    adapter_version=self.adapter_version,
+                    stage="running",
+                    completed_units=1,
+                    total_units=1,
+                )
+            )
+            return ParsedDocument(
+                document_id="pdoc_external_scan",
+                source_id=request.source_id,
+                relative_path=request.relative_path,
+                source_revision=request.source_revision,
+                title="Scan",
+                language="zh",
+                rendered_markdown="# Scan\n\nRecovered text.\n",
+                blocks=(
+                    ParsedBlock(
+                        block_id="pblk_external_scan",
+                        ordinal=0,
+                        kind="paragraph",
+                        text="Recovered text.",
+                        heading_path=("Scan",),
+                        page=1,
+                        confidence=0.9,
+                    ),
+                ),
+                provenance=ParseProvenance(
+                    parser_id=self.adapter_id,
+                    parser_version=self.adapter_version,
+                    input_revision=request.source_revision,
+                    media_type=request.media_type,
+                ),
+            )
+
+    _, vault = knowledge_store
+    buffer = BytesIO()
+    writer = PdfWriter()
+    writer.add_blank_page(width=612, height=792)
+    writer.write(buffer)
+    (vault / "scan.pdf").write_bytes(buffer.getvalue())
+    service = await _service(knowledge_store, job_infrastructure)
+    service.external_parser = ExternalParseCoordinator(
+        ExternalParsePolicy(enabled=True, allowed_source_ids=frozenset({"vault"})),
+        [OcrAdapter()],
+    )
+
+    job = await service.create_batch("vault")
+
+    assert await _finish(service, job.job_id) == "completed"
+    [completed] = await service.repository.list_items(job.job_id)
+    assert completed.proposal_id is not None
+    artifact = service.store.get_parse_artifact(completed.proposal_id)
+    assert artifact is not None
+    assert artifact.document.provenance.parser_id == "test.ocr"
+    parser_events = [
+        event for event in await service.repository.list_events(job.job_id)
+        if event.kind == "parser"
+    ]
+    assert [event.status for event in parser_events] == [
+        "selected",
+        "running",
+        "completed",
+    ]
+    assert parser_events[1].detail["completed_units"] == 1
 
 
 async def test_cancel_marks_unclaimed_items_without_processing(

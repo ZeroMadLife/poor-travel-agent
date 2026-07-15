@@ -10,6 +10,7 @@ from core.knowledge.store import (
     KnowledgeSourceRoot,
     KnowledgeStore,
     KnowledgeSummary,
+    LoadedKnowledgeSource,
     PreparedKnowledgeSource,
 )
 
@@ -23,5 +24,6 @@ __all__ = [
     "KnowledgeSourceRoot",
     "KnowledgeStore",
     "KnowledgeSummary",
+    "LoadedKnowledgeSource",
     "PreparedKnowledgeSource",
 ]

@@ -234,6 +234,28 @@ class PreparedKnowledgeSource:
     document: ParsedDocument
 
 
+@dataclass(frozen=True, slots=True)
+class LoadedKnowledgeSource:
+    """Validated source bytes ready for local or policy-gated external parsing."""
+
+    source_root_id: str
+    source_kind: str
+    relative_path: str
+    source_id: str
+    source_revision: str
+    media_type: str
+    payload: bytes
+
+    def parse_request(self) -> ParseRequest:
+        return ParseRequest(
+            source_id=self.source_id,
+            relative_path=self.relative_path,
+            source_revision=self.source_revision,
+            media_type=self.media_type,
+            payload=self.payload,
+        )
+
+
 class KnowledgeStore:
     """Own the source trust boundary and all auditable Wiki transitions."""
 
@@ -288,6 +310,11 @@ class KnowledgeStore:
         return self.ingest_prepared(self.prepare_ingest(source_root_id, relative_path))
 
     def prepare_ingest(self, source_root_id: str, relative_path: str) -> PreparedKnowledgeSource:
+        source = self.load_source(source_root_id, relative_path)
+        document = self.parser_registry.parse(source.parse_request())
+        return self.prepare_parsed_source(source, document)
+
+    def load_source(self, source_root_id: str, relative_path: str) -> LoadedKnowledgeSource:
         self.initialize()
         root = self.source_roots.get(source_root_id)
         if root is None:
@@ -303,23 +330,31 @@ class KnowledgeStore:
             "src_"
             + hashlib.sha256(f"{source_root_id}\0{normalized.as_posix()}".encode()).hexdigest()[:32]
         )
-        request = ParseRequest(
-            source_id=source_id,
-            relative_path=normalized.as_posix(),
-            source_revision=source_revision,
-            media_type=media_type,
-            payload=payload,
-        )
-        document = self.parser_registry.parse(request)
-        _validate_parsed_document(request, document)
-        _scan_text_secrets(f"{document.title}\n{document.rendered_markdown}")
-        return PreparedKnowledgeSource(
+        return LoadedKnowledgeSource(
             source_root_id=source_root_id,
             source_kind=root.kind,
             relative_path=normalized.as_posix(),
             source_id=source_id,
             source_revision=source_revision,
+            media_type=media_type,
             payload=payload,
+        )
+
+    def prepare_parsed_source(
+        self,
+        source: LoadedKnowledgeSource,
+        document: ParsedDocument,
+    ) -> PreparedKnowledgeSource:
+        request = source.parse_request()
+        _validate_parsed_document(request, document)
+        _scan_text_secrets(f"{document.title}\n{document.rendered_markdown}")
+        return PreparedKnowledgeSource(
+            source_root_id=source.source_root_id,
+            source_kind=source.source_kind,
+            relative_path=source.relative_path,
+            source_id=source.source_id,
+            source_revision=source.source_revision,
+            payload=source.payload,
             document=document,
         )
 
