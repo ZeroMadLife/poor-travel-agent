@@ -202,6 +202,36 @@ def test_pending_migration_preview_apply_and_conflict_contract(tmp_path: Path) -
     assert not list((knowledge / "wiki" / "sources").glob("*.md"))
 
 
+def test_index_status_and_rebuild_api_contract(tmp_path: Path) -> None:
+    app, vault, _ = _app(tmp_path)
+    (vault / "memory.md").write_text(
+        "# Memory\n\n长期记忆使用事实证据和动态 TTL。\n",
+        encoding="utf-8",
+    )
+    client = TestClient(app)
+    ingested = client.post(
+        "/api/v1/knowledge/ingest",
+        json={"source_root_id": "sage-learning", "relative_path": "memory.md"},
+    )
+    assert ingested.status_code == 201
+
+    status_response = client.get("/api/v1/knowledge/index")
+
+    assert status_response.status_code == 200
+    assert status_response.headers["cache-control"] == "no-store"
+    status_body = status_response.json()
+    assert status_body["status"] == "ready"
+    assert status_body["backend"] == "sqlite-fts5+hashing"
+    assert status_body["revision_count"] == 1
+    assert status_body["indexed_revision_count"] == 1
+    assert status_body["active_chunk_count"] == 1
+    assert status_body["error_count"] == 0
+
+    rebuilt = client.post("/api/v1/knowledge/index/rebuild")
+    assert rebuilt.status_code == 200
+    assert rebuilt.json() == status_body
+
+
 def test_knowledge_api_rejects_unsafe_paths_and_stale_revisions(tmp_path: Path) -> None:
     app, vault, _ = _app(tmp_path)
     (vault / "note.md").write_text("# Note\n", encoding="utf-8")

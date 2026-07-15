@@ -170,6 +170,18 @@ class KnowledgeWorkspaceSummary(BaseModel):
     source_roots: list[KnowledgeSourceRootSummary]
 
 
+class KnowledgeIndexResponse(BaseModel):
+    status: Literal["ready", "degraded"]
+    backend: str
+    embedding_model: str
+    embedding_revision: str
+    revision_count: int = Field(ge=0)
+    indexed_revision_count: int = Field(ge=0)
+    active_chunk_count: int = Field(ge=0)
+    total_chunk_count: int = Field(ge=0)
+    error_count: int = Field(ge=0)
+
+
 class KnowledgeIngestRequest(BaseModel):
     """Ingest one Markdown file from a server-configured source root."""
 

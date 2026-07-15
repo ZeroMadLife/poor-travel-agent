@@ -4,12 +4,14 @@ import { beforeEach, expect, it, vi } from 'vitest'
 import {
   applyPendingKnowledgeMigration,
   createKnowledgeJob,
+  fetchKnowledgeIndex,
   fetchKnowledgeJobs,
   fetchPendingKnowledgeMigration,
   fetchKnowledgePages,
   fetchKnowledgeProposals,
   fetchKnowledgeSummary,
   ingestKnowledgeSource,
+  rebuildKnowledgeIndex,
   transitionKnowledgeProposal,
   undoKnowledgeAutoApply,
 } from '../api/knowledge'
@@ -20,6 +22,7 @@ vi.mock('../api/knowledge', () => ({
   buildKnowledgeJobStreamUrl: vi.fn(),
   cancelKnowledgeJob: vi.fn(),
   createKnowledgeJob: vi.fn(),
+  fetchKnowledgeIndex: vi.fn(),
   fetchKnowledgeJob: vi.fn(),
   fetchKnowledgeJobs: vi.fn(),
   fetchPendingKnowledgeMigration: vi.fn(),
@@ -30,6 +33,7 @@ vi.mock('../api/knowledge', () => ({
   parseKnowledgeJobEvent: vi.fn(),
   proposeKnowledgeRollback: vi.fn(),
   retryKnowledgeJobItem: vi.fn(),
+  rebuildKnowledgeIndex: vi.fn(),
   transitionKnowledgeProposal: vi.fn(),
   undoKnowledgeAutoApply: vi.fn(),
 }))
@@ -59,6 +63,16 @@ beforeEach(() => {
   vi.mocked(fetchKnowledgeProposals).mockReset().mockResolvedValue([proposal])
   vi.mocked(fetchKnowledgePages).mockReset().mockResolvedValue([])
   vi.mocked(fetchKnowledgeJobs).mockReset().mockResolvedValue([])
+  vi.mocked(fetchKnowledgeIndex).mockReset().mockResolvedValue({
+    status: 'ready', backend: 'sqlite-fts5+hashing', embedding_model: 'sage.hashing',
+    embedding_revision: '1.0.0', revision_count: 1, indexed_revision_count: 1,
+    active_chunk_count: 4, total_chunk_count: 4, error_count: 0,
+  })
+  vi.mocked(rebuildKnowledgeIndex).mockReset().mockResolvedValue({
+    status: 'ready', backend: 'sqlite-fts5+hashing', embedding_model: 'sage.hashing',
+    embedding_revision: '1.0.0', revision_count: 1, indexed_revision_count: 1,
+    active_chunk_count: 4, total_chunk_count: 4, error_count: 0,
+  })
   vi.mocked(fetchPendingKnowledgeMigration).mockReset().mockResolvedValue({
     plan_id: 'kmig-review',
     total: 1,
@@ -183,6 +197,20 @@ it('keeps the P2.1 review workspace usable when durable jobs are disabled', asyn
   expect(wrapper.text()).toContain('持久任务未启用')
   expect(wrapper.get('button.approve').attributes('disabled')).toBeUndefined()
   expect(wrapper.get('input[aria-label="来源相对目录"]').attributes('disabled')).toBeDefined()
+  wrapper.unmount()
+})
+
+it('shows and rebuilds the revision-aware retrieval index', async () => {
+  const wrapper = await mountKnowledge()
+
+  expect(wrapper.text()).toContain('1/1 revisions')
+  expect(wrapper.text()).toContain('4 active chunks')
+  const rebuild = wrapper.findAll('button').find((button) => button.text().includes('重建索引'))
+  expect(rebuild).toBeDefined()
+  await rebuild!.trigger('click')
+  await flushPromises()
+
+  expect(rebuildKnowledgeIndex).toHaveBeenCalledOnce()
   wrapper.unmount()
 })
 

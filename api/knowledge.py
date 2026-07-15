@@ -18,6 +18,7 @@ from fastapi import (
 
 from api.schemas import (
     KnowledgeBatchIngestRequest,
+    KnowledgeIndexResponse,
     KnowledgeIngestRequest,
     KnowledgeJobEventResponse,
     KnowledgeJobEventsResponse,
@@ -51,6 +52,7 @@ from api.schemas import (
 )
 from core.knowledge import (
     KnowledgeConflictError,
+    KnowledgeIndexSummary,
     KnowledgeMigrationPlan,
     KnowledgeMigrationResult,
     KnowledgePage,
@@ -98,6 +100,19 @@ async def get_knowledge_summary(request: Request, response: Response) -> Knowled
             for item in summary.source_roots
         ],
     )
+
+
+@router.get("/api/v1/knowledge/index", response_model=KnowledgeIndexResponse)
+async def get_knowledge_index(request: Request, response: Response) -> KnowledgeIndexResponse:
+    store = _require_store(request)
+    response.headers["Cache-Control"] = "no-store"
+    return _index_response(store.index_summary())
+
+
+@router.post("/api/v1/knowledge/index/rebuild", response_model=KnowledgeIndexResponse)
+async def rebuild_knowledge_index(request: Request) -> KnowledgeIndexResponse:
+    store = _require_store(request)
+    return _index_response(await asyncio.to_thread(store.rebuild_index))
 
 
 @router.post(
@@ -575,6 +590,20 @@ def _migration_plan_response(plan: KnowledgeMigrationPlan) -> KnowledgeMigration
             )
             for item in plan.items
         ],
+    )
+
+
+def _index_response(summary: KnowledgeIndexSummary) -> KnowledgeIndexResponse:
+    return KnowledgeIndexResponse(
+        status=("degraded" if summary.error_count else "ready"),
+        backend=summary.backend,
+        embedding_model=summary.embedding_model,
+        embedding_revision=summary.embedding_revision,
+        revision_count=summary.revision_count,
+        indexed_revision_count=summary.indexed_revision_count,
+        active_chunk_count=summary.active_chunk_count,
+        total_chunk_count=summary.total_chunk_count,
+        error_count=summary.error_count,
     )
 
 

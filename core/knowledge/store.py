@@ -19,6 +19,7 @@ from importlib import import_module
 from pathlib import Path, PurePosixPath
 from threading import RLock
 
+from core.knowledge.index import LocalKnowledgeIndex
 from core.knowledge.migration import (
     KnowledgeMigrationItem,
     KnowledgeMigrationPlan,
@@ -46,6 +47,7 @@ from core.knowledge.policy import (
     evaluate_knowledge_policy,
     is_trusted_local_parser,
 )
+from core.knowledge.retrieval import KnowledgeIndexSummary, KnowledgeSearchHit
 from core.knowledge.synthesis import (
     WorkspaceSynthesis,
     deserialize_synthesis,
@@ -62,7 +64,7 @@ from core.knowledge.understanding import (
 
 _MAX_PROPOSAL_BYTES = 4 * 1024 * 1024
 _ROOT_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 _SOURCE_FORMATS = {
     ".md": ("text/markdown", 2 * 1024 * 1024),
     ".markdown": ("text/markdown", 2 * 1024 * 1024),
@@ -359,11 +361,13 @@ class KnowledgeStore:
         database_path: str | Path,
         source_roots: Mapping[str, KnowledgeSourceRoot],
         parser_registry: ParserRegistry | None = None,
+        knowledge_index: LocalKnowledgeIndex | None = None,
     ) -> None:
         self.workspace_root = Path(workspace_root).expanduser().resolve()
         self.database_path = Path(database_path).expanduser().resolve()
         self.source_roots = self._validate_source_roots(source_roots)
         self.parser_registry = parser_registry or default_parser_registry()
+        self.knowledge_index = knowledge_index or LocalKnowledgeIndex()
         self._lock = RLock()
         self._initialized = False
 
@@ -1398,6 +1402,41 @@ class KnowledgeStore:
                 )
         return result
 
+    def index_summary(self) -> KnowledgeIndexSummary:
+        self.initialize()
+        with self._connect() as connection:
+            return self.knowledge_index.summary(connection)
+
+    def rebuild_index(self) -> KnowledgeIndexSummary:
+        """Recreate local retrieval projections from canonical page revisions."""
+
+        self.initialize()
+        with self._lock, self._exclusive_lock(), self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self.knowledge_index.backfill(connection, force=True)
+            connection.commit()
+        return self.index_summary()
+
+    def search(
+        self,
+        query: str,
+        *,
+        top_k: int = 8,
+        visibility: str = "private",
+        source_ids: tuple[str, ...] = (),
+        page_revisions: tuple[str, ...] = (),
+    ) -> tuple[KnowledgeSearchHit, ...]:
+        self.initialize()
+        with self._connect() as connection:
+            return self.knowledge_index.search(
+                connection,
+                query,
+                top_k=top_k,
+                visibility=visibility,
+                source_ids=source_ids,
+                page_revisions=page_revisions,
+            )
+
     def propose_rollback(
         self,
         page_id: str,
@@ -1732,6 +1771,7 @@ class KnowledgeStore:
                 proposal.revision,
                 {"page_revision": revision_id, "git_commit": git_commit},
             )
+            self.knowledge_index.sync_revision_safely(connection, revision_id)
             connection.commit()
 
     def _assert_projection_base(self, proposal: KnowledgeProposal) -> None:
@@ -1825,7 +1865,7 @@ class KnowledgeStore:
             raise ValueError("knowledge database directory must not be a symbolic link")
         with self._connect() as connection:
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if version not in {0, 1, 2, 3, 4, _SCHEMA_VERSION}:
+            if version not in {0, 1, 2, 3, 4, 5, _SCHEMA_VERSION}:
                 raise KnowledgeStoreError(f"unsupported knowledge schema version {version}")
             connection.executescript(_SCHEMA)
             proposal_columns = {
@@ -1837,6 +1877,8 @@ class KnowledgeStore:
                     "ALTER TABLE knowledge_proposals ADD COLUMN parse_artifact_id TEXT"
                 )
             self._backfill_source_understandings(connection)
+            self.knowledge_index.ensure_schema(connection)
+            self.knowledge_index.backfill(connection)
             connection.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
             connection.commit()
 

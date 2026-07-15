@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   Check,
+  Database,
   FilePlus2,
   FolderUp,
   RotateCcw,
@@ -17,6 +18,7 @@ import {
   createKnowledgeJob,
   fetchKnowledgeJob,
   fetchKnowledgeJobs,
+  fetchKnowledgeIndex,
   fetchPendingKnowledgeMigration,
   fetchKnowledgePages,
   fetchKnowledgeProposals,
@@ -24,13 +26,15 @@ import {
   ingestKnowledgeSource,
   parseKnowledgeJobEvent,
   proposeKnowledgeRollback,
-  transitionKnowledgeProposal,
+  rebuildKnowledgeIndex,
   retryKnowledgeJobItem,
+  transitionKnowledgeProposal,
   undoKnowledgeAutoApply,
 } from '../api/knowledge'
 import { AssistantSectionView } from '../components/assistant'
 import type {
   KnowledgeJob,
+  KnowledgeIndexSummary,
   KnowledgeMigrationPlan,
   KnowledgeMigrationResult,
   KnowledgePage,
@@ -43,6 +47,7 @@ const proposals = ref<KnowledgeProposal[]>([])
 const autoApplied = ref<KnowledgeProposal[]>([])
 const pages = ref<KnowledgePage[]>([])
 const jobs = ref<KnowledgeJob[]>([])
+const indexSummary = ref<KnowledgeIndexSummary | null>(null)
 const migrationPlan = ref<KnowledgeMigrationPlan | null>(null)
 const migrationResult = ref<KnowledgeMigrationResult | null>(null)
 const jobsAvailable = ref(true)
@@ -69,11 +74,12 @@ async function refresh() {
   loading.value = true
   error.value = ''
   try {
-    const [nextSummary, nextProposals, nextPages, nextMigrationPlan] = await Promise.all([
+    const [nextSummary, nextProposals, nextPages, nextMigrationPlan, nextIndex] = await Promise.all([
       fetchKnowledgeSummary(),
       fetchKnowledgeProposals(null),
       fetchKnowledgePages(),
       fetchPendingKnowledgeMigration(),
+      fetchKnowledgeIndex(),
     ])
     const nextJobs = await fetchKnowledgeJobs().catch(() => {
       jobsAvailable.value = false
@@ -93,6 +99,7 @@ async function refresh() {
     ).slice(0, 10)
     pages.value = nextPages
     migrationPlan.value = nextMigrationPlan
+    indexSummary.value = nextIndex
     jobs.value = nextJobs
     syncJobStreams()
     if (!selectedRoot.value) selectedRoot.value = nextSummary.source_roots[0]?.root_id || ''
@@ -100,6 +107,20 @@ async function refresh() {
     error.value = reason instanceof Error ? reason.message : String(reason)
   } finally {
     loading.value = false
+  }
+}
+
+async function rebuildIndex() {
+  busy.value = { ...busy.value, index: true }
+  error.value = ''
+  try {
+    indexSummary.value = await rebuildKnowledgeIndex()
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    const next = { ...busy.value }
+    delete next.index
+    busy.value = next
   }
 }
 
@@ -319,6 +340,21 @@ onUnmounted(() => {
         <div><strong>{{ summary.workspace_name }}</strong><span>Git 工作区</span></div>
       </section>
 
+      <section v-if="indexSummary" class="index-status" aria-label="检索索引状态">
+        <Database :size="18" />
+        <div>
+          <strong>Hybrid Retrieval 索引{{ indexSummary.status === 'ready' ? '就绪' : '降级' }}</strong>
+          <span>
+            {{ indexSummary.indexed_revision_count }}/{{ indexSummary.revision_count }} revisions ·
+            {{ indexSummary.active_chunk_count }} active chunks ·
+            {{ indexSummary.embedding_model }}@{{ indexSummary.embedding_revision }}
+          </span>
+        </div>
+        <button type="button" :disabled="busy.index" @click="rebuildIndex">
+          <RotateCw :size="14" />{{ busy.index ? '正在重建' : '重建索引' }}
+        </button>
+      </section>
+
       <section
         v-if="migrationPlan && migrationPlan.total > 0"
         class="migration-banner"
@@ -482,7 +518,8 @@ onUnmounted(() => {
 
 <style scoped>
 .jobs-disabled { margin:0 0 9px; color:var(--sage-coral); font-size:var(--sage-font-xs); }
+  .index-status { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:12px; padding:13px 0; border-bottom:1px solid var(--sage-border); color:var(--sage-source); }.index-status div { display:flex; flex-direction:column; min-width:0; gap:3px; }.index-status strong { color:var(--sage-text); font-size:var(--sage-font-sm); }.index-status span { overflow:hidden; color:var(--sage-text-muted); font-size:var(--sage-font-xs); text-overflow:ellipsis; white-space:nowrap; }.index-status button { display:inline-flex; align-items:center; gap:5px; min-height:32px; border:1px solid var(--sage-border-strong); border-radius:var(--sage-radius-sm); background:var(--sage-surface); color:var(--sage-text-secondary); padding:0 10px; }
   .migration-banner { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:14px; margin:22px 0 0; padding:16px; border:1px solid var(--sage-border-strong); border-radius:var(--sage-radius); background:var(--sage-source-bg); }.migration-icon { display:grid; place-items:center; width:38px; height:38px; border-radius:var(--sage-radius-sm); background:var(--sage-source); color:white; }.migration-copy strong { font-size:var(--sage-font-md); }.migration-copy p { margin:4px 0 0; color:var(--sage-text-secondary); font-size:var(--sage-font-sm); line-height:1.55; }.migration-counts { display:flex; flex-wrap:wrap; gap:12px; margin-top:8px; color:var(--sage-text-muted); font-size:var(--sage-font-xs); }.migration-banner button { display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:36px; border:1px solid var(--sage-source); border-radius:var(--sage-radius-sm); background:var(--sage-source); color:white; padding:0 13px; font-weight:650; }.migration-banner em { color:var(--sage-review-strong); font-size:var(--sage-font-sm); font-style:normal; font-weight:650; }.migration-result { margin:10px 0 0; color:var(--sage-success); font-size:var(--sage-font-sm); }
   .knowledge-error,.knowledge-state { margin:22px 0 0; padding:10px 12px; border-left:3px solid var(--sage-coral); background:var(--sage-danger-bg); color:var(--sage-text-secondary); font-size:var(--sage-font-sm); }.knowledge-state { border-color:var(--sage-source); background:var(--sage-source-bg); }.knowledge-metrics { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); border-bottom:1px solid var(--sage-border); }.knowledge-metrics div { min-width:0; padding:24px 18px; border-right:1px solid var(--sage-border); }.knowledge-metrics div:last-child { border-right:0; }.knowledge-metrics strong,.knowledge-metrics span { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.knowledge-metrics strong { font-size:19px; }.knowledge-metrics span { margin-top:5px; color:var(--sage-text-muted); font-size:var(--sage-font-xs); }.ingest-section>div p { margin-top:5px; font-size:var(--sage-font-xs); }.single-ingest { border-top:1px solid var(--sage-border); }.ingest-form { display:grid; grid-template-columns:190px minmax(0,1fr) auto; gap:8px; }.ingest-form select,.ingest-form input { min-width:0; height:38px; border:1px solid var(--sage-border-strong); border-radius:var(--sage-radius-sm); background:var(--sage-surface); color:var(--sage-text); padding:0 10px; }.ingest-form button,.proposal-actions button,.page-row button,.job-row button,.auto-row button { display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:34px; border:1px solid var(--sage-border-strong); border-radius:var(--sage-radius-sm); background:var(--sage-surface); color:var(--sage-text); padding:0 12px; font-weight:650; }.ingest-form button,.proposal-actions .approve { border-color:var(--sage-source); background:var(--sage-source); color:white; }.knowledge-section { padding:30px 0; border-bottom:1px solid var(--sage-border); }.knowledge-section>header { display:flex; align-items:end; justify-content:space-between; gap:16px; margin-bottom:18px; }.knowledge-section>header span { color:var(--sage-text-muted); font-size:var(--sage-font-xs); text-transform:uppercase; }.knowledge-section h2 { margin:5px 0 0; font-size:var(--sage-font-lg); }.knowledge-section>header>strong { color:var(--sage-source); font-size:22px; }.empty-copy { color:var(--sage-text-muted); }.proposal-row,.page-row,.job-row,.auto-row { padding:18px 0; border-top:1px solid var(--sage-border); }.auto-row { display:flex; align-items:center; justify-content:space-between; gap:16px; }.auto-row strong,.auto-row span { display:block; }.auto-row span { margin-top:5px; color:var(--sage-text-muted); font-size:var(--sage-font-xs); }.auto-row em { color:var(--sage-text-muted); font-style:normal; font-size:var(--sage-font-sm); }.proposal-heading,.job-heading { display:flex; justify-content:space-between; gap:18px; }.proposal-heading strong,.proposal-heading span,.page-row>div strong,.page-row>div code,.job-heading strong,.job-heading span { display:block; }.proposal-heading span,.proposal-heading code,.page-row code,.job-heading span,.job-heading code { margin-top:5px; color:var(--sage-text-muted); font-size:var(--sage-font-xs); }.job-progress { height:6px; margin:14px 0 10px; overflow:hidden; border-radius:3px; background:var(--sage-border); }.job-progress span { display:block; height:100%; background:var(--sage-source); transition:width .2s ease; }.job-counts { display:flex; align-items:center; gap:14px; color:var(--sage-text-muted); font-size:var(--sage-font-xs); }.job-counts button { margin-left:auto; min-height:28px; color:var(--sage-coral); }.failed-items { margin:12px 0 0; padding:0; list-style:none; }.failed-items li { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:9px 0; border-top:1px dashed var(--sage-border); }.failed-items code,.failed-items span { display:block; }.failed-items span { margin-top:3px; color:var(--sage-coral); font-size:var(--sage-font-xs); }.proposal-row pre { max-height:320px; margin:14px 0; overflow:auto; border:1px solid var(--sage-border); border-radius:var(--sage-radius-sm); background:var(--sage-code-bg); color:var(--sage-code-text); padding:13px; font-size:12px; line-height:1.55; }.proposal-actions { display:flex; justify-content:flex-end; gap:8px; }.proposal-actions .reject { color:var(--sage-coral); }.page-row ol { margin:14px 0 0; padding:0; list-style:none; }.page-row li { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:38px; border-top:1px dashed var(--sage-border); color:var(--sage-text-secondary); font-size:var(--sage-font-sm); }.page-row em { color:var(--sage-success); font-style:normal; font-weight:650; }button:disabled,input:disabled,select:disabled { opacity:.5; cursor:not-allowed; }
-@media (max-width:760px) { .knowledge-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }.knowledge-metrics div:nth-child(2) { border-right:0; }.migration-banner { grid-template-columns:auto minmax(0,1fr); align-items:start; }.migration-banner button,.migration-banner>em { grid-column:1 / -1; width:100%; }.ingest-form { grid-template-columns:1fr; }.proposal-heading,.job-heading { flex-direction:column; gap:4px; }.job-counts { flex-wrap:wrap; }.job-counts button { margin-left:0; }.failed-items li { align-items:flex-start; flex-direction:column; }.proposal-actions { justify-content:stretch; }.proposal-actions button { flex:1; }.page-row li { align-items:flex-start; flex-direction:column; padding:9px 0; } }
+@media (max-width:760px) { .knowledge-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }.knowledge-metrics div:nth-child(2) { border-right:0; }.index-status { grid-template-columns:auto minmax(0,1fr); }.index-status button { grid-column:1 / -1; justify-content:center; width:100%; }.migration-banner { grid-template-columns:auto minmax(0,1fr); align-items:start; }.migration-banner button,.migration-banner>em { grid-column:1 / -1; width:100%; }.ingest-form { grid-template-columns:1fr; }.proposal-heading,.job-heading { flex-direction:column; gap:4px; }.job-counts { flex-wrap:wrap; }.job-counts button { margin-left:0; }.failed-items li { align-items:flex-start; flex-direction:column; }.proposal-actions { justify-content:stretch; }.proposal-actions button { flex:1; }.page-row li { align-items:flex-start; flex-direction:column; padding:9px 0; } }
 </style>

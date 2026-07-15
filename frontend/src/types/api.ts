@@ -201,6 +201,18 @@ export type KnowledgeWorkspaceSummary = {
   source_roots: KnowledgeSourceRoot[]
 }
 
+export type KnowledgeIndexSummary = {
+  status: 'ready' | 'degraded'
+  backend: string
+  embedding_model: string
+  embedding_revision: string
+  revision_count: number
+  indexed_revision_count: number
+  active_chunk_count: number
+  total_chunk_count: number
+  error_count: number
+}
+
 export type KnowledgeMigrationPlanItem = {
   proposal_id: string
   source_root_id: string

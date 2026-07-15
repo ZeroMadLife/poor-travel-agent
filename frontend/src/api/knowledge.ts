@@ -3,6 +3,7 @@ import type {
   KnowledgeJob,
   KnowledgeJobEvent,
   KnowledgeJobItem,
+  KnowledgeIndexSummary,
   KnowledgeMigrationPlan,
   KnowledgeMigrationResult,
   KnowledgeProposal,
@@ -25,6 +26,14 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export function fetchKnowledgeSummary(): Promise<KnowledgeWorkspaceSummary> {
   return request('/api/v1/knowledge')
+}
+
+export function fetchKnowledgeIndex(): Promise<KnowledgeIndexSummary> {
+  return request('/api/v1/knowledge/index')
+}
+
+export function rebuildKnowledgeIndex(): Promise<KnowledgeIndexSummary> {
+  return request('/api/v1/knowledge/index/rebuild', { method: 'POST' })
 }
 
 export function fetchPendingKnowledgeMigration(): Promise<KnowledgeMigrationPlan> {

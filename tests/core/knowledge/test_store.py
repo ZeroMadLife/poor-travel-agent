@@ -11,6 +11,8 @@ from core.knowledge import (
     KnowledgeSourceRoot,
     KnowledgeStore,
 )
+from core.knowledge.index import LocalKnowledgeIndex
+from core.knowledge.retrieval import HashingEmbeddingProvider
 
 
 def _store(tmp_path: Path) -> tuple[KnowledgeStore, Path, Path]:
@@ -101,7 +103,7 @@ def test_ingest_is_content_addressed_idempotent_and_does_not_write_wiki(
     assert "parser_id: sage.markdown" in first.proposed_content
 
 
-def test_v1_metadata_database_migrates_to_v5_without_rewriting_existing_rows(
+def test_v1_metadata_database_migrates_to_v6_without_rewriting_existing_rows(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "state" / "knowledge.sqlite3"
@@ -173,7 +175,7 @@ def test_v1_metadata_database_migrates_to_v5_without_rewriting_existing_rows(
             "SELECT proposal_id, parse_artifact_id FROM knowledge_proposals "
             "WHERE proposal_id='legacy'"
         ).fetchone()
-    assert version == 5
+    assert version == 6
     assert "parse_artifact_id" in columns
     assert artifact_table is not None
     assert policy_table is not None
@@ -203,7 +205,7 @@ def test_v2_parse_artifacts_backfill_source_understanding(tmp_path: Path) -> Non
     assert understanding is not None
     assert "可追溯的旧解析产物" in understanding.summary
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
         assert connection.execute(
             "SELECT COUNT(*) FROM knowledge_source_understandings"
         ).fetchone()[0] == 1
@@ -285,6 +287,114 @@ def test_pending_migration_rejects_a_stale_plan(tmp_path: Path) -> None:
 
     with pytest.raises(KnowledgeConflictError, match="migration plan changed"):
         store.execute_pending_migration(plan.plan_id)
+
+
+def test_projection_indexes_current_revision_and_keeps_old_revision_replayable(
+    tmp_path: Path,
+) -> None:
+    store, vault, _ = _store(tmp_path)
+    source = vault / "context.md"
+    source.write_text("# Context\n\n旧版保留压缩恢复锚点。\n", encoding="utf-8")
+    first = store.evaluate_and_apply_policy(store.ingest("sage-learning", "context.md").proposal_id)
+    first_revision = store.index_summary()
+    first_hit = store.search("压缩恢复锚点")[0]
+    source.write_text("# Context\n\n新版采用动态上下文窗口。\n", encoding="utf-8")
+    second = store.evaluate_and_apply_policy(store.ingest("sage-learning", "context.md").proposal_id)
+
+    current_hits = store.search("动态上下文窗口")
+    stale_default_hits = store.search("旧版保留压缩恢复锚点")
+    old_hits = store.search(
+        "旧版保留压缩恢复锚点",
+        page_revisions=(first_hit.chunk.page_revision,),
+    )
+
+    assert first.status == "approved" and second.status == "approved"
+    assert first_hit.chunk.active is True
+    assert first_hit.chunk.source_revision == first.source_revision
+    assert first_hit.citation_id.startswith("kcite_")
+    assert current_hits[0].chunk.source_revision == second.source_revision
+    assert current_hits[0].chunk.active is True
+    assert all(hit.chunk.page_revision != first_hit.chunk.page_revision for hit in stale_default_hits)
+    assert old_hits[0].chunk.page_revision == first_hit.chunk.page_revision
+    assert old_hits[0].chunk.active is False
+    summary = store.index_summary()
+    assert summary.revision_count == first_revision.revision_count + 1
+    assert summary.indexed_revision_count == summary.revision_count
+    assert summary.active_chunk_count == 1
+    assert summary.total_chunk_count == 2
+    assert summary.error_count == 0
+
+
+def test_index_rebuild_preserves_chunk_and_citation_ids(tmp_path: Path) -> None:
+    store, vault, _ = _store(tmp_path)
+    (vault / "memory.md").write_text(
+        "# Memory\n\n长期记忆使用事实证据和动态 TTL。\n",
+        encoding="utf-8",
+    )
+    store.evaluate_and_apply_policy(store.ingest("sage-learning", "memory.md").proposal_id)
+    before = store.search("动态 TTL")[0]
+
+    summary = store.rebuild_index()
+    after = store.search("动态 TTL")[0]
+
+    assert summary.error_count == 0
+    assert after.chunk.chunk_id == before.chunk.chunk_id
+    assert after.citation_id == before.citation_id
+    assert after.chunk.page_revision == before.chunk.page_revision
+
+
+def test_failed_index_projection_is_atomic_and_rebuildable(tmp_path: Path) -> None:
+    class FailingEmbeddingProvider(HashingEmbeddingProvider):
+        def embed(self, text: str) -> tuple[float, ...]:
+            if "FAIL_INDEX" in text:
+                raise RuntimeError("synthetic index failure")
+            return super().embed(text)
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    repository = tmp_path / "knowledge"
+    repository.mkdir()
+    subprocess.run(
+        ["git", "init", "-b", "main"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    store = KnowledgeStore(
+        repository,
+        tmp_path / "state" / "knowledge.sqlite3",
+        {
+            "sage-learning": KnowledgeSourceRoot(
+                root_id="sage-learning",
+                kind="obsidian",
+                label="Sage Learning",
+                path=vault,
+            )
+        },
+        knowledge_index=LocalKnowledgeIndex(
+            embedding_provider=FailingEmbeddingProvider(dimensions=64)
+        ),
+    )
+    (vault / "failure.md").write_text(
+        "# Failure\n\n第一段可以索引。\n\nFAIL_INDEX 第二段触发失败。\n",
+        encoding="utf-8",
+    )
+
+    proposal = store.evaluate_and_apply_policy(
+        store.ingest("sage-learning", "failure.md").proposal_id
+    )
+
+    assert proposal.status == "approved"
+    assert proposal.projection_status == "complete"
+    failed = store.index_summary()
+    assert failed.error_count == 1
+    assert failed.total_chunk_count == 0
+
+    store.knowledge_index = LocalKnowledgeIndex()
+    rebuilt = store.rebuild_index()
+    assert rebuilt.error_count == 0
+    assert rebuilt.active_chunk_count == 2
 
 
 def test_ingest_rejects_traversal_and_symlink_sources(tmp_path: Path) -> None:
