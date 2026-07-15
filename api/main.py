@@ -23,6 +23,11 @@ from core.coding.provider_settings import SageProviderSettings, SageProviderSett
 from core.coding.usage_store import UsageStore
 from core.config.settings import get_settings
 from core.knowledge import KnowledgeSourceRoot, KnowledgeStore
+from core.knowledge.jobs import (
+    KnowledgeJobRepository,
+    KnowledgeJobService,
+    RedisKnowledgeJobQueue,
+)
 from core.llm import create_llm
 from core.memory.compressor import ContextCompressor
 from core.memory.session_store import SessionStore
@@ -169,6 +174,8 @@ def create_app(
     knowledge_workspace_root: str | Path | None = None,
     knowledge_database_path: str | Path | None = None,
     knowledge_source_roots: Mapping[str, KnowledgeSourceRoot] | None = None,
+    knowledge_job_service: KnowledgeJobService | None = None,
+    knowledge_jobs_enabled: bool | None = None,
 ) -> FastAPI:
     """Create the Sage API app.
 
@@ -177,10 +184,21 @@ def create_app(
         auth: 口令验证器, None 时允许匿名访问
         session_store: 可选持久化会话存储
     """
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        yield
-        await app.state.coding_run_registry.shutdown()
+        service = getattr(app.state, "knowledge_job_service", None)
+        if isinstance(service, KnowledgeJobService):
+            await service.start()
+        try:
+            yield
+        finally:
+            if isinstance(service, KnowledgeJobService):
+                await service.stop()
+            owned_redis = getattr(app.state, "knowledge_job_redis_client", None)
+            if owned_redis is not None:
+                await owned_redis.aclose()
+            await app.state.coding_run_registry.shutdown()
 
     app = FastAPI(title="Sage API", lifespan=lifespan)
     app.state.agent = agent
@@ -259,9 +277,7 @@ def create_app(
         resolved_default_model = coding_default_model or resolved_settings.default_model
     else:
         resolved_catalog = (
-            DEFAULT_CODING_MODEL_CATALOG
-            if coding_model_catalog is None
-            else coding_model_catalog
+            DEFAULT_CODING_MODEL_CATALOG if coding_model_catalog is None else coding_model_catalog
         )
         resolved_capabilities = (
             coding_model_capabilities
@@ -281,13 +297,12 @@ def create_app(
         resolved_settings.reasoning_modes
         if resolved_settings is not None
         else {
-            str(item["id"]): tuple(
-                str(mode) for mode in item.get("reasoning_modes", [])
-            )
+            str(item["id"]): tuple(str(mode) for mode in item.get("reasoning_modes", []))
             for item in resolved_catalog
         }
     )
     if coding_model_factory is None:
+
         def default_coding_model_factory(
             model_id: str = resolved_default_model,
             *,
@@ -327,6 +342,8 @@ def create_app(
             )
         }
     app.state.knowledge_store = None
+    app.state.knowledge_job_service = knowledge_job_service
+    app.state.knowledge_job_redis_client = None
     if configured_knowledge_root is not None:
         configured_knowledge_database = (
             Path(knowledge_database_path).expanduser()
@@ -341,9 +358,21 @@ def create_app(
             configured_source_roots or {},
         )
         app.state.knowledge_store.initialize()
-    app.state.coding_usage_store = UsageStore(
-        resolved_workspace_root / ".sage" / "usage.sqlite3"
-    )
+        enable_jobs = (
+            settings.knowledge_jobs_enabled
+            if knowledge_jobs_enabled is None
+            else knowledge_jobs_enabled
+        )
+        if app.state.knowledge_job_service is None and enable_jobs:
+            redis_module: Any = import_module("redis.asyncio")
+            redis_client: Any = redis_module.from_url(settings.redis_url)
+            app.state.knowledge_job_redis_client = redis_client
+            app.state.knowledge_job_service = KnowledgeJobService(
+                app.state.knowledge_store,
+                KnowledgeJobRepository(AsyncSessionFactory),
+                RedisKnowledgeJobQueue(redis_client),
+            )
+    app.state.coding_usage_store = UsageStore(resolved_workspace_root / ".sage" / "usage.sqlite3")
     app.state.coding_sessions = {}
     from api.coding_runs import CodingRunRegistry
 

@@ -2,12 +2,28 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request, Response, status
+from fastapi import (
+    APIRouter,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 
 from api.schemas import (
+    KnowledgeBatchIngestRequest,
     KnowledgeIngestRequest,
+    KnowledgeJobEventResponse,
+    KnowledgeJobEventsResponse,
+    KnowledgeJobItemResponse,
+    KnowledgeJobResponse,
+    KnowledgeJobsResponse,
     KnowledgePageResponse,
     KnowledgePagesResponse,
     KnowledgeProposalDetailResponse,
@@ -26,15 +42,23 @@ from core.knowledge import (
     KnowledgeProposal,
     KnowledgeStore,
 )
+from core.knowledge.jobs import (
+    TERMINAL_JOB_STATUSES,
+    KnowledgeJob,
+    KnowledgeJobConflictError,
+    KnowledgeJobEvent,
+    KnowledgeJobItem,
+    KnowledgeJobNotFoundError,
+    KnowledgeJobService,
+    KnowledgeScanError,
+)
 
 router = APIRouter()
 _MAX_DIFF_CHARS = 200_000
 
 
 @router.get("/api/v1/knowledge", response_model=KnowledgeWorkspaceSummary)
-async def get_knowledge_summary(
-    request: Request, response: Response
-) -> KnowledgeWorkspaceSummary:
+async def get_knowledge_summary(request: Request, response: Response) -> KnowledgeWorkspaceSummary:
     store = _require_store(request)
     summary = store.summary()
     response.headers["Cache-Control"] = "no-store"
@@ -78,9 +102,144 @@ async def ingest_knowledge_source(
     return _proposal_response(store, proposal)
 
 
-@router.get(
-    "/api/v1/knowledge/proposals", response_model=KnowledgeProposalsResponse
+@router.post(
+    "/api/v1/knowledge/jobs",
+    response_model=KnowledgeJobResponse,
+    status_code=status.HTTP_201_CREATED,
 )
+async def create_knowledge_job(
+    payload: KnowledgeBatchIngestRequest, request: Request
+) -> KnowledgeJobResponse:
+    service = _require_job_service(request)
+    try:
+        job = await service.create_batch(payload.source_root_id, payload.relative_directory)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="knowledge source root not found") from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="knowledge source directory not found") from exc
+    except KnowledgeScanError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _job_response(job)
+
+
+@router.get("/api/v1/knowledge/jobs", response_model=KnowledgeJobsResponse)
+async def list_knowledge_jobs(
+    request: Request, limit: int = Query(default=30, ge=1, le=100)
+) -> KnowledgeJobsResponse:
+    service = _require_job_service(request)
+    jobs = await service.repository.list_jobs(limit=limit)
+    responses: list[KnowledgeJobResponse] = []
+    for job in jobs:
+        responses.append(
+            _job_response(
+                job,
+                items=await service.repository.list_items(
+                    job.job_id,
+                    statuses={"dead_letter"},
+                    limit=100,
+                ),
+            )
+        )
+    return KnowledgeJobsResponse(jobs=responses)
+
+
+@router.get("/api/v1/knowledge/jobs/{job_id}", response_model=KnowledgeJobResponse)
+async def get_knowledge_job(
+    job_id: str,
+    request: Request,
+    include_items: bool = Query(default=True),
+) -> KnowledgeJobResponse:
+    service = _require_job_service(request)
+    try:
+        job = await service.repository.get_job(job_id)
+        items = await service.repository.list_items(job_id) if include_items else []
+    except KnowledgeJobNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="knowledge job not found") from exc
+    return _job_response(job, items=items)
+
+
+@router.get(
+    "/api/v1/knowledge/jobs/{job_id}/events",
+    response_model=KnowledgeJobEventsResponse,
+)
+async def get_knowledge_job_events(
+    job_id: str,
+    request: Request,
+    after: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=500),
+) -> KnowledgeJobEventsResponse:
+    service = _require_job_service(request)
+    try:
+        events = await service.repository.list_events(job_id, after=after, limit=limit + 1)
+    except KnowledgeJobNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="knowledge job not found") from exc
+    has_more = len(events) > limit
+    visible = events[:limit]
+    return KnowledgeJobEventsResponse(
+        items=[_job_event_response(event) for event in visible],
+        next_cursor=visible[-1].sequence if visible else after,
+        has_more=has_more,
+    )
+
+
+@router.post("/api/v1/knowledge/jobs/{job_id}/cancel", response_model=KnowledgeJobResponse)
+async def cancel_knowledge_job(job_id: str, request: Request) -> KnowledgeJobResponse:
+    service = _require_job_service(request)
+    try:
+        return _job_response(await service.cancel_job(job_id))
+    except KnowledgeJobNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="knowledge job not found") from exc
+    except KnowledgeJobConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post(
+    "/api/v1/knowledge/jobs/{job_id}/items/{item_id}/retry",
+    response_model=KnowledgeJobItemResponse,
+)
+async def retry_knowledge_job_item(
+    job_id: str, item_id: str, request: Request
+) -> KnowledgeJobItemResponse:
+    service = _require_job_service(request)
+    try:
+        return _job_item_response(await service.retry_item(job_id, item_id))
+    except KnowledgeJobNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="knowledge job item not found") from exc
+    except KnowledgeJobConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.websocket("/api/v1/knowledge/jobs/{job_id}/stream")
+async def stream_knowledge_job(
+    websocket: WebSocket, job_id: str, after: int = Query(default=0, ge=0)
+) -> None:
+    service = _job_service_for_websocket(websocket)
+    if service is None:
+        await websocket.close(code=1013, reason="knowledge jobs unavailable")
+        return
+    try:
+        job = await service.repository.get_job(job_id)
+    except KnowledgeJobNotFoundError:
+        await websocket.close(code=1008, reason="knowledge job not found")
+        return
+    await websocket.accept()
+    cursor = after
+    try:
+        while True:
+            events = await service.repository.list_events(job_id, after=cursor, limit=200)
+            for event in events:
+                await websocket.send_json(_job_event_response(event).model_dump())
+                cursor = event.sequence
+            job = await service.repository.get_job(job_id)
+            if job.status in TERMINAL_JOB_STATUSES and cursor >= job.latest_sequence:
+                await websocket.close(code=1000)
+                return
+            await asyncio.sleep(0.2)
+    except WebSocketDisconnect:
+        return
+
+
+@router.get("/api/v1/knowledge/proposals", response_model=KnowledgeProposalsResponse)
 async def list_knowledge_proposals(
     request: Request,
     proposal_status: Literal["pending", "approved", "rejected"] | None = Query(
@@ -163,9 +322,7 @@ async def reject_knowledge_proposal(
 @router.get("/api/v1/knowledge/pages", response_model=KnowledgePagesResponse)
 async def list_knowledge_pages(request: Request) -> KnowledgePagesResponse:
     store = _require_store(request)
-    return KnowledgePagesResponse(
-        pages=[_page_response(page) for page in store.list_pages()]
-    )
+    return KnowledgePagesResponse(pages=[_page_response(page) for page in store.list_pages()])
 
 
 @router.post(
@@ -200,6 +357,78 @@ def _require_store(request: Request) -> KnowledgeStore:
     if not isinstance(store, KnowledgeStore):
         raise HTTPException(status_code=503, detail="knowledge workspace is not configured")
     return store
+
+
+def _require_job_service(request: Request) -> KnowledgeJobService:
+    _require_store(request)
+    service = getattr(request.app.state, "knowledge_job_service", None)
+    if not isinstance(service, KnowledgeJobService):
+        raise HTTPException(status_code=503, detail="knowledge jobs are not configured")
+    return service
+
+
+def _job_service_for_websocket(websocket: WebSocket) -> KnowledgeJobService | None:
+    if str(getattr(websocket.app.state, "cloud_app_env", "development")) == "production":
+        return None
+    service = getattr(websocket.app.state, "knowledge_job_service", None)
+    return service if isinstance(service, KnowledgeJobService) else None
+
+
+def _job_response(
+    job: KnowledgeJob, *, items: list[KnowledgeJobItem] | None = None
+) -> KnowledgeJobResponse:
+    return KnowledgeJobResponse(
+        job_id=job.job_id,
+        workspace_id=job.workspace_id,
+        source_root_id=job.source_root_id,
+        source_kind=job.source_kind,
+        source_label=job.source_label,
+        relative_directory=job.relative_directory,
+        pipeline_version=job.pipeline_version,
+        status=job.status,
+        cancel_requested=job.cancel_requested,
+        total_items=job.total_items,
+        processed_items=job.processed_items,
+        succeeded_items=job.succeeded_items,
+        skipped_items=job.skipped_items,
+        failed_items=job.failed_items,
+        cancelled_items=job.cancelled_items,
+        latest_sequence=job.latest_sequence,
+        created_at=job.created_at.isoformat(),
+        started_at=job.started_at.isoformat() if job.started_at else None,
+        completed_at=job.completed_at.isoformat() if job.completed_at else None,
+        updated_at=job.updated_at.isoformat(),
+        items=[_job_item_response(item) for item in items or []],
+    )
+
+
+def _job_item_response(item: KnowledgeJobItem) -> KnowledgeJobItemResponse:
+    return KnowledgeJobItemResponse(
+        item_id=item.item_id,
+        job_id=item.job_id,
+        relative_path=item.relative_path,
+        source_revision=item.source_revision,
+        status=item.status,
+        attempts=item.attempts,
+        max_attempts=item.max_attempts,
+        proposal_id=item.proposal_id,
+        error=item.error,
+        next_attempt_at=(item.next_attempt_at.isoformat() if item.next_attempt_at else None),
+        updated_at=item.updated_at.isoformat(),
+    )
+
+
+def _job_event_response(event: KnowledgeJobEvent) -> KnowledgeJobEventResponse:
+    return KnowledgeJobEventResponse(
+        event_id=event.event_id,
+        job_id=event.job_id,
+        item_id=event.item_id,
+        sequence=event.sequence,
+        kind=event.kind,
+        status=event.status,
+        detail=event.detail,
+        created_at=event.created_at.isoformat(),
+    )
 
 
 def _proposal_response(

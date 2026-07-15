@@ -201,15 +201,19 @@ SAGE_ENV_FILE=/absolute/path/to/tour-agent/.env \
 V7.2 本地知识库联调需要额外指定 Git Knowledge Repository 和白名单来源目录：
 
 ```bash
+# 首次启用或升级版本时执行一次
+python -m db.migrations
+
 KNOWLEDGE_WORKSPACE_ROOT=/absolute/path/to/Sage-knowledge \
 KNOWLEDGE_SOURCE_ROOT=/absolute/path/to/Obsidian/sage-learning \
 KNOWLEDGE_SOURCE_ID=sage-learning \
+KNOWLEDGE_JOBS_ENABLED=true \
 SAGE_ENV_FILE=/absolute/path/to/tour-agent/.env \
 BACKEND_PORT=8022 FRONTEND_PORT=5192 SAGE_SKIP_DOCKER=1 \
 bash scripts/dev.sh
 ```
 
-网页只会提交白名单目录内的相对 Markdown 路径。Ingest 先生成 immutable raw snapshot 和 Wiki proposal，批准后才写 Wiki 与 Git commit；应用不会自动 push Knowledge Repository。
+开启 `KNOWLEDGE_JOBS_ENABLED` 前先执行数据库 migration 并确保 Redis 可用。批量任务元数据以 PostgreSQL 为准，Redis Streams 只负责投递；进程重启会回收过期租约并补投未完成条目。网页只会提交白名单目录内的相对 Markdown 路径。Ingest 先生成 immutable raw snapshot 和 Wiki proposal，批准后才写 Wiki 与 Git commit；应用不会自动 push Knowledge Repository。
 本地 proposal 与 revision metadata 默认保存在 `Sage-knowledge/.sage/knowledge.sqlite3`，不会随 Sage feature worktree 删除。
 
 Windows 建议用 Git Bash 或 WSL 运行 `bash scripts/dev.sh`。如果必须用 CMD，请分别开两个窗口：

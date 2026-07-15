@@ -89,14 +89,12 @@ async def test_init_db_records_the_v7_cloud_control_plane_revision() -> None:
 
     async with engine.connect() as connection:
         revisions = (
-            await connection.execute(text("SELECT revision FROM schema_migrations"))
-        ).scalars().all()
+            (await connection.execute(text("SELECT revision FROM schema_migrations")))
+            .scalars()
+            .all()
+        )
         tables = set(
-            (
-                await connection.execute(
-                    text("SELECT name FROM sqlite_master WHERE type = 'table'")
-                )
-            )
+            (await connection.execute(text("SELECT name FROM sqlite_master WHERE type = 'table'")))
             .scalars()
             .all()
         )
@@ -107,9 +105,16 @@ async def test_init_db_records_the_v7_cloud_control_plane_revision() -> None:
         "20260713_v7_cloud_control_plane",
         "20260713_v7_github_oauth",
         "20260714_v7_model_providers",
+        "20260715_v7_2_knowledge_jobs",
     ]
     assert {
         "cloud_model_providers",
         "cloud_models",
         "cloud_model_preferences",
+        "knowledge_workspaces",
+        "knowledge_source_roots",
+        "knowledge_ingest_jobs",
+        "knowledge_ingest_items",
+        "knowledge_ingest_idempotency",
+        "knowledge_job_events",
     } <= tables

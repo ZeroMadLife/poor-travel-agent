@@ -12,7 +12,6 @@ from diagrams.onprem.database import PostgreSQL
 from diagrams.onprem.inmemory import Redis
 from diagrams.onprem.vcs import Github
 
-
 OUTPUT_DIR = Path(__file__).resolve().parent
 OUTPUT_BASENAME = OUTPUT_DIR / "sage-knowledge-platform-architecture"
 

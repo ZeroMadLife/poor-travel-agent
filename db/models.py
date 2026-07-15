@@ -76,17 +76,25 @@ class CloudUserRecord(Base):
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     display_name: Mapped[str] = mapped_column(String(200), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
 
 
 class AuthIdentityRecord(Base):
     """A provider subject mapped to one Sage user."""
 
     __tablename__ = "cloud_auth_identities"
-    __table_args__ = (UniqueConstraint("provider", "provider_subject", name="cloud_identity_provider_subject_key"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "provider", "provider_subject", name="cloud_identity_provider_subject_key"
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("cloud_users.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("cloud_users.id", ondelete="CASCADE"), index=True
+    )
     provider: Mapped[str] = mapped_column(String(32))
     provider_subject: Mapped[str] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -102,7 +110,9 @@ class CloudInviteRecord(Base):
     email: Mapped[str | None] = mapped_column(String(320), nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    consumed_by_user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("cloud_users.id"), nullable=True)
+    consumed_by_user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("cloud_users.id"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -112,7 +122,9 @@ class CloudLoginSessionRecord(Base):
     __tablename__ = "cloud_login_sessions"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("cloud_users.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("cloud_users.id", ondelete="CASCADE"), index=True
+    )
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -229,10 +241,14 @@ class CloudProjectRecord(Base):
     __tablename__ = "cloud_projects"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    owner_user_id: Mapped[str] = mapped_column(String(36), ForeignKey("cloud_users.id", ondelete="RESTRICT"), index=True)
+    owner_user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("cloud_users.id", ondelete="RESTRICT"), index=True
+    )
     name: Mapped[str] = mapped_column(String(200))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
 
 
 class CloudWorkspaceRecord(Base):
@@ -241,8 +257,149 @@ class CloudWorkspaceRecord(Base):
     __tablename__ = "cloud_workspaces"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    project_id: Mapped[str] = mapped_column(String(36), ForeignKey("cloud_projects.id", ondelete="CASCADE"), index=True)
+    project_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("cloud_projects.id", ondelete="CASCADE"), index=True
+    )
     provider: Mapped[str] = mapped_column(String(32))
     lifecycle_state: Mapped[str] = mapped_column(String(32), default="provisioning")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class KnowledgeWorkspaceRecord(Base):
+    """Tenant-ready metadata for one versioned Knowledge Workspace."""
+
+    __tablename__ = "knowledge_workspaces"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class KnowledgeSourceRecord(Base):
+    """A configured source root without its server filesystem path."""
+
+    __tablename__ = "knowledge_source_roots"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "root_id", name="knowledge_source_workspace_root_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("knowledge_workspaces.id", ondelete="CASCADE"), index=True
+    )
+    root_id: Mapped[str] = mapped_column(String(64))
+    kind: Mapped[str] = mapped_column(String(32))
+    label: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class KnowledgeIngestJobRecord(Base):
+    """PostgreSQL-authoritative state for one batch import."""
+
+    __tablename__ = "knowledge_ingest_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("knowledge_workspaces.id", ondelete="CASCADE"), index=True
+    )
+    source_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("knowledge_source_roots.id", ondelete="CASCADE"), index=True
+    )
+    relative_directory: Mapped[str] = mapped_column(String(1024), default=".")
+    pipeline_version: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    event_sequence: Mapped[int] = mapped_column(Integer, default=0)
+    total_items: Mapped[int] = mapped_column(Integer, default=0)
+    processed_items: Mapped[int] = mapped_column(Integer, default=0)
+    succeeded_items: Mapped[int] = mapped_column(Integer, default=0)
+    skipped_items: Mapped[int] = mapped_column(Integer, default=0)
+    failed_items: Mapped[int] = mapped_column(Integer, default=0)
+    cancelled_items: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class KnowledgeIngestItemRecord(Base):
+    """One independently retryable source revision in a batch import."""
+
+    __tablename__ = "knowledge_ingest_items"
+    __table_args__ = (
+        UniqueConstraint("job_id", "relative_path", name="knowledge_item_job_path_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    job_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("knowledge_ingest_jobs.id", ondelete="CASCADE"), index=True
+    )
+    source_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("knowledge_source_roots.id", ondelete="CASCADE"), index=True
+    )
+    relative_path: Mapped[str] = mapped_column(String(1024))
+    source_revision: Mapped[str] = mapped_column(String(80))
+    idempotency_key: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    proposal_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class KnowledgeIdempotencyRecord(Base):
+    """Cross-job content-revision claim used to prevent duplicate processing."""
+
+    __tablename__ = "knowledge_ingest_idempotency"
+
+    idempotency_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner_item_id: Mapped[str] = mapped_column(String(36), index=True)
+    status: Mapped[str] = mapped_column(String(24))
+    proposal_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class KnowledgeJobEventRecord(Base):
+    """Monotonic browser-visible progress event persisted before delivery."""
+
+    __tablename__ = "knowledge_job_events"
+    __table_args__ = (
+        UniqueConstraint("job_id", "sequence", name="knowledge_event_job_sequence_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    job_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("knowledge_ingest_jobs.id", ondelete="CASCADE"), index=True
+    )
+    item_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("knowledge_ingest_items.id", ondelete="CASCADE"), nullable=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(32))
+    detail_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

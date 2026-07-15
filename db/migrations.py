@@ -1,5 +1,7 @@
 """Small, versioned schema migration entry point for the V7 control plane."""
 
+import asyncio
+
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -48,3 +50,17 @@ async def init_db(engine: AsyncEngine | None = None) -> None:
                 ")"
             )
         )
+        await connection.execute(
+            text(
+                "INSERT INTO schema_migrations (revision, applied_at) "
+                "SELECT '20260715_v7_2_knowledge_jobs', CURRENT_TIMESTAMP "
+                "WHERE NOT EXISTS ("
+                "SELECT 1 FROM schema_migrations "
+                "WHERE revision = '20260715_v7_2_knowledge_jobs'"
+                ")"
+            )
+        )
+
+
+if __name__ == "__main__":
+    asyncio.run(init_db())

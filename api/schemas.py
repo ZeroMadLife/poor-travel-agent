@@ -63,9 +63,7 @@ class CodingSessionsResponse(BaseModel):
     sessions: list[CodingSessionSummary]
 
 
-AssistantHomeSectionStatus = Literal[
-    "ready", "empty", "not_configured", "unavailable", "error"
-]
+AssistantHomeSectionStatus = Literal["ready", "empty", "not_configured", "unavailable", "error"]
 
 
 class AssistantHomeIdentity(BaseModel):
@@ -177,6 +175,72 @@ class KnowledgeIngestRequest(BaseModel):
 
     source_root_id: str = Field(min_length=1, max_length=64)
     relative_path: str = Field(min_length=1, max_length=1024)
+
+
+class KnowledgeBatchIngestRequest(BaseModel):
+    """Scan one configured source directory and enqueue its Markdown files."""
+
+    source_root_id: str = Field(min_length=1, max_length=64)
+    relative_directory: str = Field(default=".", max_length=1024)
+
+
+class KnowledgeJobItemResponse(BaseModel):
+    item_id: str
+    job_id: str
+    relative_path: str
+    source_revision: str
+    status: str
+    attempts: int = Field(ge=0)
+    max_attempts: int = Field(ge=1)
+    proposal_id: str | None = None
+    error: str | None = None
+    next_attempt_at: str | None = None
+    updated_at: str
+
+
+class KnowledgeJobResponse(BaseModel):
+    job_id: str
+    workspace_id: str
+    source_root_id: str
+    source_kind: str
+    source_label: str
+    relative_directory: str
+    pipeline_version: str
+    status: str
+    cancel_requested: bool
+    total_items: int = Field(ge=0)
+    processed_items: int = Field(ge=0)
+    succeeded_items: int = Field(ge=0)
+    skipped_items: int = Field(ge=0)
+    failed_items: int = Field(ge=0)
+    cancelled_items: int = Field(ge=0)
+    latest_sequence: int = Field(ge=0)
+    created_at: str
+    started_at: str | None = None
+    completed_at: str | None = None
+    updated_at: str
+    items: list[KnowledgeJobItemResponse] = Field(default_factory=list)
+
+
+class KnowledgeJobsResponse(BaseModel):
+    jobs: list[KnowledgeJobResponse]
+
+
+class KnowledgeJobEventResponse(BaseModel):
+    event_id: str
+    job_id: str
+    item_id: str | None = None
+    sequence: int = Field(ge=1)
+    kind: str
+    status: str
+    detail: dict[str, str | int | bool | None]
+    created_at: str
+
+
+class KnowledgeJobEventsResponse(BaseModel):
+    items: list[KnowledgeJobEventResponse]
+    next_cursor: int = Field(ge=0)
+    has_more: bool
 
 
 class KnowledgeTransitionRequest(BaseModel):
@@ -368,9 +432,7 @@ class CodingProviderReasoningInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal[
-        "unsupported", "openai_reasoning_effort", "anthropic_thinking_budget"
-    ]
+    kind: Literal["unsupported", "openai_reasoning_effort", "anthropic_thinking_budget"]
     modes: list[Literal["low", "medium", "high"]] | None = None
     budgets: dict[Literal["low", "medium", "high"], int] | None = None
 
@@ -817,9 +879,7 @@ class CloudModelProviderCreateRequest(BaseModel):
     """Create an account-scoped Provider with a write-only API key."""
 
     name: str = Field(min_length=1, max_length=120)
-    api_mode: Literal[
-        "openai_chat_completions", "openai_responses", "anthropic_messages"
-    ]
+    api_mode: Literal["openai_chat_completions", "openai_responses", "anthropic_messages"]
     base_url: str = Field(min_length=1, max_length=500)
     api_key: SecretStr
     models: list[CloudModelInput] = Field(min_length=1, max_length=256)
@@ -835,9 +895,9 @@ class CloudModelProviderUpdateRequest(BaseModel):
     """Update Provider metadata; absent API key preserves the encrypted value."""
 
     name: str | None = Field(default=None, min_length=1, max_length=120)
-    api_mode: Literal[
-        "openai_chat_completions", "openai_responses", "anthropic_messages"
-    ] | None = None
+    api_mode: (
+        Literal["openai_chat_completions", "openai_responses", "anthropic_messages"] | None
+    ) = None
     base_url: str | None = Field(default=None, min_length=1, max_length=500)
     api_key: SecretStr | None = None
     models: list[CloudModelInput] | None = Field(default=None, min_length=1, max_length=256)

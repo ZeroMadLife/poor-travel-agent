@@ -223,6 +223,63 @@ export type KnowledgeProposal = {
   updated_at: string
 }
 
+export type KnowledgeJobStatus =
+  | 'queued'
+  | 'running'
+  | 'cancelling'
+  | 'completed'
+  | 'completed_with_errors'
+  | 'cancelled'
+
+export type KnowledgeJobItem = {
+  item_id: string
+  job_id: string
+  relative_path: string
+  source_revision: string
+  status: string
+  attempts: number
+  max_attempts: number
+  proposal_id: string | null
+  error: string | null
+  next_attempt_at: string | null
+  updated_at: string
+}
+
+export type KnowledgeJob = {
+  job_id: string
+  workspace_id: string
+  source_root_id: string
+  source_kind: string
+  source_label: string
+  relative_directory: string
+  pipeline_version: string
+  status: KnowledgeJobStatus
+  cancel_requested: boolean
+  total_items: number
+  processed_items: number
+  succeeded_items: number
+  skipped_items: number
+  failed_items: number
+  cancelled_items: number
+  latest_sequence: number
+  created_at: string
+  started_at: string | null
+  completed_at: string | null
+  updated_at: string
+  items: KnowledgeJobItem[]
+}
+
+export type KnowledgeJobEvent = {
+  event_id: string
+  job_id: string
+  item_id: string | null
+  sequence: number
+  kind: string
+  status: string
+  detail: Record<string, string | number | boolean | null>
+  created_at: string
+}
+
 export type KnowledgePageRevision = {
   revision_id: string
   sequence: number

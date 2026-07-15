@@ -139,6 +139,7 @@ class Settings(BaseSettings):
     knowledge_source_id: str = "sage-learning"
     knowledge_source_label: str = "Sage Learning"
     knowledge_source_kind: str = "obsidian"
+    knowledge_jobs_enabled: bool = False
 
     langsmith_api_key: str = ""
     langsmith_project: str = "tourswarm"

@@ -1,5 +1,8 @@
 import type {
   KnowledgePage,
+  KnowledgeJob,
+  KnowledgeJobEvent,
+  KnowledgeJobItem,
   KnowledgeProposal,
   KnowledgeWorkspaceSummary,
 } from '../types/api'
@@ -43,6 +46,72 @@ export function ingestKnowledgeSource(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ source_root_id: sourceRootId, relative_path: relativePath }),
   })
+}
+
+export function createKnowledgeJob(
+  sourceRootId: string,
+  relativeDirectory: string,
+): Promise<KnowledgeJob> {
+  return request('/api/v1/knowledge/jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      source_root_id: sourceRootId,
+      relative_directory: relativeDirectory || '.',
+    }),
+  })
+}
+
+export function fetchKnowledgeJobs(): Promise<KnowledgeJob[]> {
+  return request<{ jobs: KnowledgeJob[] }>('/api/v1/knowledge/jobs')
+    .then((response) => response.jobs)
+}
+
+export function fetchKnowledgeJob(jobId: string, includeItems = true): Promise<KnowledgeJob> {
+  const url = new URL(`/api/v1/knowledge/jobs/${encodeURIComponent(jobId)}`, API_BASE_URL)
+  url.searchParams.set('include_items', String(includeItems))
+  return request(`${url.pathname}${url.search}`)
+}
+
+export function cancelKnowledgeJob(jobId: string): Promise<KnowledgeJob> {
+  return request(`/api/v1/knowledge/jobs/${encodeURIComponent(jobId)}/cancel`, {
+    method: 'POST',
+  })
+}
+
+export function retryKnowledgeJobItem(jobId: string, itemId: string): Promise<KnowledgeJobItem> {
+  return request(
+    `/api/v1/knowledge/jobs/${encodeURIComponent(jobId)}/items/${encodeURIComponent(itemId)}/retry`,
+    { method: 'POST' },
+  )
+}
+
+export function buildKnowledgeJobStreamUrl(jobId: string, after = 0): string {
+  const base = new URL(API_BASE_URL, window.location.origin)
+  base.protocol = base.protocol === 'https:' ? 'wss:' : 'ws:'
+  base.pathname = `/api/v1/knowledge/jobs/${encodeURIComponent(jobId)}/stream`
+  base.search = ''
+  base.searchParams.set('after', String(after))
+  return base.toString()
+}
+
+export function parseKnowledgeJobEvent(value: unknown, jobId: string): KnowledgeJobEvent {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('收到无效的知识任务事件')
+  }
+  const event = value as Record<string, unknown>
+  if (
+    typeof event.event_id !== 'string' ||
+    event.job_id !== jobId ||
+    !Number.isSafeInteger(event.sequence) ||
+    Number(event.sequence) < 1 ||
+    typeof event.kind !== 'string' ||
+    typeof event.status !== 'string' ||
+    typeof event.created_at !== 'string'
+  ) {
+    throw new Error('收到无效的知识任务事件')
+  }
+  return value as KnowledgeJobEvent
 }
 
 export function transitionKnowledgeProposal(
