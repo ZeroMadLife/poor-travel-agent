@@ -3,7 +3,7 @@
 import hashlib
 import logging
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from importlib import import_module
 from pathlib import Path
@@ -22,6 +22,7 @@ from core.coding.context import ModelCapabilityRegistry
 from core.coding.provider_settings import SageProviderSettings, SageProviderSettingsStore
 from core.coding.usage_store import UsageStore
 from core.config.settings import get_settings
+from core.knowledge import KnowledgeSourceRoot, KnowledgeStore
 from core.llm import create_llm
 from core.memory.compressor import ContextCompressor
 from core.memory.session_store import SessionStore
@@ -165,6 +166,8 @@ def create_app(
     cloud_frontend_url: str | None = None,
     cloud_model_provider_repository: ModelProviderRepository | None = None,
     cloud_model_provider_probe: ProviderProbe | None = None,
+    knowledge_workspace_root: str | Path | None = None,
+    knowledge_source_roots: Mapping[str, KnowledgeSourceRoot] | None = None,
 ) -> FastAPI:
     """Create the Sage API app.
 
@@ -304,6 +307,32 @@ def create_app(
     app.state.coding_checkpoint_anchor_key = coding_checkpoint_anchor_key
     app.state.coding_workspace_root = resolved_workspace_root
     app.state.coding_storage_root = Path(coding_storage_root or (repo_root / ".coding")).resolve()
+    configured_knowledge_root = (
+        Path(knowledge_workspace_root).expanduser()
+        if knowledge_workspace_root is not None
+        else Path(settings.knowledge_workspace_root).expanduser()
+        if settings.knowledge_workspace_root.strip()
+        else None
+    )
+    configured_source_roots = knowledge_source_roots
+    if configured_source_roots is None and settings.knowledge_source_root.strip():
+        source_id = settings.knowledge_source_id.strip() or "sage-learning"
+        configured_source_roots = {
+            source_id: KnowledgeSourceRoot(
+                root_id=source_id,
+                kind=settings.knowledge_source_kind.strip() or "obsidian",
+                label=settings.knowledge_source_label.strip() or source_id,
+                path=Path(settings.knowledge_source_root).expanduser(),
+            )
+        }
+    app.state.knowledge_store = None
+    if configured_knowledge_root is not None:
+        app.state.knowledge_store = KnowledgeStore(
+            configured_knowledge_root,
+            app.state.coding_storage_root / "knowledge" / "knowledge.sqlite3",
+            configured_source_roots or {},
+        )
+        app.state.knowledge_store.initialize()
     app.state.coding_usage_store = UsageStore(
         resolved_workspace_root / ".sage" / "usage.sqlite3"
     )
@@ -318,6 +347,7 @@ def create_app(
         cloud_model_providers,
         cloud_workspaces,
         coding,
+        knowledge,
         routes,
         ws,
     )
@@ -326,6 +356,7 @@ def create_app(
     app.include_router(routes.router)
     app.include_router(ws.router)
     app.include_router(coding.router)
+    app.include_router(knowledge.router)
     app.include_router(cloud_auth.router)
     app.include_router(cloud_model_providers.router)
     app.include_router(cloud_workspaces.router)

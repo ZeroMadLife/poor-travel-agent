@@ -7,9 +7,15 @@ from fastapi import APIRouter, HTTPException, Request, Response
 
 from api.cloud_dependencies import SESSION_COOKIE
 from api.schemas import AssistantHomeSummary
-from core.assistant import AssistantHomeSummaryService, HomeIdentity, HomeProject
+from core.assistant import (
+    AssistantHomeSummaryService,
+    HomeIdentity,
+    HomeKnowledge,
+    HomeProject,
+)
 from core.cloud.auth.repository import CloudRepository
 from core.coding.persistence import CodingSessionStore
+from core.knowledge import KnowledgeStore
 
 router = APIRouter()
 
@@ -45,6 +51,21 @@ async def get_assistant_home(request: Request, response: Response) -> AssistantH
             project_error = True
 
     storage_root = Path(request.app.state.coding_storage_root)
+    home_knowledge = HomeKnowledge()
+    wiki_pending = 0
+    knowledge_store = getattr(request.app.state, "knowledge_store", None)
+    if isinstance(knowledge_store, KnowledgeStore) and app_env == "development":
+        try:
+            knowledge_summary = knowledge_store.summary()
+            home_knowledge = HomeKnowledge(
+                status="ready",
+                source_count=knowledge_summary.source_count,
+                wiki_page_count=knowledge_summary.wiki_page_count,
+                last_synced_at=knowledge_summary.last_synced_at,
+            )
+            wiki_pending = knowledge_summary.pending_proposal_count
+        except Exception:
+            home_knowledge = HomeKnowledge(status="error")
     service = AssistantHomeSummaryService(
         CodingSessionStore(storage_root / "sessions"), storage_root
     )
@@ -52,6 +73,8 @@ async def get_assistant_home(request: Request, response: Response) -> AssistantH
         identity,
         projects=projects,
         project_error=project_error,
+        knowledge=home_knowledge,
+        wiki_pending=wiki_pending,
     )
     response.headers["Cache-Control"] = "no-store"
     return AssistantHomeSummary.model_validate(asdict(summary))

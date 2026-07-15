@@ -134,18 +134,20 @@ class AssistantHomeSummaryService:
         *,
         projects: Sequence[HomeProject] | None = None,
         project_error: bool = False,
+        knowledge: HomeKnowledge | None = None,
+        wiki_pending: int = 0,
     ) -> AssistantHomeSummary:
         sessions, visible = self._sessions(identity)
         projected_projects = self._projects(projects, project_error=project_error)
-        proposals = self._proposals(visible, sessions)
-        knowledge = HomeKnowledge()
+        proposals = self._proposals(visible, sessions, wiki_pending=wiki_pending)
+        projected_knowledge = knowledge or HomeKnowledge()
         return AssistantHomeSummary(
             identity=identity,
-            knowledge=knowledge,
+            knowledge=projected_knowledge,
             sessions=sessions,
             projects=projected_projects,
             proposals=proposals,
-            suggested_actions=self._actions(knowledge, sessions, proposals),
+            suggested_actions=self._actions(projected_knowledge, sessions, proposals),
         )
 
     def _sessions(
@@ -230,11 +232,14 @@ class AssistantHomeSummaryService:
         self,
         visible: tuple[_VisibleSession, ...],
         sessions: HomeSessions,
+        *,
+        wiki_pending: int = 0,
     ) -> HomeProposalSummary:
         if sessions.status == "error":
             return HomeProposalSummary(
                 status="unavailable",
                 memory_pending=0,
+                wiki_pending=wiki_pending,
                 error="待确认沉淀暂不可用",
             )
         sessions_by_workspace: dict[Path, set[str]] = {}
@@ -264,11 +269,13 @@ class AssistantHomeSummaryService:
             return HomeProposalSummary(
                 status="error",
                 memory_pending=0,
+                wiki_pending=wiki_pending,
                 error="待确认沉淀暂不可用",
             )
         return HomeProposalSummary(
-            status="ready" if proposal_ids else "empty",
+            status="ready" if proposal_ids or wiki_pending else "empty",
             memory_pending=len(proposal_ids),
+            wiki_pending=max(0, wiki_pending),
         )
 
     @staticmethod
@@ -278,6 +285,16 @@ class AssistantHomeSummaryService:
         proposals: HomeProposalSummary,
     ) -> tuple[HomeAction, ...]:
         actions: list[HomeAction] = []
+        if proposals.wiki_pending:
+            actions.append(
+                HomeAction(
+                    id="review-wiki",
+                    kind="review",
+                    label="审核知识更新",
+                    description=f"有 {proposals.wiki_pending} 条 Wiki 提案等待处理。",
+                    target="/knowledge",
+                )
+            )
         if proposals.memory_pending:
             actions.append(
                 HomeAction(

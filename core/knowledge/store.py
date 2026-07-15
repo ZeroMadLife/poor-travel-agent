@@ -1,0 +1,1109 @@
+"""SQLite-reviewed, Git-projected Markdown knowledge workspace."""
+
+from __future__ import annotations
+
+import difflib
+import hashlib
+import json
+import os
+import re
+import sqlite3
+import subprocess
+import tempfile
+import uuid
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from importlib import import_module
+from pathlib import Path, PurePosixPath
+from threading import RLock
+
+_MAX_SOURCE_BYTES = 2 * 1024 * 1024
+_MAX_PROPOSAL_BYTES = 4 * 1024 * 1024
+_ROOT_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+_SCHEMA_VERSION = 1
+_SECRET_PATTERNS = (
+    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"AKIA[0-9A-Z]{16}"),
+    re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+    re.compile(
+        r"(?im)^[A-Z0-9_]*(?:API_KEY|ACCESS_TOKEN|CLIENT_SECRET)"
+        r"\s*=\s*['\"]?[A-Za-z0-9_./+-]{20,}"
+    ),
+)
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS knowledge_sources (
+    source_id TEXT PRIMARY KEY,
+    source_root_id TEXT NOT NULL,
+    source_kind TEXT NOT NULL,
+    relative_path TEXT NOT NULL,
+    current_revision TEXT NOT NULL,
+    raw_path TEXT NOT NULL,
+    title TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(source_root_id, relative_path)
+);
+CREATE TABLE IF NOT EXISTS knowledge_proposals (
+    proposal_id TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL,
+    source_root_id TEXT NOT NULL,
+    source_kind TEXT NOT NULL,
+    source_relative_path TEXT NOT NULL,
+    source_revision TEXT NOT NULL,
+    raw_path TEXT NOT NULL,
+    page_id TEXT NOT NULL,
+    target_path TEXT NOT NULL,
+    title TEXT NOT NULL,
+    proposed_content TEXT NOT NULL,
+    base_page_revision TEXT NOT NULL,
+    change_kind TEXT NOT NULL,
+    status TEXT NOT NULL,
+    projection_status TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS knowledge_proposals_status_idx
+    ON knowledge_proposals(status, created_at);
+CREATE TABLE IF NOT EXISTS knowledge_events (
+    event_id TEXT PRIMARY KEY,
+    proposal_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    detail_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS knowledge_events_proposal_idx
+    ON knowledge_events(proposal_id, created_at);
+CREATE TABLE IF NOT EXISTS knowledge_pages (
+    page_id TEXT PRIMARY KEY,
+    path TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    current_revision TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS knowledge_page_revisions (
+    revision_id TEXT PRIMARY KEY,
+    page_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    content TEXT NOT NULL,
+    source_revision TEXT NOT NULL,
+    proposal_id TEXT NOT NULL,
+    change_kind TEXT NOT NULL,
+    git_commit TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(page_id, sequence)
+);
+CREATE INDEX IF NOT EXISTS knowledge_page_revisions_page_idx
+    ON knowledge_page_revisions(page_id, sequence);
+"""
+
+
+class KnowledgeStoreError(RuntimeError):
+    """Base knowledge persistence error."""
+
+
+class KnowledgeConflictError(KnowledgeStoreError):
+    """A proposal or page revision no longer matches its expected base."""
+
+
+class KnowledgeProjectionError(KnowledgeStoreError):
+    """An approved proposal could not be projected into the Git wiki."""
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeSourceRoot:
+    root_id: str
+    kind: str
+    label: str
+    path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeProposal:
+    proposal_id: str
+    source_id: str
+    source_root_id: str
+    source_kind: str
+    source_relative_path: str
+    source_revision: str
+    raw_path: str
+    page_id: str
+    target_path: str
+    title: str
+    proposed_content: str
+    base_page_revision: str
+    change_kind: str
+    status: str
+    projection_status: str
+    revision: int
+    error: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeEvent:
+    event_id: str
+    proposal_id: str
+    event_type: str
+    revision: int
+    detail: dict[str, str]
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgePageRevision:
+    revision_id: str
+    sequence: int
+    content_hash: str
+    source_revision: str
+    proposal_id: str
+    change_kind: str
+    git_commit: str
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgePage:
+    page_id: str
+    path: str
+    title: str
+    current_revision: str
+    updated_at: str
+    revisions: tuple[KnowledgePageRevision, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeSummary:
+    status: str
+    workspace_name: str
+    source_count: int
+    wiki_page_count: int
+    pending_proposal_count: int
+    last_synced_at: str | None
+    source_roots: tuple[KnowledgeSourceRoot, ...]
+
+
+class KnowledgeStore:
+    """Own the source trust boundary and all auditable Wiki transitions."""
+
+    def __init__(
+        self,
+        workspace_root: str | Path,
+        database_path: str | Path,
+        source_roots: Mapping[str, KnowledgeSourceRoot],
+    ) -> None:
+        self.workspace_root = Path(workspace_root).expanduser().resolve()
+        self.database_path = Path(database_path).expanduser().resolve()
+        self.source_roots = self._validate_source_roots(source_roots)
+        self._lock = RLock()
+        self._initialized = False
+
+    def initialize(self) -> None:
+        with self._lock:
+            if self._initialized:
+                return
+            self._prepare_workspace()
+            self._prepare_database()
+            self._initialized = True
+
+    def summary(self) -> KnowledgeSummary:
+        self.initialize()
+        with self._connect() as connection:
+            source_count = int(
+                connection.execute("SELECT COUNT(*) FROM knowledge_sources").fetchone()[0]
+            )
+            page_count = int(
+                connection.execute("SELECT COUNT(*) FROM knowledge_pages").fetchone()[0]
+            )
+            pending = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM knowledge_proposals WHERE status='pending'"
+                ).fetchone()[0]
+            )
+            last = connection.execute(
+                "SELECT MAX(updated_at) FROM knowledge_pages"
+            ).fetchone()[0]
+        return KnowledgeSummary(
+            status="ready",
+            workspace_name=self.workspace_root.name or "knowledge",
+            source_count=source_count,
+            wiki_page_count=page_count,
+            pending_proposal_count=pending,
+            last_synced_at=str(last) if last else None,
+            source_roots=tuple(self.source_roots.values()),
+        )
+
+    def ingest(self, source_root_id: str, relative_path: str) -> KnowledgeProposal:
+        self.initialize()
+        root = self.source_roots.get(source_root_id)
+        if root is None:
+            raise KeyError(source_root_id)
+        normalized = _relative_markdown_path(relative_path)
+        source_path = root.path / normalized
+        content = _read_source(root.path, source_path)
+        if any(pattern.search(content) for pattern in _SECRET_PATTERNS):
+            raise ValueError("source may contain secret material")
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        source_revision = f"sha256:{digest}"
+        source_id = "src_" + hashlib.sha256(
+            f"{source_root_id}\0{normalized.as_posix()}".encode()
+        ).hexdigest()[:32]
+        title = _title(content, normalized.stem)
+        slug = _slug(normalized.with_suffix("").as_posix())
+        page_id = "page_" + source_id.removeprefix("src_")
+        target_path = f"wiki/sources/{slug}-{source_id[-8:]}.md"
+        raw_path = f"raw/sources/{root.kind}/{digest[:2]}/{digest}.md"
+        _write_immutable(self.workspace_root / raw_path, content)
+
+        with self._lock, self._exclusive_lock(), self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            page = connection.execute(
+                "SELECT current_revision FROM knowledge_pages WHERE page_id=?",
+                (page_id,),
+            ).fetchone()
+            base_revision = str(page["current_revision"]) if page else ""
+            proposed = _source_page(
+                page_id=page_id,
+                title=title,
+                source_id=source_id,
+                source_kind=root.kind,
+                source_relative_path=normalized.as_posix(),
+                source_revision=source_revision,
+                raw_path=raw_path,
+                content=content,
+            )
+            if page is not None:
+                revision = connection.execute(
+                    """
+                    SELECT content_hash FROM knowledge_page_revisions
+                    WHERE revision_id=?
+                    """,
+                    (base_revision,),
+                ).fetchone()
+                if (
+                    revision is not None
+                    and str(revision["content_hash"]) == _content_hash(proposed)
+                ):
+                    existing = connection.execute(
+                        """
+                        SELECT * FROM knowledge_proposals
+                        WHERE source_id=? AND source_revision=?
+                          AND status='approved' AND projection_status='complete'
+                        ORDER BY updated_at DESC LIMIT 1
+                        """,
+                        (source_id, source_revision),
+                    ).fetchone()
+                    if existing is not None:
+                        connection.rollback()
+                        return _proposal(existing)
+            proposal_id = "kprop_" + hashlib.sha256(
+                f"{source_id}\0{source_revision}\0{base_revision}".encode()
+            ).hexdigest()[:32]
+            existing = connection.execute(
+                "SELECT * FROM knowledge_proposals WHERE proposal_id=?",
+                (proposal_id,),
+            ).fetchone()
+            if existing is not None:
+                connection.rollback()
+                return _proposal(existing)
+            now = _now()
+            connection.execute(
+                """
+                INSERT INTO knowledge_sources (
+                    source_id, source_root_id, source_kind, relative_path,
+                    current_revision, raw_path, title, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_id) DO UPDATE SET
+                    current_revision=excluded.current_revision,
+                    raw_path=excluded.raw_path,
+                    title=excluded.title,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    source_id,
+                    source_root_id,
+                    root.kind,
+                    normalized.as_posix(),
+                    source_revision,
+                    raw_path,
+                    title,
+                    now,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO knowledge_proposals (
+                    proposal_id, source_id, source_root_id, source_kind,
+                    source_relative_path, source_revision, raw_path, page_id,
+                    target_path, title, proposed_content, base_page_revision,
+                    change_kind, status, projection_status, revision, error,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ingest',
+                          'pending', 'pending', 0, NULL, ?, ?)
+                """,
+                (
+                    proposal_id,
+                    source_id,
+                    source_root_id,
+                    root.kind,
+                    normalized.as_posix(),
+                    source_revision,
+                    raw_path,
+                    page_id,
+                    target_path,
+                    title,
+                    proposed,
+                    base_revision,
+                    now,
+                    now,
+                ),
+            )
+            self._event(connection, proposal_id, "proposal_created", 0)
+            connection.commit()
+        return self.get_proposal(proposal_id)
+
+    def get_proposal(self, proposal_id: str) -> KnowledgeProposal:
+        self.initialize()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM knowledge_proposals WHERE proposal_id=?",
+                (_bounded_id(proposal_id),),
+            ).fetchone()
+        if row is None:
+            raise KeyError(proposal_id)
+        return _proposal(row)
+
+    def list_proposals(self, status: str | None = None) -> list[KnowledgeProposal]:
+        self.initialize()
+        if status not in {None, "pending", "approved", "rejected"}:
+            raise ValueError("invalid proposal status")
+        with self._connect() as connection:
+            if status is None:
+                rows = connection.execute(
+                    "SELECT * FROM knowledge_proposals ORDER BY created_at DESC LIMIT 200"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM knowledge_proposals WHERE status=? "
+                    "ORDER BY created_at DESC LIMIT 200",
+                    (status,),
+                ).fetchall()
+        return [_proposal(row) for row in rows]
+
+    def list_events(self, proposal_id: str) -> list[KnowledgeEvent]:
+        self.initialize()
+        self.get_proposal(proposal_id)
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM knowledge_events
+                WHERE proposal_id=? ORDER BY created_at, event_id LIMIT 500
+                """,
+                (_bounded_id(proposal_id),),
+            ).fetchall()
+        return [
+            KnowledgeEvent(
+                event_id=str(row["event_id"]),
+                proposal_id=str(row["proposal_id"]),
+                event_type=str(row["event_type"]),
+                revision=int(row["revision"]),
+                detail={
+                    str(key): str(value)
+                    for key, value in json.loads(str(row["detail_json"])).items()
+                },
+                created_at=str(row["created_at"]),
+            )
+            for row in rows
+        ]
+
+    def approve(self, proposal_id: str, expected_revision: int) -> KnowledgeProposal:
+        self.initialize()
+        with self._lock, self._exclusive_lock():
+            current = self.get_proposal(proposal_id)
+            if current.status == "approved":
+                if current.revision != expected_revision:
+                    raise KnowledgeConflictError("proposal revision conflict")
+                if current.projection_status != "complete":
+                    self._project(current)
+                return self.get_proposal(proposal_id)
+            if current.status != "pending" or current.revision != expected_revision:
+                raise KnowledgeConflictError("proposal revision conflict")
+            self._assert_projection_base(current)
+            now = _now()
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                cursor = connection.execute(
+                    """
+                    UPDATE knowledge_proposals
+                    SET status='approved', revision=revision+1,
+                        projection_status='pending', error=NULL, updated_at=?
+                    WHERE proposal_id=? AND status='pending' AND revision=?
+                    """,
+                    (now, proposal_id, expected_revision),
+                )
+                if cursor.rowcount != 1:
+                    connection.rollback()
+                    raise KnowledgeConflictError("proposal revision conflict")
+                self._event(connection, proposal_id, "proposal_approved", expected_revision + 1)
+                connection.commit()
+            approved = self.get_proposal(proposal_id)
+            self._project(approved)
+            return self.get_proposal(proposal_id)
+
+    def reject(self, proposal_id: str, expected_revision: int) -> KnowledgeProposal:
+        self.initialize()
+        with self._lock, self._exclusive_lock(), self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                """
+                UPDATE knowledge_proposals
+                SET status='rejected', revision=revision+1,
+                    projection_status='complete', error=NULL, updated_at=?
+                WHERE proposal_id=? AND status='pending' AND revision=?
+                """,
+                (_now(), _bounded_id(proposal_id), expected_revision),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                raise KnowledgeConflictError("proposal revision conflict")
+            self._event(connection, proposal_id, "proposal_rejected", expected_revision + 1)
+            connection.commit()
+        return self.get_proposal(proposal_id)
+
+    def list_pages(self) -> list[KnowledgePage]:
+        self.initialize()
+        with self._connect() as connection:
+            pages = connection.execute(
+                "SELECT * FROM knowledge_pages ORDER BY title, page_id LIMIT 500"
+            ).fetchall()
+            result: list[KnowledgePage] = []
+            for page in pages:
+                revisions = connection.execute(
+                    """
+                    SELECT * FROM knowledge_page_revisions
+                    WHERE page_id=? ORDER BY sequence LIMIT 100
+                    """,
+                    (page["page_id"],),
+                ).fetchall()
+                result.append(
+                    KnowledgePage(
+                        page_id=str(page["page_id"]),
+                        path=str(page["path"]),
+                        title=str(page["title"]),
+                        current_revision=str(page["current_revision"]),
+                        updated_at=str(page["updated_at"]),
+                        revisions=tuple(_page_revision(row) for row in revisions),
+                    )
+                )
+        return result
+
+    def propose_rollback(
+        self,
+        page_id: str,
+        *,
+        target_revision_id: str,
+        expected_page_revision: str,
+    ) -> KnowledgeProposal:
+        self.initialize()
+        with self._lock, self._exclusive_lock(), self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            page = connection.execute(
+                "SELECT * FROM knowledge_pages WHERE page_id=?", (_bounded_id(page_id),)
+            ).fetchone()
+            if page is None:
+                connection.rollback()
+                raise KeyError(page_id)
+            if str(page["current_revision"]) != expected_page_revision:
+                connection.rollback()
+                raise KnowledgeConflictError("page revision conflict")
+            target = connection.execute(
+                """
+                SELECT * FROM knowledge_page_revisions
+                WHERE page_id=? AND revision_id=?
+                """,
+                (page_id, _bounded_id(target_revision_id)),
+            ).fetchone()
+            if target is None:
+                connection.rollback()
+                raise KeyError(target_revision_id)
+            proposal_id = "kprop_" + uuid.uuid4().hex
+            now = _now()
+            connection.execute(
+                """
+                INSERT INTO knowledge_proposals (
+                    proposal_id, source_id, source_root_id, source_kind,
+                    source_relative_path, source_revision, raw_path, page_id,
+                    target_path, title, proposed_content, base_page_revision,
+                    change_kind, status, projection_status, revision, error,
+                    created_at, updated_at
+                ) VALUES (?, ?, 'knowledge', 'rollback', ?, ?, '', ?, ?, ?, ?, ?,
+                          'rollback', 'pending', 'pending', 0, NULL, ?, ?)
+                """,
+                (
+                    proposal_id,
+                    f"rollback:{page_id}",
+                    str(page["path"]),
+                    f"revision:{target_revision_id}",
+                    page_id,
+                    str(page["path"]),
+                    str(page["title"]),
+                    str(target["content"]),
+                    expected_page_revision,
+                    now,
+                    now,
+                ),
+            )
+            self._event(
+                connection,
+                proposal_id,
+                "rollback_proposed",
+                0,
+                {"target_revision_id": target_revision_id},
+            )
+            connection.commit()
+        return self.get_proposal(proposal_id)
+
+    def proposal_diff(self, proposal: KnowledgeProposal) -> str:
+        current_path = self.workspace_root / proposal.target_path
+        current = current_path.read_text(encoding="utf-8") if current_path.is_file() else ""
+        return "".join(
+            difflib.unified_diff(
+                current.splitlines(keepends=True),
+                proposal.proposed_content.splitlines(keepends=True),
+                fromfile=proposal.target_path,
+                tofile=proposal.target_path,
+            )
+        )
+
+    def _project(self, proposal: KnowledgeProposal) -> None:
+        self._assert_projection_base(proposal)
+        page_path = self.workspace_root / proposal.target_path
+        index_path = self.workspace_root / "index.md"
+        log_path = self.workspace_root / "log.md"
+        backups = {path: _optional_text(path) for path in (page_path, index_path, log_path)}
+        now = _now()
+        try:
+            _atomic_write(page_path, proposal.proposed_content)
+            index = backups[index_path] or "# Knowledge Index\n\n## Sources\n"
+            link = f"- [[{proposal.target_path}|{proposal.title}]] — {proposal.source_kind}\n"
+            if proposal.target_path not in index:
+                index = index.rstrip() + "\n" + link
+            _atomic_write(index_path, index)
+            log = backups[log_path] or "# Knowledge Log\n"
+            log += (
+                f"\n## [{now}] {proposal.change_kind} | {proposal.title}\n\n"
+                f"- proposal: `{proposal.proposal_id}`\n"
+                f"- source revision: `{proposal.source_revision}`\n"
+                f"- target: `[[{proposal.target_path}]]`\n"
+            )
+            _atomic_write(log_path, log)
+            paths = [proposal.target_path, "index.md", "log.md"]
+            if proposal.raw_path:
+                paths.append(proposal.raw_path)
+            self._git("add", "--", *paths)
+            self._git(
+                "-c",
+                "user.name=Sage Knowledge",
+                "-c",
+                "user.email=sage-knowledge@local",
+                "commit",
+                "-m",
+                f"knowledge: apply {proposal.proposal_id}",
+            )
+            commit = self._git("rev-parse", "HEAD").stdout.strip()
+            self._record_projection(proposal, commit, now)
+        except Exception as exc:
+            for path, content in backups.items():
+                _restore(path, content)
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    UPDATE knowledge_proposals
+                    SET projection_status='error', error=?, updated_at=?
+                    WHERE proposal_id=?
+                    """,
+                    ("knowledge projection failed", _now(), proposal.proposal_id),
+                )
+                connection.commit()
+            if isinstance(exc, KnowledgeConflictError):
+                raise
+            raise KnowledgeProjectionError("knowledge projection failed") from exc
+
+    def _record_projection(
+        self, proposal: KnowledgeProposal, git_commit: str, created_at: str
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            page = connection.execute(
+                "SELECT current_revision FROM knowledge_pages WHERE page_id=?",
+                (proposal.page_id,),
+            ).fetchone()
+            actual_base = str(page["current_revision"]) if page else ""
+            if actual_base != proposal.base_page_revision:
+                connection.rollback()
+                raise KnowledgeConflictError("page revision changed during projection")
+            sequence = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM knowledge_page_revisions WHERE page_id=?",
+                    (proposal.page_id,),
+                ).fetchone()[0]
+            ) + 1
+            revision_id = "krev_" + uuid.uuid4().hex
+            content_hash = _content_hash(proposal.proposed_content)
+            connection.execute(
+                """
+                INSERT INTO knowledge_page_revisions (
+                    revision_id, page_id, sequence, content_hash, content,
+                    source_revision, proposal_id, change_kind, git_commit, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    revision_id,
+                    proposal.page_id,
+                    sequence,
+                    content_hash,
+                    proposal.proposed_content,
+                    proposal.source_revision,
+                    proposal.proposal_id,
+                    proposal.change_kind,
+                    git_commit,
+                    created_at,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO knowledge_pages (page_id, path, title, current_revision, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(page_id) DO UPDATE SET
+                    path=excluded.path,
+                    title=excluded.title,
+                    current_revision=excluded.current_revision,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    proposal.page_id,
+                    proposal.target_path,
+                    proposal.title,
+                    revision_id,
+                    created_at,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE knowledge_proposals
+                SET projection_status='complete', error=NULL, updated_at=?
+                WHERE proposal_id=? AND status='approved'
+                """,
+                (created_at, proposal.proposal_id),
+            )
+            self._event(
+                connection,
+                proposal.proposal_id,
+                "projection_completed",
+                proposal.revision,
+                {"page_revision": revision_id, "git_commit": git_commit},
+            )
+            connection.commit()
+
+    def _assert_projection_base(self, proposal: KnowledgeProposal) -> None:
+        managed_status = self._git(
+            "status",
+            "--porcelain=v1",
+            "--",
+            "index.md",
+            "log.md",
+            proposal.target_path,
+        ).stdout.strip()
+        if managed_status:
+            raise KnowledgeConflictError("page changed outside Sage")
+        with self._connect() as connection:
+            page = connection.execute(
+                "SELECT * FROM knowledge_pages WHERE page_id=?", (proposal.page_id,)
+            ).fetchone()
+            if page is None:
+                if proposal.base_page_revision:
+                    raise KnowledgeConflictError("proposal base revision is stale")
+                if (self.workspace_root / proposal.target_path).exists():
+                    raise KnowledgeConflictError("page changed outside Sage")
+                return
+            if str(page["current_revision"]) != proposal.base_page_revision:
+                raise KnowledgeConflictError("proposal base revision is stale")
+            revision = connection.execute(
+                "SELECT content_hash FROM knowledge_page_revisions WHERE revision_id=?",
+                (page["current_revision"],),
+            ).fetchone()
+        page_path = self.workspace_root / proposal.target_path
+        if not page_path.is_file() or page_path.is_symlink():
+            raise KnowledgeConflictError("page changed outside Sage")
+        actual = _content_hash(page_path.read_text(encoding="utf-8"))
+        if revision is None or actual != str(revision["content_hash"]):
+            raise KnowledgeConflictError("page changed outside Sage")
+
+    def _prepare_workspace(self) -> None:
+        if self.workspace_root.exists() and self.workspace_root.is_symlink():
+            raise ValueError("knowledge workspace must not be a symbolic link")
+        self.workspace_root.mkdir(parents=True, exist_ok=True)
+        for directory in (
+            "raw/sources",
+            "wiki/sources",
+            "wiki/projects",
+            "wiki/concepts",
+            "wiki/decisions",
+            "wiki/queries",
+            "wiki/learning",
+            "reviews",
+        ):
+            (self.workspace_root / directory).mkdir(parents=True, exist_ok=True)
+        defaults = {
+            "purpose.md": "# Purpose\n\n构建可审核、可追溯、持续演进的个人知识库。\n",
+            "schema.md": "# Schema\n\n所有 Wiki 写入必须来自 proposal，并保留 source revision。\n",
+            "overview.md": "# Overview\n\n尚无已批准知识页面。\n",
+            "index.md": "# Knowledge Index\n\n## Sources\n",
+            "log.md": "# Knowledge Log\n",
+        }
+        for relative, content in defaults.items():
+            path = self.workspace_root / relative
+            if not path.exists():
+                _atomic_write(path, content)
+        if not (self.workspace_root / ".git").exists():
+            self._git("init", "-b", "main")
+        if not self._has_git_head():
+            self._git("add", "--", *defaults)
+            self._git(
+                "-c",
+                "user.name=Sage Knowledge",
+                "-c",
+                "user.email=sage-knowledge@local",
+                "commit",
+                "-m",
+                "chore: initialize knowledge workspace",
+            )
+
+    def _prepare_database(self) -> None:
+        if self.database_path.exists() and self.database_path.is_symlink():
+            raise ValueError("knowledge database must not be a symbolic link")
+        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.database_path.parent.is_symlink():
+            raise ValueError("knowledge database directory must not be a symbolic link")
+        with self._connect() as connection:
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if version not in {0, _SCHEMA_VERSION}:
+                raise KnowledgeStoreError(
+                    f"unsupported knowledge schema version {version}"
+                )
+            connection.executescript(_SCHEMA)
+            connection.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+            connection.commit()
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        connection = sqlite3.connect(self.database_path, timeout=5.0)
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("PRAGMA busy_timeout=5000")
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=FULL")
+            yield connection
+        finally:
+            connection.close()
+
+    @contextmanager
+    def _exclusive_lock(self) -> Iterator[None]:
+        lock_path = self.database_path.with_suffix(self.database_path.suffix + ".lock")
+        if lock_path.exists() and lock_path.is_symlink():
+            raise ValueError("knowledge lock must not be a symbolic link")
+        descriptor = os.open(
+            lock_path,
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        try:
+            _lock_descriptor(descriptor)
+            yield
+        finally:
+            _unlock_descriptor(descriptor)
+            os.close(descriptor)
+
+    def _git(self, *args: str) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=self.workspace_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise KnowledgeProjectionError(result.stderr.strip() or "git command failed")
+        return result
+
+    def _has_git_head(self) -> bool:
+        return (
+            subprocess.run(
+                ["git", "rev-parse", "--verify", "HEAD"],
+                cwd=self.workspace_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            ).returncode
+            == 0
+        )
+
+    @staticmethod
+    def _validate_source_roots(
+        roots: Mapping[str, KnowledgeSourceRoot],
+    ) -> dict[str, KnowledgeSourceRoot]:
+        validated: dict[str, KnowledgeSourceRoot] = {}
+        for key, value in roots.items():
+            if key != value.root_id or not _ROOT_ID.fullmatch(key):
+                raise ValueError("invalid knowledge source root id")
+            if value.kind not in {"obsidian", "markdown", "github", "feishu"}:
+                raise ValueError("invalid knowledge source kind")
+            path = value.path.expanduser().resolve()
+            if not path.is_dir() or value.path.is_symlink():
+                raise ValueError("knowledge source root must be a regular directory")
+            validated[key] = KnowledgeSourceRoot(
+                root_id=key,
+                kind=value.kind,
+                label=value.label.strip()[:120] or key,
+                path=path,
+            )
+        return validated
+
+    @staticmethod
+    def _event(
+        connection: sqlite3.Connection,
+        proposal_id: str,
+        event_type: str,
+        revision: int,
+        detail: dict[str, str] | None = None,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO knowledge_events (
+                event_id, proposal_id, event_type, revision, detail_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "kevt_" + uuid.uuid4().hex,
+                proposal_id,
+                event_type,
+                revision,
+                json.dumps(detail or {}, sort_keys=True),
+                _now(),
+            ),
+        )
+
+
+def _proposal(row: sqlite3.Row) -> KnowledgeProposal:
+    return KnowledgeProposal(
+        proposal_id=str(row["proposal_id"]),
+        source_id=str(row["source_id"]),
+        source_root_id=str(row["source_root_id"]),
+        source_kind=str(row["source_kind"]),
+        source_relative_path=str(row["source_relative_path"]),
+        source_revision=str(row["source_revision"]),
+        raw_path=str(row["raw_path"]),
+        page_id=str(row["page_id"]),
+        target_path=str(row["target_path"]),
+        title=str(row["title"]),
+        proposed_content=str(row["proposed_content"]),
+        base_page_revision=str(row["base_page_revision"]),
+        change_kind=str(row["change_kind"]),
+        status=str(row["status"]),
+        projection_status=str(row["projection_status"]),
+        revision=int(row["revision"]),
+        error=str(row["error"]) if row["error"] is not None else None,
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
+    )
+
+
+def _page_revision(row: sqlite3.Row) -> KnowledgePageRevision:
+    return KnowledgePageRevision(
+        revision_id=str(row["revision_id"]),
+        sequence=int(row["sequence"]),
+        content_hash=str(row["content_hash"]),
+        source_revision=str(row["source_revision"]),
+        proposal_id=str(row["proposal_id"]),
+        change_kind=str(row["change_kind"]),
+        git_commit=str(row["git_commit"]),
+        created_at=str(row["created_at"]),
+    )
+
+
+def _relative_markdown_path(value: str) -> PurePosixPath:
+    normalized = value.strip().replace("\\", "/")
+    path = PurePosixPath(normalized)
+    if (
+        not normalized
+        or path.is_absolute()
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or path.suffix.lower() not in {".md", ".markdown"}
+    ):
+        raise ValueError("invalid relative source path")
+    return path
+
+
+def _read_source(root: Path, path: Path) -> str:
+    try:
+        lexical_relative = path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("invalid relative source path") from exc
+    cursor = root
+    for part in lexical_relative.parts:
+        cursor /= part
+        if cursor.is_symlink():
+            raise ValueError("source must not be a symbolic link")
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("invalid relative source path") from exc
+    if not resolved.is_file():
+        raise FileNotFoundError(path)
+    stat = resolved.stat()
+    if stat.st_size > _MAX_SOURCE_BYTES:
+        raise ValueError("source exceeds 2 MiB limit")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(resolved, flags)
+    with os.fdopen(descriptor, "rb") as handle:
+        payload = handle.read(_MAX_SOURCE_BYTES + 1)
+    if len(payload) > _MAX_SOURCE_BYTES:
+        raise ValueError("source exceeds 2 MiB limit")
+    try:
+        return payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("source must be UTF-8 Markdown") from exc
+
+
+def _source_page(
+    *,
+    page_id: str,
+    title: str,
+    source_id: str,
+    source_kind: str,
+    source_relative_path: str,
+    source_revision: str,
+    raw_path: str,
+    content: str,
+) -> str:
+    if len(content.encode("utf-8")) > _MAX_PROPOSAL_BYTES:
+        raise ValueError("proposal exceeds size limit")
+    quoted_title = json.dumps(title, ensure_ascii=False)
+    quoted_path = json.dumps(source_relative_path, ensure_ascii=False)
+    return (
+        "---\n"
+        f"id: {page_id}\n"
+        "type: source\n"
+        f"title: {quoted_title}\n"
+        "status: draft\n"
+        "visibility: private\n"
+        "sources:\n"
+        f"  - source_id: {source_id}\n"
+        f"    kind: {source_kind}\n"
+        f"    path: {quoted_path}\n"
+        f"    revision: {source_revision}\n"
+        f"raw_snapshot: {raw_path}\n"
+        "---\n\n"
+        f"# {title}\n\n"
+        "> 本页是可审核的来源投影。后续 LLM 综合必须继续保留来源 revision。\n\n"
+        "## 来源内容\n\n"
+        f"{content.rstrip()}\n"
+    )
+
+
+def _write_immutable(path: Path, content: str) -> None:
+    if path.exists():
+        if path.is_symlink() or path.read_text(encoding="utf-8") != content:
+            raise KnowledgeConflictError("immutable raw snapshot conflict")
+        return
+    _atomic_write(path, content)
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    if path.exists() and path.is_symlink():
+        raise ValueError("knowledge file must not be a symbolic link")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _restore(path: Path, content: str | None) -> None:
+    if content is None:
+        path.unlink(missing_ok=True)
+    else:
+        _atomic_write(path, content)
+
+
+def _optional_text(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("knowledge file path is unsafe")
+    return path.read_text(encoding="utf-8")
+
+
+def _title(content: str, fallback: str) -> str:
+    for line in content.splitlines():
+        if line.startswith("# ") and line[2:].strip():
+            return line[2:].strip()[:160]
+    return fallback.strip()[:160] or "Untitled Source"
+
+
+def _slug(value: str) -> str:
+    normalized = re.sub(r"[^\w-]+", "-", value, flags=re.UNICODE).strip("-").lower()
+    return normalized[:96] or "source"
+
+
+def _content_hash(content: str) -> str:
+    return "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _bounded_id(value: str) -> str:
+    normalized = value.strip()
+    if not normalized or len(normalized) > 128:
+        raise ValueError("invalid knowledge identifier")
+    return normalized
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _lock_descriptor(descriptor: int) -> None:
+    if os.name == "nt":
+        locker = import_module("msvcrt")
+        if os.fstat(descriptor).st_size == 0:
+            os.write(descriptor, b"\0")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        locker.locking(descriptor, locker.LK_LOCK, 1)
+        return
+    locker = import_module("fcntl")
+    locker.flock(descriptor, locker.LOCK_EX)
+
+
+def _unlock_descriptor(descriptor: int) -> None:
+    if os.name == "nt":
+        locker = import_module("msvcrt")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        locker.locking(descriptor, locker.LK_UNLCK, 1)
+        return
+    locker = import_module("fcntl")
+    locker.flock(descriptor, locker.LOCK_UN)

@@ -198,6 +198,19 @@ SAGE_ENV_FILE=/absolute/path/to/tour-agent/.env \
 
 `SAGE_ENV_FILE` 只在当前进程中读取，不会复制密钥到 worktree，也不会把密钥写入日志或 Git。
 
+V7.2 本地知识库联调需要额外指定 Git Knowledge Repository 和白名单来源目录：
+
+```bash
+KNOWLEDGE_WORKSPACE_ROOT=/absolute/path/to/Sage-knowledge \
+KNOWLEDGE_SOURCE_ROOT=/absolute/path/to/Obsidian/sage-learning \
+KNOWLEDGE_SOURCE_ID=sage-learning \
+SAGE_ENV_FILE=/absolute/path/to/tour-agent/.env \
+BACKEND_PORT=8022 FRONTEND_PORT=5192 SAGE_SKIP_DOCKER=1 \
+bash scripts/dev.sh
+```
+
+网页只会提交白名单目录内的相对 Markdown 路径。Ingest 先生成 immutable raw snapshot 和 Wiki proposal，批准后才写 Wiki 与 Git commit；应用不会自动 push Knowledge Repository。
+
 Windows 建议用 Git Bash 或 WSL 运行 `bash scripts/dev.sh`。如果必须用 CMD，请分别开两个窗口：
 
 ```bat

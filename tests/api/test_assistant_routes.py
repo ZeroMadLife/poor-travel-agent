@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from api.main import create_app
 from core.cloud.auth.repository import CloudRepository
 from core.coding.persistence import CodingSessionStore
+from core.knowledge import KnowledgeSourceRoot
 from db.database import create_engine, create_session_factory
 from db.migrations import init_db
 
@@ -105,6 +106,46 @@ def test_local_home_contract_is_honest_and_contains_no_secrets(tmp_path: Path) -
     assert body["projects"]["status"] == "unavailable"
     assert body["proposals"]["memory_pending"] == 0
     assert all(key not in response.text.lower() for key in ("secret", "api_key", "token"))
+
+
+def test_local_home_projects_real_knowledge_counts_without_source_paths(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    vault = tmp_path / "private-vault"
+    vault.mkdir()
+    (vault / "harness.md").write_text("# Agent Harness\n", encoding="utf-8")
+    knowledge = tmp_path / "knowledge"
+    app = create_app(
+        coding_workspace_root=workspace,
+        coding_storage_root=tmp_path / ".coding",
+        cloud_app_env="development",
+        knowledge_workspace_root=knowledge,
+        knowledge_source_roots={
+            "sage-learning": KnowledgeSourceRoot(
+                root_id="sage-learning",
+                kind="obsidian",
+                label="Sage Learning",
+                path=vault,
+            )
+        },
+    )
+    app.state.knowledge_store.ingest("sage-learning", "harness.md")
+
+    response = TestClient(app).get("/api/v1/assistant/home")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["knowledge"] == {
+        "status": "ready",
+        "source_count": 1,
+        "wiki_page_count": 0,
+        "last_synced_at": None,
+    }
+    assert body["proposals"]["wiki_pending"] == 1
+    assert body["suggested_actions"][0]["id"] == "review-wiki"
+    assert str(vault) not in response.text
 
 
 async def test_cloud_home_uses_cookie_identity_and_owner_scoped_data(

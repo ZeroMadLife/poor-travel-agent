@@ -185,6 +185,64 @@ export type AssistantHomeSummary = {
   }>
 }
 
+export type KnowledgeSourceRoot = {
+  root_id: string
+  kind: 'obsidian' | 'markdown' | 'github' | 'feishu'
+  label: string
+}
+
+export type KnowledgeWorkspaceSummary = {
+  status: 'ready'
+  workspace_name: string
+  source_count: number
+  wiki_page_count: number
+  pending_proposal_count: number
+  last_synced_at: string | null
+  source_roots: KnowledgeSourceRoot[]
+}
+
+export type KnowledgeProposal = {
+  proposal_id: string
+  source_root_id: string
+  source_kind: string
+  source_relative_path: string
+  source_revision: string
+  raw_path: string
+  page_id: string
+  target_path: string
+  title: string
+  base_page_revision: string
+  change_kind: 'ingest' | 'rollback'
+  status: 'pending' | 'approved' | 'rejected'
+  projection_status: 'pending' | 'complete' | 'error'
+  revision: number
+  error: string | null
+  diff: string
+  diff_truncated: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type KnowledgePageRevision = {
+  revision_id: string
+  sequence: number
+  content_hash: string
+  source_revision: string
+  proposal_id: string
+  change_kind: 'ingest' | 'rollback'
+  git_commit: string
+  created_at: string
+}
+
+export type KnowledgePage = {
+  page_id: string
+  path: string
+  title: string
+  current_revision: string
+  updated_at: string
+  revisions: KnowledgePageRevision[]
+}
+
 export type CodingSessionMessage = {
   role: 'user' | 'assistant'
   content: string

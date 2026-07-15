@@ -152,6 +152,109 @@ class AssistantHomeSummary(BaseModel):
     suggested_actions: list[AssistantHomeAction] = Field(max_length=4)
 
 
+class KnowledgeSourceRootSummary(BaseModel):
+    """Browser-safe configured source root without a server filesystem path."""
+
+    root_id: str
+    kind: Literal["obsidian", "markdown", "github", "feishu"]
+    label: str
+
+
+class KnowledgeWorkspaceSummary(BaseModel):
+    """Bounded Knowledge Workspace state."""
+
+    status: Literal["ready"]
+    workspace_name: str
+    source_count: int = Field(ge=0)
+    wiki_page_count: int = Field(ge=0)
+    pending_proposal_count: int = Field(ge=0)
+    last_synced_at: str | None = None
+    source_roots: list[KnowledgeSourceRootSummary]
+
+
+class KnowledgeIngestRequest(BaseModel):
+    """Ingest one Markdown file from a server-configured source root."""
+
+    source_root_id: str = Field(min_length=1, max_length=64)
+    relative_path: str = Field(min_length=1, max_length=1024)
+
+
+class KnowledgeTransitionRequest(BaseModel):
+    """Optimistic revision guard for a proposal decision."""
+
+    expected_revision: int = Field(ge=0)
+
+
+class KnowledgeProposalResponse(BaseModel):
+    """One reviewable Wiki change without server absolute paths."""
+
+    proposal_id: str
+    source_root_id: str
+    source_kind: str
+    source_relative_path: str
+    source_revision: str
+    raw_path: str
+    page_id: str
+    target_path: str
+    title: str
+    base_page_revision: str
+    change_kind: Literal["ingest", "rollback"]
+    status: Literal["pending", "approved", "rejected"]
+    projection_status: Literal["pending", "complete", "error"]
+    revision: int = Field(ge=0)
+    error: str | None = None
+    diff: str
+    diff_truncated: bool
+    created_at: str
+    updated_at: str
+
+
+class KnowledgeProposalsResponse(BaseModel):
+    proposals: list[KnowledgeProposalResponse]
+
+
+class KnowledgeProposalEvent(BaseModel):
+    event_id: str
+    event_type: str
+    revision: int = Field(ge=0)
+    detail: dict[str, str]
+    created_at: str
+
+
+class KnowledgeProposalDetailResponse(BaseModel):
+    proposal: KnowledgeProposalResponse
+    events: list[KnowledgeProposalEvent]
+
+
+class KnowledgePageRevisionResponse(BaseModel):
+    revision_id: str
+    sequence: int = Field(ge=1)
+    content_hash: str
+    source_revision: str
+    proposal_id: str
+    change_kind: Literal["ingest", "rollback"]
+    git_commit: str
+    created_at: str
+
+
+class KnowledgePageResponse(BaseModel):
+    page_id: str
+    path: str
+    title: str
+    current_revision: str
+    updated_at: str
+    revisions: list[KnowledgePageRevisionResponse]
+
+
+class KnowledgePagesResponse(BaseModel):
+    pages: list[KnowledgePageResponse]
+
+
+class KnowledgeRollbackRequest(BaseModel):
+    target_revision_id: str = Field(min_length=1, max_length=128)
+    expected_page_revision: str = Field(min_length=1, max_length=128)
+
+
 class CodingSessionMessage(BaseModel):
     """One replayable coding-agent chat message."""
 

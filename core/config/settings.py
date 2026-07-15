@@ -131,6 +131,14 @@ class Settings(BaseSettings):
     github_token_encryption_secret: str = ""
     model_provider_encryption_secret: str = ""
 
+    # Local V7.2 Knowledge Workspace. Cloud mode remains disabled until the
+    # repository and metadata store are tenant-scoped.
+    knowledge_workspace_root: str = ""
+    knowledge_source_root: str = ""
+    knowledge_source_id: str = "sage-learning"
+    knowledge_source_label: str = "Sage Learning"
+    knowledge_source_kind: str = "obsidian"
+
     langsmith_api_key: str = ""
     langsmith_project: str = "tourswarm"
 
