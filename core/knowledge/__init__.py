@@ -13,6 +13,11 @@ from core.knowledge.store import (
     LoadedKnowledgeSource,
     PreparedKnowledgeSource,
 )
+from core.knowledge.understanding import (
+    SourceSection,
+    SourceUnderstanding,
+    UnderstandingCitation,
+)
 
 __all__ = [
     "KnowledgeConflictError",
@@ -26,4 +31,7 @@ __all__ = [
     "KnowledgeSummary",
     "LoadedKnowledgeSource",
     "PreparedKnowledgeSource",
+    "SourceSection",
+    "SourceUnderstanding",
+    "UnderstandingCitation",
 ]

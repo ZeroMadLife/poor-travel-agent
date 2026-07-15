@@ -268,7 +268,7 @@ class KnowledgeJobRepository:
             if (
                 item is None
                 or item.lease_owner != worker_id
-                or item.status not in {"claimed", "parsing", "applying"}
+                or item.status not in {"claimed", "parsing", "understanding", "applying"}
             ):
                 return False
             item.lease_expires_at = _now() + timedelta(seconds=lease_seconds)
@@ -304,6 +304,23 @@ class KnowledgeJobRepository:
                 item=item,
                 kind="item",
                 status="applying",
+                detail={"relative_path": item.relative_path},
+            )
+            return _item_view(item)
+
+    async def start_understanding(self, item_id: str, *, worker_id: str) -> KnowledgeJobItem:
+        async with self._session_factory() as session, session.begin():
+            item, job = await self._locked_item_and_job(session, item_id)
+            self._require_lease(item, worker_id)
+            if job.cancel_requested:
+                raise KnowledgeJobConflictError("job cancellation requested")
+            item.status = "understanding"
+            await self._append_event(
+                session,
+                job,
+                item=item,
+                kind="item",
+                status="understanding",
                 detail={"relative_path": item.relative_path},
             )
             return _item_view(item)
@@ -560,7 +577,9 @@ class KnowledgeJobRepository:
             item_ids = (
                 await session.scalars(
                     select(KnowledgeIngestItemRecord.id).where(
-                        KnowledgeIngestItemRecord.status.in_(("claimed", "parsing", "applying")),
+                        KnowledgeIngestItemRecord.status.in_(
+                            ("claimed", "parsing", "understanding", "applying")
+                        ),
                         KnowledgeIngestItemRecord.lease_expires_at <= now,
                     )
                 )
@@ -568,7 +587,7 @@ class KnowledgeJobRepository:
             for item_id in item_ids:
                 item, job = await self._locked_item_and_job(session, item_id)
                 if (
-                    item.status not in {"claimed", "parsing", "applying"}
+                    item.status not in {"claimed", "parsing", "understanding", "applying"}
                     or item.lease_expires_at is None
                     or _as_utc(item.lease_expires_at) > now
                 ):
@@ -618,6 +637,7 @@ class KnowledgeJobRepository:
         if item.lease_owner != worker_id or item.status not in {
             "claimed",
             "parsing",
+            "understanding",
             "applying",
         }:
             raise KnowledgeJobConflictError("knowledge item lease is not owned")

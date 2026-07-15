@@ -34,7 +34,10 @@ from api.schemas import (
     KnowledgeProposalsResponse,
     KnowledgeRollbackRequest,
     KnowledgeSourceRootSummary,
+    KnowledgeSourceUnderstandingResponse,
     KnowledgeTransitionRequest,
+    KnowledgeUnderstandingCitationResponse,
+    KnowledgeUnderstandingSectionResponse,
     KnowledgeWorkspaceSummary,
 )
 from core.knowledge import (
@@ -43,6 +46,7 @@ from core.knowledge import (
     KnowledgeProjectionError,
     KnowledgeProposal,
     KnowledgeStore,
+    SourceUnderstanding,
 )
 from core.knowledge.jobs import (
     TERMINAL_JOB_STATUSES,
@@ -270,6 +274,7 @@ async def get_knowledge_proposal(
         proposal = store.get_proposal(proposal_id)
         events = store.list_events(proposal_id)
         parse_artifact = store.get_parse_artifact(proposal_id)
+        source_understanding = store.get_source_understanding(proposal_id)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=404, detail="knowledge proposal not found") from exc
     return KnowledgeProposalDetailResponse(
@@ -285,6 +290,7 @@ async def get_knowledge_proposal(
             for event in events
         ],
         parse_artifact=_parse_artifact_response(parse_artifact),
+        source_understanding=_source_understanding_response(source_understanding),
     )
 
 
@@ -497,6 +503,39 @@ def _parse_artifact_response(
             for block in document.blocks
         ],
         created_at=artifact.created_at,
+    )
+
+
+def _source_understanding_response(
+    understanding: SourceUnderstanding | None,
+) -> KnowledgeSourceUnderstandingResponse | None:
+    if understanding is None:
+        return None
+    return KnowledgeSourceUnderstandingResponse(
+        understanding_id=understanding.understanding_id,
+        artifact_id=understanding.artifact_id,
+        source_revision=understanding.source_revision,
+        title=understanding.title,
+        summary=understanding.summary,
+        sections=[
+            KnowledgeUnderstandingSectionResponse(
+                title=section.title,
+                block_ids=list(section.block_ids),
+            )
+            for section in understanding.sections
+        ],
+        topics=list(understanding.topics),
+        block_kind_counts=dict(understanding.block_kind_counts),
+        citations=[
+            KnowledgeUnderstandingCitationResponse(
+                block_id=citation.block_id,
+                page=citation.page,
+                heading_path=list(citation.heading_path),
+            )
+            for citation in understanding.citations
+        ],
+        generator_id=understanding.generator_id,
+        generator_version=understanding.generator_version,
     )
 
 

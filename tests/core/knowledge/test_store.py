@@ -64,6 +64,13 @@ def test_ingest_is_content_addressed_idempotent_and_does_not_write_wiki(
     assert artifact.document.provenance.input_revision == first.source_revision
     assert artifact.document.blocks[0].block_id.startswith("pblk_")
     assert artifact.document.title == "Agent Harness"
+    understanding = store.get_source_understanding(first.proposal_id)
+    assert understanding is not None
+    assert understanding.artifact_id == first.parse_artifact_id
+    assert understanding.generator_id == "sage.extractive"
+    assert "可恢复执行" in understanding.summary
+    assert understanding.citations[0].block_id.startswith("pblk_")
+    assert "agent harness" in understanding.topics
     assert (repository / first.raw_path).read_text(encoding="utf-8") == note.read_text(
         encoding="utf-8"
     )
@@ -73,7 +80,7 @@ def test_ingest_is_content_addressed_idempotent_and_does_not_write_wiki(
     assert "parser_id: sage.markdown" in first.proposed_content
 
 
-def test_v1_metadata_database_migrates_without_rewriting_existing_rows(
+def test_v1_metadata_database_migrates_to_v3_without_rewriting_existing_rows(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "state" / "knowledge.sqlite3"
@@ -141,10 +148,39 @@ def test_v1_metadata_database_migrates_without_rewriting_existing_rows(
             "SELECT proposal_id, parse_artifact_id FROM knowledge_proposals "
             "WHERE proposal_id='legacy'"
         ).fetchone()
-    assert version == 2
+    assert version == 3
     assert "parse_artifact_id" in columns
     assert artifact_table is not None
     assert legacy == ("legacy", None)
+
+
+def test_v2_parse_artifacts_backfill_source_understanding(tmp_path: Path) -> None:
+    store, vault, _ = _store(tmp_path)
+    note = vault / "legacy.md"
+    note.write_text("# Legacy\n\n可追溯的旧解析产物。\n", encoding="utf-8")
+    proposal = store.ingest("sage-learning", "legacy.md")
+    database = store.database_path
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("DELETE FROM knowledge_source_understandings")
+        connection.execute("PRAGMA user_version=2")
+        connection.commit()
+
+    migrated = KnowledgeStore(
+        store.workspace_root,
+        database,
+        store.source_roots,
+    )
+    migrated.initialize()
+    understanding = migrated.get_source_understanding(proposal.proposal_id)
+
+    assert understanding is not None
+    assert "可追溯的旧解析产物" in understanding.summary
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute(
+            "SELECT COUNT(*) FROM knowledge_source_understandings"
+        ).fetchone()[0] == 1
 
 
 def test_ingest_rejects_traversal_and_symlink_sources(tmp_path: Path) -> None:

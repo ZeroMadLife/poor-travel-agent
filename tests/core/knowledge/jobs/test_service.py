@@ -81,7 +81,7 @@ async def test_batch_import_persists_progress_and_skips_duplicate_revision(
     assert len(await service.repository.list_items(first.job_id, limit=1)) == 1
     assert await _finish(service, first.job_id) == "completed"
     completed = await service.repository.get_job(first.job_id)
-    assert completed.pipeline_version == "p2.2-b3-external-parsing-v1"
+    assert completed.pipeline_version == "p2.2-b4-understanding-v1"
     assert completed.total_items == 3
     assert completed.succeeded_items == 3
     assert completed.latest_sequence >= 6
@@ -90,6 +90,10 @@ async def test_batch_import_persists_progress_and_skips_duplicate_revision(
     )
     assert any(
         event.status == "parsing" for event in await service.repository.list_events(first.job_id)
+    )
+    assert any(
+        event.status == "understanding"
+        for event in await service.repository.list_events(first.job_id)
     )
     proposals = [
         item.proposal_id

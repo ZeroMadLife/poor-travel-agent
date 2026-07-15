@@ -28,10 +28,16 @@ from core.knowledge.parsing import (
     deserialize_document,
     serialize_document,
 )
+from core.knowledge.understanding import (
+    SourceUnderstanding,
+    deserialize_understanding,
+    serialize_understanding,
+    understand_source,
+)
 
 _MAX_PROPOSAL_BYTES = 4 * 1024 * 1024
 _ROOT_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _SOURCE_FORMATS = {
     ".md": ("text/markdown", 2 * 1024 * 1024),
     ".markdown": ("text/markdown", 2 * 1024 * 1024),
@@ -99,6 +105,19 @@ CREATE TABLE IF NOT EXISTS knowledge_parse_artifacts (
 );
 CREATE INDEX IF NOT EXISTS knowledge_parse_artifacts_source_idx
     ON knowledge_parse_artifacts(source_id, source_revision);
+CREATE TABLE IF NOT EXISTS knowledge_source_understandings (
+    understanding_id TEXT PRIMARY KEY,
+    artifact_id TEXT NOT NULL UNIQUE,
+    source_id TEXT NOT NULL,
+    source_revision TEXT NOT NULL,
+    generator_id TEXT NOT NULL,
+    generator_version TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS knowledge_source_understandings_source_idx
+    ON knowledge_source_understandings(source_id, source_revision);
 CREATE TABLE IF NOT EXISTS knowledge_events (
     event_id TEXT PRIMARY KEY,
     proposal_id TEXT NOT NULL,
@@ -232,6 +251,7 @@ class PreparedKnowledgeSource:
     source_revision: str
     payload: bytes
     document: ParsedDocument
+    understanding: SourceUnderstanding | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,6 +368,7 @@ class KnowledgeStore:
         request = source.parse_request()
         _validate_parsed_document(request, document)
         _scan_text_secrets(f"{document.title}\n{document.rendered_markdown}")
+        artifact_id = _parse_artifact_id(source.source_id, source.source_revision, document)
         return PreparedKnowledgeSource(
             source_root_id=source.source_root_id,
             source_kind=source.source_kind,
@@ -356,6 +377,7 @@ class KnowledgeStore:
             source_revision=source.source_revision,
             payload=source.payload,
             document=document,
+            understanding=understand_source(artifact_id, document),
         )
 
     def ingest_prepared(self, prepared: PreparedKnowledgeSource) -> KnowledgeProposal:
@@ -401,16 +423,12 @@ class KnowledgeStore:
         _write_immutable_bytes(self.workspace_root / raw_path, prepared.payload)
         payload_json = serialize_document(document)
         payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
-        artifact_id = (
-            "part_"
-            + hashlib.sha256(
-                (
-                    f"{source_id}\0{source_revision}\0"
-                    f"{document.provenance.parser_id}\0{document.provenance.parser_version}\0"
-                    f"{payload_hash}"
-                ).encode()
-            ).hexdigest()[:32]
-        )
+        artifact_id = _parse_artifact_id(source_id, source_revision, document)
+        understanding = prepared.understanding or understand_source(artifact_id, document)
+        if understanding.artifact_id != artifact_id:
+            raise KnowledgeConflictError("source understanding references a stale parse artifact")
+        understanding_json = serialize_understanding(understanding)
+        understanding_hash = hashlib.sha256(understanding_json.encode("utf-8")).hexdigest()
 
         with self._lock, self._exclusive_lock(), self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -553,6 +571,36 @@ class KnowledgeStore:
                     now,
                 ),
             )
+            existing_understanding = connection.execute(
+                "SELECT payload_hash, payload_json FROM knowledge_source_understandings "
+                "WHERE understanding_id=?",
+                (understanding.understanding_id,),
+            ).fetchone()
+            if existing_understanding is not None and (
+                str(existing_understanding["payload_hash"]) != understanding_hash
+                or str(existing_understanding["payload_json"]) != understanding_json
+            ):
+                connection.rollback()
+                raise KnowledgeConflictError("immutable source understanding conflict")
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO knowledge_source_understandings (
+                    understanding_id, artifact_id, source_id, source_revision,
+                    generator_id, generator_version, payload_hash, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    understanding.understanding_id,
+                    artifact_id,
+                    source_id,
+                    source_revision,
+                    understanding.generator_id,
+                    understanding.generator_version,
+                    understanding_hash,
+                    understanding_json,
+                    now,
+                ),
+            )
             self._event(
                 connection,
                 proposal_id,
@@ -562,6 +610,8 @@ class KnowledgeStore:
                     "parse_artifact_id": artifact_id,
                     "parser_id": document.provenance.parser_id,
                     "parser_version": document.provenance.parser_version,
+                    "understanding_id": understanding.understanding_id,
+                    "understanding_generator": understanding.generator_id,
                 },
             )
             connection.commit()
@@ -615,6 +665,36 @@ class KnowledgeStore:
             document=document,
             created_at=str(row["created_at"]),
         )
+
+    def get_source_understanding(self, proposal_id: str) -> SourceUnderstanding | None:
+        """Load and integrity-check the immutable understanding for a proposal."""
+        artifact = self.get_parse_artifact(proposal_id)
+        if artifact is None:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM knowledge_source_understandings WHERE artifact_id=?",
+                (artifact.artifact_id,),
+            ).fetchone()
+        if row is None:
+            raise KnowledgeStoreError("source understanding is missing")
+        payload_json = str(row["payload_json"])
+        if hashlib.sha256(payload_json.encode("utf-8")).hexdigest() != str(row["payload_hash"]):
+            raise KnowledgeStoreError("source understanding integrity check failed")
+        try:
+            understanding = deserialize_understanding(payload_json)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise KnowledgeStoreError("source understanding integrity check failed") from exc
+        if (
+            understanding.understanding_id != str(row["understanding_id"])
+            or understanding.artifact_id != artifact.artifact_id
+            or understanding.source_id != artifact.document.source_id
+            or understanding.source_revision != artifact.document.source_revision
+            or understanding.generator_id != str(row["generator_id"])
+            or understanding.generator_version != str(row["generator_version"])
+        ):
+            raise KnowledgeStoreError("source understanding integrity check failed")
+        return understanding
 
     def list_proposals(self, status: str | None = None) -> list[KnowledgeProposal]:
         self.initialize()
@@ -1033,7 +1113,7 @@ class KnowledgeStore:
             raise ValueError("knowledge database directory must not be a symbolic link")
         with self._connect() as connection:
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if version not in {0, 1, _SCHEMA_VERSION}:
+            if version not in {0, 1, 2, _SCHEMA_VERSION}:
                 raise KnowledgeStoreError(f"unsupported knowledge schema version {version}")
             connection.executescript(_SCHEMA)
             proposal_columns = {
@@ -1044,8 +1124,48 @@ class KnowledgeStore:
                 connection.execute(
                     "ALTER TABLE knowledge_proposals ADD COLUMN parse_artifact_id TEXT"
                 )
+            self._backfill_source_understandings(connection)
             connection.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
             connection.commit()
+
+    @staticmethod
+    def _backfill_source_understandings(connection: sqlite3.Connection) -> None:
+        rows = connection.execute(
+            """
+            SELECT artifact_id, payload_json, created_at
+            FROM knowledge_parse_artifacts
+            WHERE artifact_id NOT IN (
+                SELECT artifact_id FROM knowledge_source_understandings
+            )
+            ORDER BY created_at, artifact_id
+            """
+        ).fetchall()
+        for row in rows:
+            try:
+                document = deserialize_document(str(row["payload_json"]))
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise KnowledgeStoreError("parse artifact integrity check failed") from exc
+            understanding = understand_source(str(row["artifact_id"]), document)
+            payload_json = serialize_understanding(understanding)
+            connection.execute(
+                """
+                INSERT INTO knowledge_source_understandings (
+                    understanding_id, artifact_id, source_id, source_revision,
+                    generator_id, generator_version, payload_hash, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    understanding.understanding_id,
+                    understanding.artifact_id,
+                    understanding.source_id,
+                    understanding.source_revision,
+                    understanding.generator_id,
+                    understanding.generator_version,
+                    hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
+                    payload_json,
+                    str(row["created_at"]),
+                ),
+            )
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -1205,6 +1325,25 @@ def _source_format(path: PurePosixPath) -> tuple[str, int]:
         return _SOURCE_FORMATS[path.suffix.lower()]
     except KeyError as exc:
         raise ValueError("unsupported knowledge source format") from exc
+
+
+def _parse_artifact_id(
+    source_id: str,
+    source_revision: str,
+    document: ParsedDocument,
+) -> str:
+    payload_json = serialize_document(document)
+    payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+    return (
+        "part_"
+        + hashlib.sha256(
+            (
+                f"{source_id}\0{source_revision}\0"
+                f"{document.provenance.parser_id}\0{document.provenance.parser_version}\0"
+                f"{payload_hash}"
+            ).encode()
+        ).hexdigest()[:32]
+    )
 
 
 def _read_source_bytes(root: Path, path: Path, *, max_bytes: int) -> bytes:

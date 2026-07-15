@@ -313,10 +313,36 @@ class KnowledgeParseArtifactResponse(BaseModel):
     created_at: str
 
 
+class KnowledgeUnderstandingCitationResponse(BaseModel):
+    block_id: str
+    page: int | None = None
+    heading_path: list[str]
+
+
+class KnowledgeUnderstandingSectionResponse(BaseModel):
+    title: str
+    block_ids: list[str]
+
+
+class KnowledgeSourceUnderstandingResponse(BaseModel):
+    understanding_id: str
+    artifact_id: str
+    source_revision: str
+    title: str
+    summary: str
+    sections: list[KnowledgeUnderstandingSectionResponse]
+    topics: list[str]
+    block_kind_counts: dict[str, int]
+    citations: list[KnowledgeUnderstandingCitationResponse]
+    generator_id: str
+    generator_version: str
+
+
 class KnowledgeProposalDetailResponse(BaseModel):
     proposal: KnowledgeProposalResponse
     events: list[KnowledgeProposalEvent]
     parse_artifact: KnowledgeParseArtifactResponse | None = None
+    source_understanding: KnowledgeSourceUnderstandingResponse | None = None
 
 
 class KnowledgePageRevisionResponse(BaseModel):

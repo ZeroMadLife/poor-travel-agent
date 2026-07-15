@@ -112,6 +112,12 @@ def test_ingest_review_approve_and_rollback_api_contract(tmp_path: Path) -> None
     assert detail["parse_artifact"]["block_count"] >= 2
     assert detail["parse_artifact"]["blocks"][0]["block_id"].startswith("pblk_")
     assert "text" not in detail["parse_artifact"]["blocks"][0]
+    understanding = detail["source_understanding"]
+    assert understanding["artifact_id"] == proposal["parse_artifact_id"]
+    assert understanding["generator_id"] == "sage.extractive"
+    assert "可恢复、可审核" in understanding["summary"]
+    assert understanding["citations"][0]["block_id"].startswith("pblk_")
+    assert "text" not in understanding["citations"][0]
 
     approved = client.post(
         f"/api/v1/knowledge/proposals/{proposal['proposal_id']}/approve",

@@ -25,7 +25,7 @@ from .repository import KnowledgeJobConflictError, KnowledgeJobRepository
 from .scanner import read_source_revision, scan_knowledge_directory
 from .types import KnowledgeJob, KnowledgeJobItem, QueueMessage
 
-PIPELINE_VERSION = "p2.2-b3-external-parsing-v1"
+PIPELINE_VERSION = "p2.2-b4-understanding-v1"
 logger = logging.getLogger(__name__)
 
 
@@ -241,6 +241,9 @@ class KnowledgeJobService:
                     request,
                     progress=report,
                 )
+            await self.repository.start_understanding(
+                item.item_id, worker_id=self.worker_id
+            )
             prepared = await asyncio.to_thread(
                 self.store.prepare_parsed_source, source, document
             )
