@@ -167,6 +167,7 @@ def create_app(
     cloud_model_provider_repository: ModelProviderRepository | None = None,
     cloud_model_provider_probe: ProviderProbe | None = None,
     knowledge_workspace_root: str | Path | None = None,
+    knowledge_database_path: str | Path | None = None,
     knowledge_source_roots: Mapping[str, KnowledgeSourceRoot] | None = None,
 ) -> FastAPI:
     """Create the Sage API app.
@@ -327,9 +328,16 @@ def create_app(
         }
     app.state.knowledge_store = None
     if configured_knowledge_root is not None:
+        configured_knowledge_database = (
+            Path(knowledge_database_path).expanduser()
+            if knowledge_database_path is not None
+            else Path(settings.knowledge_database_path).expanduser()
+            if settings.knowledge_database_path.strip()
+            else configured_knowledge_root / ".sage" / "knowledge.sqlite3"
+        )
         app.state.knowledge_store = KnowledgeStore(
             configured_knowledge_root,
-            app.state.coding_storage_root / "knowledge" / "knowledge.sqlite3",
+            configured_knowledge_database,
             configured_source_roots or {},
         )
         app.state.knowledge_store.initialize()

@@ -210,6 +210,7 @@ bash scripts/dev.sh
 ```
 
 网页只会提交白名单目录内的相对 Markdown 路径。Ingest 先生成 immutable raw snapshot 和 Wiki proposal，批准后才写 Wiki 与 Git commit；应用不会自动 push Knowledge Repository。
+本地 proposal 与 revision metadata 默认保存在 `Sage-knowledge/.sage/knowledge.sqlite3`，不会随 Sage feature worktree 删除。
 
 Windows 建议用 Git Bash 或 WSL 运行 `bash scripts/dev.sh`。如果必须用 CMD，请分别开两个窗口：
 

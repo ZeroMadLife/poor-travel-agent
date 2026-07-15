@@ -134,6 +134,7 @@ class Settings(BaseSettings):
     # Local V7.2 Knowledge Workspace. Cloud mode remains disabled until the
     # repository and metadata store are tenant-scoped.
     knowledge_workspace_root: str = ""
+    knowledge_database_path: str = ""
     knowledge_source_root: str = ""
     knowledge_source_id: str = "sage-learning"
     knowledge_source_label: str = "Sage Learning"

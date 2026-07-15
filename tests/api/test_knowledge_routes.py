@@ -82,6 +82,9 @@ def test_ingest_review_approve_and_rollback_api_contract(tmp_path: Path) -> None
         ],
     }
     assert str(vault) not in initial.text
+    assert app.state.knowledge_store.database_path == (
+        knowledge / ".sage" / "knowledge.sqlite3"
+    )
 
     ingested = client.post(
         "/api/v1/knowledge/ingest",
