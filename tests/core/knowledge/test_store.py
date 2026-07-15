@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -56,12 +57,94 @@ def test_ingest_is_content_addressed_idempotent_and_does_not_write_wiki(
     assert first.source_kind == "obsidian"
     assert first.source_revision.startswith("sha256:")
     assert first.raw_path.startswith("raw/sources/obsidian/")
+    assert first.parse_artifact_id.startswith("part_")
+    artifact = store.get_parse_artifact(first.proposal_id)
+    assert artifact is not None
+    assert artifact.document.provenance.parser_id == "sage.markdown"
+    assert artifact.document.provenance.input_revision == first.source_revision
+    assert artifact.document.blocks[0].block_id.startswith("pblk_")
+    assert artifact.document.title == "Agent Harness"
     assert (repository / first.raw_path).read_text(encoding="utf-8") == note.read_text(
         encoding="utf-8"
     )
     assert not (repository / first.target_path).exists()
     assert store.summary().source_count == 1
     assert store.summary().pending_proposal_count == 1
+    assert "parser_id: sage.markdown" in first.proposed_content
+
+
+def test_v1_metadata_database_migrates_without_rewriting_existing_rows(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "state" / "knowledge.sqlite3"
+    database.parent.mkdir()
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE knowledge_proposals (
+                proposal_id TEXT PRIMARY KEY, source_id TEXT NOT NULL,
+                source_root_id TEXT NOT NULL, source_kind TEXT NOT NULL,
+                source_relative_path TEXT NOT NULL, source_revision TEXT NOT NULL,
+                raw_path TEXT NOT NULL, page_id TEXT NOT NULL,
+                target_path TEXT NOT NULL, title TEXT NOT NULL,
+                proposed_content TEXT NOT NULL, base_page_revision TEXT NOT NULL,
+                change_kind TEXT NOT NULL, status TEXT NOT NULL,
+                projection_status TEXT NOT NULL, revision INTEGER NOT NULL,
+                error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO knowledge_proposals (
+                proposal_id, source_id, source_root_id, source_kind,
+                source_relative_path, source_revision, raw_path, page_id,
+                target_path, title, proposed_content, base_page_revision,
+                change_kind, status, projection_status, revision, error,
+                created_at, updated_at
+            ) VALUES (
+                'legacy', 'src_legacy', 'sage-learning', 'obsidian',
+                'legacy.md', 'sha256:legacy', 'raw/legacy.md', 'page_legacy',
+                'wiki/legacy.md', 'Legacy', '# Legacy', '', 'ingest',
+                'pending', 'pending', 0, NULL, '2026-07-15', '2026-07-15'
+            )
+            """
+        )
+        connection.execute("PRAGMA user_version=1")
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    repository = tmp_path / "knowledge"
+    repository.mkdir()
+    store = KnowledgeStore(
+        repository,
+        database,
+        {
+            "sage-learning": KnowledgeSourceRoot(
+                root_id="sage-learning",
+                kind="obsidian",
+                label="Sage Learning",
+                path=vault,
+            )
+        },
+    )
+
+    store.initialize()
+
+    with sqlite3.connect(database) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(knowledge_proposals)")}
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        artifact_table = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='knowledge_parse_artifacts'"
+        ).fetchone()
+        legacy = connection.execute(
+            "SELECT proposal_id, parse_artifact_id FROM knowledge_proposals "
+            "WHERE proposal_id='legacy'"
+        ).fetchone()
+    assert version == 2
+    assert "parse_artifact_id" in columns
+    assert artifact_table is not None
+    assert legacy == ("legacy", None)
 
 
 def test_ingest_rejects_traversal_and_symlink_sources(tmp_path: Path) -> None:
@@ -141,6 +224,8 @@ def test_stale_proposal_conflicts_and_rollback_creates_new_revision(
         expected_page_revision=current.current_revision,
     )
     assert rollback.status == "pending"
+    assert rollback.parse_artifact_id is None
+    assert store.get_parse_artifact(rollback.proposal_id) is None
     assert "第二版" in (repository / current.path).read_text(encoding="utf-8")
     store.approve(rollback.proposal_id, expected_revision=0)
 

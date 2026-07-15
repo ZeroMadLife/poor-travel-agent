@@ -26,6 +26,8 @@ from api.schemas import (
     KnowledgeJobsResponse,
     KnowledgePageResponse,
     KnowledgePagesResponse,
+    KnowledgeParseArtifactResponse,
+    KnowledgeParseBlockResponse,
     KnowledgeProposalDetailResponse,
     KnowledgeProposalEvent,
     KnowledgeProposalResponse,
@@ -52,6 +54,7 @@ from core.knowledge.jobs import (
     KnowledgeJobService,
     KnowledgeScanError,
 )
+from core.knowledge.parsing import ParseArtifact
 
 router = APIRouter()
 _MAX_DIFF_CHARS = 200_000
@@ -266,6 +269,7 @@ async def get_knowledge_proposal(
     try:
         proposal = store.get_proposal(proposal_id)
         events = store.list_events(proposal_id)
+        parse_artifact = store.get_parse_artifact(proposal_id)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=404, detail="knowledge proposal not found") from exc
     return KnowledgeProposalDetailResponse(
@@ -280,6 +284,7 @@ async def get_knowledge_proposal(
             )
             for event in events
         ],
+        parse_artifact=_parse_artifact_response(parse_artifact),
     )
 
 
@@ -453,11 +458,45 @@ def _proposal_response(
         status=proposal.status,  # type: ignore[arg-type]
         projection_status=proposal.projection_status,  # type: ignore[arg-type]
         revision=proposal.revision,
+        parse_artifact_id=proposal.parse_artifact_id,
         error=proposal.error,
         diff=diff,
         diff_truncated=truncated,
         created_at=proposal.created_at,
         updated_at=proposal.updated_at,
+    )
+
+
+def _parse_artifact_response(
+    artifact: ParseArtifact | None,
+) -> KnowledgeParseArtifactResponse | None:
+    if artifact is None:
+        return None
+    document = artifact.document
+    return KnowledgeParseArtifactResponse(
+        artifact_id=artifact.artifact_id,
+        document_id=document.document_id,
+        parser_id=document.provenance.parser_id,
+        parser_version=document.provenance.parser_version,
+        source_revision=document.source_revision,
+        media_type=document.provenance.media_type,
+        title=document.title,
+        language=document.language,
+        block_count=len(document.blocks),
+        blocks=[
+            KnowledgeParseBlockResponse(
+                block_id=block.block_id,
+                ordinal=block.ordinal,
+                kind=block.kind,
+                heading_path=list(block.heading_path),
+                page=block.page,
+                bbox=block.bbox,
+                media_ref=block.media_ref,
+                confidence=block.confidence,
+            )
+            for block in document.blocks
+        ],
+        created_at=artifact.created_at,
     )
 
 

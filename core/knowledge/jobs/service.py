@@ -15,7 +15,7 @@ from .repository import KnowledgeJobConflictError, KnowledgeJobRepository
 from .scanner import read_source_revision, scan_markdown_directory
 from .types import KnowledgeJob, KnowledgeJobItem, QueueMessage
 
-PIPELINE_VERSION = "p2.2-a-markdown-v1"
+PIPELINE_VERSION = "p2.2-b1-parser-v1"
 logger = logging.getLogger(__name__)
 
 
@@ -181,7 +181,6 @@ class KnowledgeJobService:
             if await self.repository.is_cancel_requested(item.item_id):
                 await self.repository.cancel_claimed_item(item.item_id, worker_id=self.worker_id)
                 return
-            await self.repository.start_applying(item.item_id, worker_id=self.worker_id)
             claim = await self.repository.claim_idempotency(item.item_id)
             if claim.outcome == "duplicate":
                 await self.repository.complete_item(
@@ -202,9 +201,16 @@ class KnowledgeJobService:
             )
             if current_revision != item.source_revision:
                 raise KnowledgeJobConflictError("source revision changed; create a new batch")
-            proposal = await asyncio.to_thread(
-                self.store.ingest, job.source_root_id, item.relative_path
+            await self.repository.start_parsing(item.item_id, worker_id=self.worker_id)
+            prepared = await asyncio.to_thread(
+                self.store.prepare_ingest, job.source_root_id, item.relative_path
             )
+            if prepared.source_revision != item.source_revision:
+                raise KnowledgeJobConflictError("source revision changed; create a new batch")
+            if await self.repository.is_cancel_requested(item.item_id):
+                raise KnowledgeJobConflictError("job cancellation requested")
+            await self.repository.start_applying(item.item_id, worker_id=self.worker_id)
+            proposal = await asyncio.to_thread(self.store.ingest_prepared, prepared)
             await self.repository.complete_item(
                 item.item_id,
                 worker_id=self.worker_id,

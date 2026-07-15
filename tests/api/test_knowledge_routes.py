@@ -30,6 +30,7 @@ def _app(tmp_path: Path):
         coding_storage_root=tmp_path / ".coding",
         cloud_app_env="development",
         knowledge_workspace_root=knowledge,
+        knowledge_database_path=knowledge / ".sage" / "knowledge.sqlite3",
         knowledge_source_roots={
             "sage-learning": KnowledgeSourceRoot(
                 root_id="sage-learning",
@@ -38,6 +39,7 @@ def _app(tmp_path: Path):
                 path=vault,
             )
         },
+        knowledge_jobs_enabled=False,
     )
     return app, vault, knowledge
 
@@ -82,9 +84,7 @@ def test_ingest_review_approve_and_rollback_api_contract(tmp_path: Path) -> None
         ],
     }
     assert str(vault) not in initial.text
-    assert app.state.knowledge_store.database_path == (
-        knowledge / ".sage" / "knowledge.sqlite3"
-    )
+    assert app.state.knowledge_store.database_path == (knowledge / ".sage" / "knowledge.sqlite3")
 
     ingested = client.post(
         "/api/v1/knowledge/ingest",
@@ -102,13 +102,16 @@ def test_ingest_review_approve_and_rollback_api_contract(tmp_path: Path) -> None
 
     listed = client.get("/api/v1/knowledge/proposals", params={"status": "pending"})
     assert listed.status_code == 200
-    assert [item["proposal_id"] for item in listed.json()["proposals"]] == [
-        proposal["proposal_id"]
-    ]
-    detail = client.get(
-        f"/api/v1/knowledge/proposals/{proposal['proposal_id']}"
-    ).json()
+    assert [item["proposal_id"] for item in listed.json()["proposals"]] == [proposal["proposal_id"]]
+    detail = client.get(f"/api/v1/knowledge/proposals/{proposal['proposal_id']}").json()
     assert detail["events"][0]["event_type"] == "proposal_created"
+    assert detail["parse_artifact"]["artifact_id"] == proposal["parse_artifact_id"]
+    assert detail["parse_artifact"]["parser_id"] == "sage.markdown"
+    assert detail["parse_artifact"]["parser_version"] == "1.0.0"
+    assert detail["parse_artifact"]["source_revision"] == proposal["source_revision"]
+    assert detail["parse_artifact"]["block_count"] >= 2
+    assert detail["parse_artifact"]["blocks"][0]["block_id"].startswith("pblk_")
+    assert "text" not in detail["parse_artifact"]["blocks"][0]
 
     approved = client.post(
         f"/api/v1/knowledge/proposals/{proposal['proposal_id']}/approve",

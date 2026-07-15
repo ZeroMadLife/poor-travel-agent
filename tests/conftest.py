@@ -5,6 +5,8 @@ from collections.abc import Iterator
 import pytest
 from _pytest.monkeypatch import MonkeyPatch
 
+from core.config.settings import get_settings
+
 # A local editor backup with stale pre-v5 imports. Keep the user file intact
 # while preventing pytest from treating it as a repository test module.
 collect_ignore = ["core/coding/test_tool_executor 2.py"]
@@ -30,7 +32,17 @@ def set_test_env(monkeypatch: MonkeyPatch) -> Iterator[None]:
         "LLM_MODEL": "doubao:Doubao-Seed-2.0-pro",
         "LLM_LIGHT_MODEL": "deepseek:deepseek-v4-flash",
         "APP_ENV": "test",
+        # Developer-local Knowledge Workspace settings must never make API
+        # tests read or mutate a real vault/repository.
+        "KNOWLEDGE_WORKSPACE_ROOT": "",
+        "KNOWLEDGE_DATABASE_PATH": "",
+        "KNOWLEDGE_SOURCE_ROOT": "",
+        "KNOWLEDGE_JOBS_ENABLED": "false",
     }
     for key, value in test_env.items():
         monkeypatch.setenv(key, value)
-    yield
+    get_settings.cache_clear()
+    try:
+        yield
+    finally:
+        get_settings.cache_clear()

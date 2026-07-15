@@ -266,6 +266,7 @@ class KnowledgeProposalResponse(BaseModel):
     status: Literal["pending", "approved", "rejected"]
     projection_status: Literal["pending", "complete", "error"]
     revision: int = Field(ge=0)
+    parse_artifact_id: str | None = None
     error: str | None = None
     diff: str
     diff_truncated: bool
@@ -285,9 +286,37 @@ class KnowledgeProposalEvent(BaseModel):
     created_at: str
 
 
+class KnowledgeParseBlockResponse(BaseModel):
+    """Non-sensitive block evidence; source text remains server-side."""
+
+    block_id: str
+    ordinal: int = Field(ge=0)
+    kind: Literal["frontmatter", "heading", "paragraph", "list", "code", "table", "quote", "media"]
+    heading_path: list[str]
+    page: int | None = None
+    bbox: tuple[float, float, float, float] | None = None
+    media_ref: str | None = None
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
+class KnowledgeParseArtifactResponse(BaseModel):
+    artifact_id: str
+    document_id: str
+    parser_id: str
+    parser_version: str
+    source_revision: str
+    media_type: str
+    title: str
+    language: str
+    block_count: int = Field(ge=0)
+    blocks: list[KnowledgeParseBlockResponse]
+    created_at: str
+
+
 class KnowledgeProposalDetailResponse(BaseModel):
     proposal: KnowledgeProposalResponse
     events: list[KnowledgeProposalEvent]
+    parse_artifact: KnowledgeParseArtifactResponse | None = None
 
 
 class KnowledgePageRevisionResponse(BaseModel):

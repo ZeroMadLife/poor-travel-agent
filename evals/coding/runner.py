@@ -28,6 +28,7 @@ if str(_REPO_ROOT) not in sys.path:
 from tests.core.coding.scripted_api_client import ScriptedApiClient  # noqa: E402
 
 from core.coding.runtime import CodingRuntime  # noqa: E402
+from core.coding.tool_executor import PermissionMode  # noqa: E402
 from evals.coding.assertions import (  # noqa: E402
     assert_approval_requested,
     assert_diff_ready,
@@ -43,7 +44,7 @@ from evals.coding.report import generate_html_report  # noqa: E402
 from evals.coding.scenarios import SCENARIOS, Scenario  # noqa: E402
 
 
-def _permission_mode_for(scenario: Scenario) -> str:
+def _permission_mode_for(scenario: Scenario) -> PermissionMode:
     """Pick the permission mode that exercises the scenario's category."""
     if scenario.category == "policy_boundary" and "plan" in scenario.name:
         return "plan"
@@ -61,7 +62,7 @@ def _build_runtime(
     *,
     session_suffix: str = "",
     model_responses: list[str] | None = None,
-    permission_mode: str | None = None,
+    permission_mode: PermissionMode | None = None,
 ) -> CodingRuntime:
     """Assemble a real CodingRuntime wired for one scenario.
 

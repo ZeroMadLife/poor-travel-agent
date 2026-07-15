@@ -66,11 +66,15 @@ async def test_batch_import_persists_progress_and_skips_duplicate_revision(
     assert len(await service.repository.list_items(first.job_id, limit=1)) == 1
     assert await _finish(service, first.job_id) == "completed"
     completed = await service.repository.get_job(first.job_id)
+    assert completed.pipeline_version == "p2.2-b1-parser-v1"
     assert completed.total_items == 2
     assert completed.succeeded_items == 2
     assert completed.latest_sequence >= 6
     assert all(
         len(event.event_id) <= 36 for event in await service.repository.list_events(first.job_id)
+    )
+    assert any(
+        event.status == "parsing" for event in await service.repository.list_events(first.job_id)
     )
 
     repeated = await service.create_batch("vault")
@@ -89,12 +93,12 @@ async def test_item_retries_to_dead_letter_then_can_be_retried_individually(
     note = vault / "retry.md"
     note.write_text("# Retry\n\nStable source.\n", encoding="utf-8")
     service = await _service(knowledge_store, job_infrastructure)
-    original_ingest = store.ingest
+    original_prepare = store.prepare_ingest
 
     def fail_transiently(_: str, __: str) -> None:
         raise RuntimeError("temporary parser outage")
 
-    monkeypatch.setattr(store, "ingest", fail_transiently)
+    monkeypatch.setattr(store, "prepare_ingest", fail_transiently)
 
     job = await service.create_batch("vault")
     assert await _finish(service, job.job_id) == "completed_with_errors"
@@ -103,7 +107,7 @@ async def test_item_retries_to_dead_letter_then_can_be_retried_individually(
     assert failed.attempts == 3
     assert "knowledge ingestion failed" in (failed.error or "")
 
-    monkeypatch.setattr(store, "ingest", original_ingest)
+    monkeypatch.setattr(store, "prepare_ingest", original_prepare)
     await service.retry_item(job.job_id, failed.item_id)
     assert await _finish(service, job.job_id) == "completed"
     [retried] = await service.repository.list_items(job.job_id)

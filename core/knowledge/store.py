@@ -19,10 +19,20 @@ from importlib import import_module
 from pathlib import Path, PurePosixPath
 from threading import RLock
 
+from core.knowledge.parsing import (
+    ParseArtifact,
+    ParsedDocument,
+    ParseRequest,
+    ParserRegistry,
+    default_parser_registry,
+    deserialize_document,
+    serialize_document,
+)
+
 _MAX_SOURCE_BYTES = 2 * 1024 * 1024
 _MAX_PROPOSAL_BYTES = 4 * 1024 * 1024
 _ROOT_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _SECRET_PATTERNS = (
     re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
     re.compile(r"AKIA[0-9A-Z]{16}"),
@@ -62,12 +72,26 @@ CREATE TABLE IF NOT EXISTS knowledge_proposals (
     status TEXT NOT NULL,
     projection_status TEXT NOT NULL,
     revision INTEGER NOT NULL,
+    parse_artifact_id TEXT,
     error TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS knowledge_proposals_status_idx
     ON knowledge_proposals(status, created_at);
+CREATE TABLE IF NOT EXISTS knowledge_parse_artifacts (
+    artifact_id TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL,
+    source_revision TEXT NOT NULL,
+    parser_id TEXT NOT NULL,
+    parser_version TEXT NOT NULL,
+    document_id TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS knowledge_parse_artifacts_source_idx
+    ON knowledge_parse_artifacts(source_id, source_revision);
 CREATE TABLE IF NOT EXISTS knowledge_events (
     event_id TEXT PRIMARY KEY,
     proposal_id TEXT NOT NULL,
@@ -141,6 +165,7 @@ class KnowledgeProposal:
     status: str
     projection_status: str
     revision: int
+    parse_artifact_id: str | None
     error: str | None
     created_at: str
     updated_at: str
@@ -189,6 +214,19 @@ class KnowledgeSummary:
     source_roots: tuple[KnowledgeSourceRoot, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedKnowledgeSource:
+    """Validated immutable parser input ready for an auditable proposal."""
+
+    source_root_id: str
+    source_kind: str
+    relative_path: str
+    source_id: str
+    source_revision: str
+    content: str
+    document: ParsedDocument
+
+
 class KnowledgeStore:
     """Own the source trust boundary and all auditable Wiki transitions."""
 
@@ -197,10 +235,12 @@ class KnowledgeStore:
         workspace_root: str | Path,
         database_path: str | Path,
         source_roots: Mapping[str, KnowledgeSourceRoot],
+        parser_registry: ParserRegistry | None = None,
     ) -> None:
         self.workspace_root = Path(workspace_root).expanduser().resolve()
         self.database_path = Path(database_path).expanduser().resolve()
         self.source_roots = self._validate_source_roots(source_roots)
+        self.parser_registry = parser_registry or default_parser_registry()
         self._lock = RLock()
         self._initialized = False
 
@@ -226,9 +266,7 @@ class KnowledgeStore:
                     "SELECT COUNT(*) FROM knowledge_proposals WHERE status='pending'"
                 ).fetchone()[0]
             )
-            last = connection.execute(
-                "SELECT MAX(updated_at) FROM knowledge_pages"
-            ).fetchone()[0]
+            last = connection.execute("SELECT MAX(updated_at) FROM knowledge_pages").fetchone()[0]
         return KnowledgeSummary(
             status="ready",
             workspace_name=self.workspace_root.name or "knowledge",
@@ -240,6 +278,9 @@ class KnowledgeStore:
         )
 
     def ingest(self, source_root_id: str, relative_path: str) -> KnowledgeProposal:
+        return self.ingest_prepared(self.prepare_ingest(source_root_id, relative_path))
+
+    def prepare_ingest(self, source_root_id: str, relative_path: str) -> PreparedKnowledgeSource:
         self.initialize()
         root = self.source_roots.get(source_root_id)
         if root is None:
@@ -251,15 +292,82 @@ class KnowledgeStore:
             raise ValueError("source may contain secret material")
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
         source_revision = f"sha256:{digest}"
-        source_id = "src_" + hashlib.sha256(
-            f"{source_root_id}\0{normalized.as_posix()}".encode()
-        ).hexdigest()[:32]
-        title = _title(content, normalized.stem)
+        source_id = (
+            "src_"
+            + hashlib.sha256(f"{source_root_id}\0{normalized.as_posix()}".encode()).hexdigest()[:32]
+        )
+        request = ParseRequest(
+            source_id=source_id,
+            relative_path=normalized.as_posix(),
+            source_revision=source_revision,
+            media_type="text/markdown",
+            content=content,
+        )
+        document = self.parser_registry.parse(request)
+        _validate_parsed_document(request, document)
+        return PreparedKnowledgeSource(
+            source_root_id=source_root_id,
+            source_kind=root.kind,
+            relative_path=normalized.as_posix(),
+            source_id=source_id,
+            source_revision=source_revision,
+            content=content,
+            document=document,
+        )
+
+    def ingest_prepared(self, prepared: PreparedKnowledgeSource) -> KnowledgeProposal:
+        self.initialize()
+        root = self.source_roots.get(prepared.source_root_id)
+        if root is None or root.kind != prepared.source_kind:
+            raise KnowledgeConflictError("prepared knowledge source is stale")
+        normalized = _relative_markdown_path(prepared.relative_path)
+        current_content = _read_source(root.path, root.path / normalized)
+        current_revision = "sha256:" + hashlib.sha256(current_content.encode("utf-8")).hexdigest()
+        expected_source_id = (
+            "src_"
+            + hashlib.sha256(
+                f"{prepared.source_root_id}\0{normalized.as_posix()}".encode()
+            ).hexdigest()[:32]
+        )
+        if (
+            current_revision != prepared.source_revision
+            or current_content != prepared.content
+            or prepared.source_id != expected_source_id
+        ):
+            raise KnowledgeConflictError("source revision changed during parsing")
+        if any(pattern.search(current_content) for pattern in _SECRET_PATTERNS):
+            raise ValueError("source may contain secret material")
+        document = prepared.document
+        request = ParseRequest(
+            source_id=prepared.source_id,
+            relative_path=prepared.relative_path,
+            source_revision=prepared.source_revision,
+            media_type=document.provenance.media_type,
+            content=prepared.content,
+        )
+        _validate_parsed_document(request, document)
+        source_id = prepared.source_id
+        source_revision = prepared.source_revision
+        content = prepared.content
+        title = document.title
+        digest = source_revision.removeprefix("sha256:")
         slug = _slug(normalized.with_suffix("").as_posix())
         page_id = "page_" + source_id.removeprefix("src_")
         target_path = f"wiki/sources/{slug}-{source_id[-8:]}.md"
         raw_path = f"raw/sources/{root.kind}/{digest[:2]}/{digest}.md"
         _write_immutable(self.workspace_root / raw_path, content)
+        payload_json = serialize_document(document)
+        payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+        artifact_id = (
+            "part_"
+            + hashlib.sha256(
+                (
+                    f"{source_id}\0{source_revision}\0"
+                    f"{document.provenance.parser_id}\0{document.provenance.parser_version}\0"
+                    f"{payload_hash}"
+                ).encode()
+            ).hexdigest()[:32]
+        )
 
         with self._lock, self._exclusive_lock(), self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -276,7 +384,10 @@ class KnowledgeStore:
                 source_relative_path=normalized.as_posix(),
                 source_revision=source_revision,
                 raw_path=raw_path,
-                content=content,
+                content=document.rendered_markdown,
+                parser_id=document.provenance.parser_id,
+                parser_version=document.provenance.parser_version,
+                parsed_document_id=document.document_id,
             )
             if page is not None:
                 revision = connection.execute(
@@ -286,25 +397,28 @@ class KnowledgeStore:
                     """,
                     (base_revision,),
                 ).fetchone()
-                if (
-                    revision is not None
-                    and str(revision["content_hash"]) == _content_hash(proposed)
+                if revision is not None and str(revision["content_hash"]) == _content_hash(
+                    proposed
                 ):
                     existing = connection.execute(
                         """
                         SELECT * FROM knowledge_proposals
                         WHERE source_id=? AND source_revision=?
+                          AND parse_artifact_id=?
                           AND status='approved' AND projection_status='complete'
                         ORDER BY updated_at DESC LIMIT 1
                         """,
-                        (source_id, source_revision),
+                        (source_id, source_revision, artifact_id),
                     ).fetchone()
                     if existing is not None:
                         connection.rollback()
                         return _proposal(existing)
-            proposal_id = "kprop_" + hashlib.sha256(
-                f"{source_id}\0{source_revision}\0{base_revision}".encode()
-            ).hexdigest()[:32]
+            proposal_id = (
+                "kprop_"
+                + hashlib.sha256(
+                    f"{source_id}\0{source_revision}\0{base_revision}\0{artifact_id}".encode()
+                ).hexdigest()[:32]
+            )
             existing = connection.execute(
                 "SELECT * FROM knowledge_proposals WHERE proposal_id=?",
                 (proposal_id,),
@@ -327,7 +441,7 @@ class KnowledgeStore:
                 """,
                 (
                     source_id,
-                    source_root_id,
+                    prepared.source_root_id,
                     root.kind,
                     normalized.as_posix(),
                     source_revision,
@@ -342,15 +456,16 @@ class KnowledgeStore:
                     proposal_id, source_id, source_root_id, source_kind,
                     source_relative_path, source_revision, raw_path, page_id,
                     target_path, title, proposed_content, base_page_revision,
-                    change_kind, status, projection_status, revision, error,
+                    change_kind, status, projection_status, revision,
+                    parse_artifact_id, error,
                     created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ingest',
-                          'pending', 'pending', 0, NULL, ?, ?)
+                          'pending', 'pending', 0, ?, NULL, ?, ?)
                 """,
                 (
                     proposal_id,
                     source_id,
-                    source_root_id,
+                    prepared.source_root_id,
                     root.kind,
                     normalized.as_posix(),
                     source_revision,
@@ -360,11 +475,52 @@ class KnowledgeStore:
                     title,
                     proposed,
                     base_revision,
+                    artifact_id,
                     now,
                     now,
                 ),
             )
-            self._event(connection, proposal_id, "proposal_created", 0)
+            existing_artifact = connection.execute(
+                "SELECT payload_hash, payload_json FROM knowledge_parse_artifacts "
+                "WHERE artifact_id=?",
+                (artifact_id,),
+            ).fetchone()
+            if existing_artifact is not None and (
+                str(existing_artifact["payload_hash"]) != payload_hash
+                or str(existing_artifact["payload_json"]) != payload_json
+            ):
+                connection.rollback()
+                raise KnowledgeConflictError("immutable parse artifact conflict")
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO knowledge_parse_artifacts (
+                    artifact_id, source_id, source_revision, parser_id,
+                    parser_version, document_id, payload_hash, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    artifact_id,
+                    source_id,
+                    source_revision,
+                    document.provenance.parser_id,
+                    document.provenance.parser_version,
+                    document.document_id,
+                    payload_hash,
+                    payload_json,
+                    now,
+                ),
+            )
+            self._event(
+                connection,
+                proposal_id,
+                "proposal_created",
+                0,
+                {
+                    "parse_artifact_id": artifact_id,
+                    "parser_id": document.provenance.parser_id,
+                    "parser_version": document.provenance.parser_version,
+                },
+            )
             connection.commit()
         return self.get_proposal(proposal_id)
 
@@ -378,6 +534,44 @@ class KnowledgeStore:
         if row is None:
             raise KeyError(proposal_id)
         return _proposal(row)
+
+    def get_parse_artifact(self, proposal_id: str) -> ParseArtifact | None:
+        """Load and integrity-check the immutable parse result for a proposal."""
+
+        proposal = self.get_proposal(proposal_id)
+        if proposal.parse_artifact_id is None:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM knowledge_parse_artifacts WHERE artifact_id=?",
+                (proposal.parse_artifact_id,),
+            ).fetchone()
+        if row is None:
+            raise KnowledgeStoreError("parse artifact is missing")
+        payload_json = str(row["payload_json"])
+        if hashlib.sha256(payload_json.encode("utf-8")).hexdigest() != str(row["payload_hash"]):
+            raise KnowledgeStoreError("parse artifact integrity check failed")
+        try:
+            document = deserialize_document(payload_json)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise KnowledgeStoreError("parse artifact integrity check failed") from exc
+        if (
+            document.document_id != str(row["document_id"])
+            or document.source_id != str(row["source_id"])
+            or document.source_revision != str(row["source_revision"])
+            or document.provenance.input_revision != str(row["source_revision"])
+            or document.provenance.parser_id != str(row["parser_id"])
+            or document.provenance.parser_version != str(row["parser_version"])
+            or document.source_id != proposal.source_id
+            or document.source_revision != proposal.source_revision
+        ):
+            raise KnowledgeStoreError("parse artifact integrity check failed")
+        return ParseArtifact(
+            artifact_id=str(row["artifact_id"]),
+            proposal_id=proposal.proposal_id,
+            document=document,
+            created_at=str(row["created_at"]),
+        )
 
     def list_proposals(self, status: str | None = None) -> list[KnowledgeProposal]:
         self.initialize()
@@ -648,12 +842,15 @@ class KnowledgeStore:
             if actual_base != proposal.base_page_revision:
                 connection.rollback()
                 raise KnowledgeConflictError("page revision changed during projection")
-            sequence = int(
-                connection.execute(
-                    "SELECT COUNT(*) FROM knowledge_page_revisions WHERE page_id=?",
-                    (proposal.page_id,),
-                ).fetchone()[0]
-            ) + 1
+            sequence = (
+                int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM knowledge_page_revisions WHERE page_id=?",
+                        (proposal.page_id,),
+                    ).fetchone()[0]
+                )
+                + 1
+            )
             revision_id = "krev_" + uuid.uuid4().hex
             content_hash = _content_hash(proposal.proposed_content)
             connection.execute(
@@ -793,11 +990,17 @@ class KnowledgeStore:
             raise ValueError("knowledge database directory must not be a symbolic link")
         with self._connect() as connection:
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if version not in {0, _SCHEMA_VERSION}:
-                raise KnowledgeStoreError(
-                    f"unsupported knowledge schema version {version}"
-                )
+            if version not in {0, 1, _SCHEMA_VERSION}:
+                raise KnowledgeStoreError(f"unsupported knowledge schema version {version}")
             connection.executescript(_SCHEMA)
+            proposal_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(knowledge_proposals)")
+            }
+            if "parse_artifact_id" not in proposal_columns:
+                connection.execute(
+                    "ALTER TABLE knowledge_proposals ADD COLUMN parse_artifact_id TEXT"
+                )
             connection.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
             connection.commit()
 
@@ -919,6 +1122,9 @@ def _proposal(row: sqlite3.Row) -> KnowledgeProposal:
         status=str(row["status"]),
         projection_status=str(row["projection_status"]),
         revision=int(row["revision"]),
+        parse_artifact_id=(
+            str(row["parse_artifact_id"]) if row["parse_artifact_id"] is not None else None
+        ),
         error=str(row["error"]) if row["error"] is not None else None,
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
@@ -995,6 +1201,9 @@ def _source_page(
     source_revision: str,
     raw_path: str,
     content: str,
+    parser_id: str,
+    parser_version: str,
+    parsed_document_id: str,
 ) -> str:
     if len(content.encode("utf-8")) > _MAX_PROPOSAL_BYTES:
         raise ValueError("proposal exceeds size limit")
@@ -1013,12 +1222,48 @@ def _source_page(
         f"    path: {quoted_path}\n"
         f"    revision: {source_revision}\n"
         f"raw_snapshot: {raw_path}\n"
+        f"parser_id: {parser_id}\n"
+        f"parser_version: {parser_version}\n"
+        f"parsed_document_id: {parsed_document_id}\n"
         "---\n\n"
         f"# {title}\n\n"
         "> 本页是可审核的来源投影。后续 LLM 综合必须继续保留来源 revision。\n\n"
         "## 来源内容\n\n"
         f"{content.rstrip()}\n"
     )
+
+
+def _validate_parsed_document(request: ParseRequest, document: ParsedDocument) -> None:
+    if (
+        document.source_id != request.source_id
+        or document.relative_path != request.relative_path
+        or document.source_revision != request.source_revision
+        or document.provenance.input_revision != request.source_revision
+        or document.provenance.media_type != request.media_type
+    ):
+        raise KnowledgeStoreError("parser returned mismatched source provenance")
+    if not document.document_id.startswith("pdoc_"):
+        raise KnowledgeStoreError("parser returned invalid document identity")
+    if not document.provenance.parser_id or not document.provenance.parser_version:
+        raise KnowledgeStoreError("parser returned incomplete provenance")
+    block_ids: set[str] = set()
+    for ordinal, block in enumerate(document.blocks):
+        media_path = PurePosixPath(block.media_ref) if block.media_ref else None
+        if (
+            block.ordinal != ordinal
+            or not block.block_id.startswith("pblk_")
+            or block.block_id in block_ids
+            or not 0.0 <= block.confidence <= 1.0
+            or (
+                media_path is not None
+                and (
+                    media_path.is_absolute()
+                    or any(part in {"", ".", ".."} for part in media_path.parts)
+                )
+            )
+        ):
+            raise KnowledgeStoreError("parser returned invalid block contract")
+        block_ids.add(block.block_id)
 
 
 def _write_immutable(path: Path, content: str) -> None:
