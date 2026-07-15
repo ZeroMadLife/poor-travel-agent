@@ -1,11 +1,16 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import {
+  Bot,
   CheckCircle2,
   ChevronDown,
+  ChevronRight,
   Circle,
   Clock3,
+  FileText,
   FilePenLine,
+  FolderSearch,
+  Search,
   Terminal,
   Wrench,
   XCircle,
@@ -25,10 +30,15 @@ const props = withDefaults(defineProps<{
   pendingTool: '',
 })
 
+const expandedSteps = ref(new Set<string>())
+
 const steps = computed<CodingRunAuditStep[]>(() => {
   if (props.audit?.steps.length) return props.audit.steps
   return props.tools.map((tool) => fallbackStep(tool))
 })
+
+const discoverySteps = computed(() => steps.value.filter((step) => step.tool === 'tool_search'))
+const executionSteps = computed(() => steps.value.filter((step) => step.tool !== 'tool_search'))
 
 const currentStep = computed(() => [...steps.value].reverse().find((step) => (
   step.status === 'running' || step.status === 'waiting'
@@ -38,12 +48,19 @@ const headline = computed(() => {
   if (props.pendingTool) return `等待确认 · ${props.pendingTool}`
   if (props.active && currentStep.value) {
     const prefix = currentStep.value.status === 'waiting' ? '等待确认' : '正在执行'
-    return `${prefix} · ${currentStep.value.action_summary}`
+    return `${prefix} · ${stepActionSummary(currentStep.value)}`
   }
-  if (props.audit) return props.audit.headline
-  const failed = steps.value.filter((step) => step.status === 'error').length
-  if (failed) return `运行过程 · ${steps.value.length} 项 · ${failed} 项失败`
-  return `运行过程 · ${steps.value.length} 项`
+  const status = runStatusLabel(props.active
+    ? 'running'
+    : props.audit?.status || (steps.value.some((step) => step.status === 'error') ? 'error' : 'completed'))
+  if (executionSteps.value.length) {
+    const actionPreview = executionSteps.value.slice(0, 2).map(stepActionSummary).join('、')
+    const remainder = executionSteps.value.length > 2 ? ` 等 ${executionSteps.value.length} 项` : ''
+    const files = changedFiles.value.length ? ` · 修改 ${changedFiles.value.length} 个文件` : ''
+    return `${status} · ${actionPreview}${remainder}${files}`
+  }
+  if (discoverySteps.value.length) return `${status} · 工具探索 ${discoverySteps.value.length} 次`
+  return props.audit?.headline || '运行过程'
 })
 
 const durationLabel = computed(() => formatDuration(props.audit?.duration_ms ?? 0))
@@ -86,12 +103,14 @@ function safeArguments(tool: string, args: Record<string, unknown>) {
 
 function actionSummary(tool: string, args: Record<string, unknown>) {
   const path = stringArg(args, 'path')
+  if (tool === 'tool_search') return `查找工具 ${stringArg(args, 'query') || '可用能力'}`
   if (tool === 'read_file') return `读取 ${path || '文件'}`
   if (tool === 'list_files') return `列出 ${path || '.'}`
   if (tool === 'search') return `搜索 ${stringArg(args, 'pattern') || path || '工作区'}`
   if (tool === 'write_file') return `写入 ${path || '文件'}`
   if (tool === 'patch_file') return `修改 ${path || '文件'}`
   if (tool === 'run_shell') return `执行 ${stringArg(args, 'command') || 'shell 命令'}`
+  if (tool === 'agent') return `子任务 ${stringArg(args, 'description') || stringArg(args, 'task') || '执行'}`
   return `调用 ${tool}`
 }
 
@@ -140,15 +159,89 @@ function statusIcon(status: string) {
   return Circle
 }
 
+function toolIcon(tool: string) {
+  if (tool === 'run_shell') return Terminal
+  if (tool === 'read_file') return FileText
+  if (tool === 'list_files' || tool === 'search') return FolderSearch
+  if (tool === 'tool_search') return Search
+  if (tool === 'write_file' || tool === 'patch_file') return FilePenLine
+  if (tool === 'agent') return Bot
+  return Wrench
+}
+
+function runStatusLabel(status: string) {
+  if (status === 'running') return '正在运行'
+  if (status === 'error') return '运行失败'
+  if (status === 'cancelled') return '运行已取消'
+  if (status === 'step_limit') return '达到步骤上限'
+  return '运行完成'
+}
+
+function parsedArguments(step: CodingRunAuditStep) {
+  if (!step.arguments_preview) return {} as Record<string, unknown>
+  try {
+    const parsed: unknown = JSON.parse(step.arguments_preview)
+    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {}
+  } catch {
+    return {} as Record<string, unknown>
+  }
+}
+
+function stepActionSummary(step: CodingRunAuditStep) {
+  const args = parsedArguments(step)
+  if (step.tool === 'tool_search') {
+    const query = stringArg(args, 'query')
+    return `查找工具 ${query || '可用能力'}`
+  }
+  if (step.tool === 'agent') {
+    return `子任务 ${stringArg(args, 'description') || stringArg(args, 'task') || '执行'}`
+  }
+  return step.action_summary
+}
+
+function stepResultSummary(step: CodingRunAuditStep) {
+  if (step.tool !== 'tool_search') return step.result_summary
+  const preview = step.result_preview.trim()
+  if (!preview) return step.result_summary
+  if (/no matching deferred tools found/i.test(preview)) return '无匹配工具'
+  try {
+    const parsed: unknown = JSON.parse(preview)
+    if (!Array.isArray(parsed)) return step.result_summary
+    const tools = parsed as Array<{ name?: unknown }>
+    const names = tools
+      .map((item) => typeof item?.name === 'string' ? item.name : '')
+      .filter(Boolean)
+    if (names.length) return `发现 ${names.length} 个 · ${names.slice(0, 3).join('、')}${names.length > 3 ? '…' : ''}`
+  } catch {
+    // Truncated or non-JSON search results keep the backend summary.
+  }
+  return step.result_summary
+}
+
 function commandPreview(step: CodingRunAuditStep) {
   if (step.tool !== 'run_shell' || !step.arguments_preview) return ''
-  try {
-    const args = JSON.parse(step.arguments_preview) as Record<string, unknown>
-    const command = typeof args.command === 'string' ? args.command.trim() : ''
-    return command ? redactText(command).slice(0, 220) : ''
-  } catch {
-    return ''
-  }
+  const command = stringArg(parsedArguments(step), 'command')
+  return command ? redactText(command).slice(0, 220) : ''
+}
+
+function stepKey(step: CodingRunAuditStep, index: number) {
+  return `${step.tool}:${index}`
+}
+
+function canExpandStep(step: CodingRunAuditStep) {
+  if (!props.audit) return false
+  if (step.tool === 'read_file' || step.tool === 'write_file' || step.tool === 'patch_file') return false
+  return Boolean(commandPreview(step) || step.result_preview.trim())
+}
+
+function toggleStep(step: CodingRunAuditStep, index: number) {
+  const key = stepKey(step, index)
+  const next = new Set(expandedSteps.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  expandedSteps.value = next
 }
 </script>
 
@@ -158,7 +251,7 @@ function commandPreview(step: CodingRunAuditStep) {
       <span class="trace-icon" :class="{ active }">
         <Wrench :size="14" />
       </span>
-      <span class="trace-headline">{{ headline }}</span>
+      <span class="trace-headline" :title="headline">{{ headline }}</span>
       <span v-if="durationLabel" class="trace-duration"><Clock3 :size="12" />{{ durationLabel }}</span>
       <span v-if="changedFiles.length" class="trace-files"><FilePenLine :size="12" />{{ changedFiles.length }}</span>
       <ChevronDown class="trace-chevron" :size="15" />
@@ -166,16 +259,38 @@ function commandPreview(step: CodingRunAuditStep) {
 
     <div class="trace-content">
       <ol class="trace-steps">
-        <li v-for="(step, index) in steps" :key="`${step.tool}:${index}`" class="trace-step" :class="step.status">
+        <li v-if="discoverySteps.length" class="trace-discovery">
+          <Search :size="13" />
+          <strong>工具探索 · {{ discoverySteps.length }} 次</strong>
+          <span>{{ discoverySteps.every((step) => step.status === 'completed') ? '已完成' : '执行中' }}</span>
+        </li>
+        <li v-for="(step, index) in executionSteps" :key="stepKey(step, index)" class="trace-step" :class="step.status">
           <header class="step-header">
             <component :is="statusIcon(step.status)" :size="14" />
-            <Terminal v-if="step.tool === 'run_shell'" :size="13" />
-            <strong>{{ step.action_summary }}</strong>
+            <component :is="toolIcon(step.tool)" :size="13" />
+            <strong :title="stepActionSummary(step)">{{ stepActionSummary(step) }}</strong>
             <span>{{ statusLabel(step.status) }}</span>
             <time v-if="step.duration_ms">{{ formatDuration(step.duration_ms) }}</time>
           </header>
-          <p v-if="commandPreview(step)" class="step-command"><Terminal :size="12" /><code>{{ commandPreview(step) }}</code></p>
-          <p v-if="step.result_summary" class="step-result-summary">{{ step.result_summary }}</p>
+          <div class="step-meta">
+            <span v-if="stepResultSummary(step)">{{ stepResultSummary(step) }}</span>
+            <button
+              v-if="canExpandStep(step)"
+              class="step-toggle"
+              type="button"
+              :aria-expanded="expandedSteps.has(stepKey(step, index))"
+              @click="toggleStep(step, index)"
+            >
+              <ChevronDown v-if="expandedSteps.has(stepKey(step, index))" :size="12" />
+              <ChevronRight v-else :size="12" />
+              {{ expandedSteps.has(stepKey(step, index)) ? '收起输出' : '查看输出' }}
+            </button>
+          </div>
+          <div v-if="expandedSteps.has(stepKey(step, index))" class="step-output">
+            <code v-if="commandPreview(step)" class="step-output-command"><Terminal :size="12" />$ {{ commandPreview(step) }}</code>
+            <pre v-if="step.result_preview"><code>{{ step.result_preview }}</code></pre>
+            <span v-if="step.result_truncated" class="step-truncated">输出已截断</span>
+          </div>
         </li>
       </ol>
       <p v-if="steps.length === 0" class="trace-empty">尚无工具步骤</p>
@@ -202,16 +317,22 @@ function commandPreview(step: CodingRunAuditStep) {
 .trace-steps { display:grid; gap:0; margin:0; padding:0; list-style:none; }
 .trace-step { min-width:0; padding:9px 12px 10px; border-bottom:1px solid var(--sage-border); }
 .trace-step:last-child { border-bottom:0; }
+.trace-discovery { display:grid; grid-template-columns:16px minmax(0,1fr) auto; align-items:center; gap:6px; min-height:32px; padding:5px 12px; border-bottom:1px solid var(--sage-border); color:var(--sage-text-muted); font-size:10px; }
+.trace-discovery strong { color:var(--sage-text-secondary); font-size:11px; }
 .step-header { display:grid; grid-template-columns:16px auto minmax(0,1fr) auto auto; align-items:center; gap:6px; min-height:22px; color:var(--sage-text-muted); }
 .step-header strong { min-width:0; overflow:hidden; color:var(--sage-text-secondary); font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
 .step-header span,.step-header time { font-size:10px; white-space:nowrap; }
 .trace-step.completed .step-header > svg:first-child { color:var(--sage-success); }
 .trace-step.running .step-header > svg:first-child,.trace-step.waiting .step-header > svg:first-child { color:var(--sage-warning); }
 .trace-step.error .step-header > svg:first-child { color:var(--sage-danger); }
-.step-command { display:flex; align-items:flex-start; gap:5px; margin:5px 0 0 22px; color:var(--sage-text-muted); font-family:var(--sage-font-mono); font-size:10px; line-height:1.45; }
-.step-command svg { flex:none; margin-top:1px; }
-.step-command code { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.step-result-summary { margin:4px 0 0 22px; color:var(--sage-text-muted); font-size:10px; }
+.step-meta { display:flex; align-items:center; gap:10px; min-height:20px; margin:2px 0 0 22px; color:var(--sage-text-muted); font-size:10px; }
+.step-toggle { display:inline-flex; align-items:center; gap:2px; min-height:20px; margin-left:auto; padding:0 3px; border:0; color:var(--sage-text-muted); background:transparent; font-size:10px; }
+.step-toggle:hover { color:var(--sage-text-secondary); }
+.step-output { display:grid; gap:0; min-width:0; max-height:280px; margin:6px 0 0 22px; overflow:auto; border:1px solid var(--sage-border); border-radius:var(--sage-radius-sm); background:var(--sage-code-bg); color:var(--sage-code-text); font-family:var(--sage-font-mono); }
+.step-output-command { display:flex; align-items:flex-start; gap:6px; padding:9px 11px; border-bottom:1px solid var(--sage-border); overflow-wrap:anywhere; font-size:11px; line-height:1.5; }
+.step-output-command svg { flex:none; margin-top:2px; }
+.step-output pre { margin:0; padding:10px 11px; overflow:visible; background:transparent; color:inherit; font:inherit; font-size:11px; line-height:1.55; white-space:pre-wrap; word-break:break-word; }
+.step-truncated { padding:6px 11px; border-top:1px solid var(--sage-border); color:var(--sage-code-muted); font-size:9px; }
 .trace-empty { margin:0; padding:12px; color:var(--sage-text-muted); font-size:11px; }
 .changed-files { display:flex; flex-wrap:wrap; gap:5px 10px; padding:9px 12px; border-top:1px solid var(--sage-border); color:var(--sage-text-muted); font-size:10px; }
 .changed-files strong { color:var(--sage-text-secondary); }

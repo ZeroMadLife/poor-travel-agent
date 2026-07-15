@@ -40,13 +40,14 @@ const audit: CodingRunAuditSummary = {
 }
 
 describe('CodingRunTrace', () => {
-  it('renders one collapsed run panel and reveals every step with one expansion', async () => {
+  it('summarizes concrete actions and expands bounded shell output on demand', async () => {
     const wrapper = mount(CodingRunTrace, {
       props: { runId: 'run-a', tools: [], audit },
     })
 
     expect(wrapper.get('details').attributes('open')).toBeUndefined()
-    expect(wrapper.get('summary').text()).toContain('运行完成 · 2 项工具 · 修改 1 个文件')
+    expect(wrapper.get('summary').text()).toContain('读取 README.md、执行 npm test')
+    expect(wrapper.get('summary').text()).toContain('2s')
     expect(wrapper.findAll('details')).toHaveLength(1)
 
     await wrapper.get('summary').trigger('click')
@@ -55,8 +56,61 @@ describe('CodingRunTrace', () => {
     expect(wrapper.findAll('.trace-step')).toHaveLength(2)
     expect(wrapper.text()).toContain('退出码 0')
     expect(wrapper.text()).toContain('src/app.ts')
-    expect(wrapper.text()).not.toContain('12 passed')
-    expect(wrapper.findAll('.trace-step details')).toHaveLength(0)
+    expect(wrapper.find('.step-output').exists()).toBe(false)
+    expect(wrapper.get('.step-toggle').attributes('aria-expanded')).toBe('false')
+
+    await wrapper.get('.step-toggle').trigger('click')
+
+    expect(wrapper.get('.step-toggle').attributes('aria-expanded')).toBe('true')
+    expect(wrapper.get('.step-output').text()).toContain('$ npm test')
+    expect(wrapper.get('.step-output').text()).toContain('12 passed')
+  })
+
+  it('compresses repeated tool discovery and prioritizes real commands and files', async () => {
+    const discoveryAudit: CodingRunAuditSummary = {
+      ...audit,
+      headline: '运行完成 · 5 项工具',
+      tool_count: 5,
+      steps: [
+        ...Array.from({ length: 2 }, (_, index) => ({
+          tool: 'tool_search',
+          status: 'completed',
+          action_summary: '调用 tool_search',
+          result_summary: '执行完成',
+          duration_ms: 100 + index,
+          arguments_preview: `{"query":"${index ? 'shell' : 'files'}"}`,
+          result_preview: '[]',
+          arguments_truncated: false,
+          result_truncated: false,
+        })),
+        audit.steps[0],
+        audit.steps[1],
+        {
+          tool: 'agent',
+          status: 'completed',
+          action_summary: '子任务 执行',
+          result_summary: '执行完成',
+          duration_ms: 7,
+          arguments_preview: '{"description":"探索内部工具实现"}',
+          result_preview: '{"status":"started"}',
+          arguments_truncated: false,
+          result_truncated: false,
+        },
+      ],
+    }
+    const wrapper = mount(CodingRunTrace, {
+      props: { runId: 'run-discovery', tools: [], audit: discoveryAudit },
+    })
+
+    expect(wrapper.get('summary').text()).toContain('读取 README.md、执行 npm test')
+    expect(wrapper.get('summary').text()).not.toContain('tool_search')
+
+    await wrapper.get('summary').trigger('click')
+
+    expect(wrapper.get('.trace-discovery').text()).toContain('工具探索 · 2 次')
+    expect(wrapper.findAll('.trace-step')).toHaveLength(3)
+    expect(wrapper.text()).toContain('子任务 探索内部工具实现')
+    expect(wrapper.text()).not.toContain('调用 tool_search')
   })
 
   it('shows the current action while active and keeps secret-shaped fallback data redacted', async () => {
@@ -84,6 +138,7 @@ describe('CodingRunTrace', () => {
     expect(wrapper.text()).toContain('[REDACTED]')
     expect(wrapper.text()).not.toContain('plain-secret')
     expect(wrapper.text()).not.toContain('live-secret')
+    expect(wrapper.find('.step-toggle').exists()).toBe(false)
   })
 
   it('uses a direct waiting headline for an approval without expanding the panel', () => {
