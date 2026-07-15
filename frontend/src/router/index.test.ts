@@ -3,7 +3,7 @@ import router from './index'
 
 describe('settings router', () => {
   beforeEach(async () => {
-    await router.replace('/coding')
+    await router.replace('/assistant')
   })
 
   it('redirects empty and unknown settings sections to appearance', async () => {
@@ -17,5 +17,16 @@ describe('settings router', () => {
   it('keeps a known settings section', async () => {
     await router.push('/settings/memory')
     expect(router.currentRoute.value.fullPath).toBe('/settings/memory')
+  })
+
+  it('uses the personal assistant as the default and keeps coding deep links', async () => {
+    await router.push('/')
+    expect(router.currentRoute.value.fullPath).toBe('/assistant')
+
+    await router.push('/coding/session/saved-session')
+    expect(router.currentRoute.value.fullPath).toBe('/coding/session/saved-session')
+
+    await router.push('/missing')
+    expect(router.currentRoute.value.fullPath).toBe('/assistant')
   })
 })

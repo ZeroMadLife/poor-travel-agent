@@ -1794,6 +1794,62 @@ describe('coding store', () => {
     expect(socketInstances).toHaveLength(1)
   })
 
+  it('sends an assistant-home prompt once after the new session stream opens', async () => {
+    const sockets: FakeSocket[] = []
+    class FakeSocket {
+      readyState = 0
+      onopen: (() => void) | null = null
+      onmessage: ((event: MessageEvent) => void) | null = null
+      onerror: (() => void) | null = null
+      onclose: (() => void) | null = null
+      send = vi.fn()
+      close = vi.fn()
+
+      constructor(_url: string) {
+        sockets.push(this)
+      }
+
+      open() {
+        this.readyState = 1
+        this.onopen?.()
+      }
+    }
+    const empty = {
+      items: [], next_cursor: 0, has_more: false, older_cursor: null,
+      latest_cursor: 0, active_run: null, messages: [], models: [], current: null,
+      entries: [], path: '.', is_git: false, branch: '', dirty_count: 0,
+      changed_files: [], sessions: [], runs: [], proposals: [], configured: false,
+      used_tokens: 0,
+    }
+    vi.stubGlobal('fetch', vi.fn((input: URL | string, init?: RequestInit) => {
+      const url = input instanceof URL ? input : new URL(input, window.location.origin)
+      if (init?.method === 'POST' && url.pathname.endsWith('/coding/session')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            session_id: 'home-session', workspace_root: '/tmp/repo',
+            permission_mode: 'default',
+          }),
+        })
+      }
+      return Promise.resolve({ ok: true, json: async () => empty })
+    }))
+    vi.stubGlobal('WebSocket', FakeSocket)
+    const store = useCodingStore()
+
+    const sessionId = await store.startSessionWithPrompt('  帮我梳理这个项目  ')
+
+    expect(sessionId).toBe('home-session')
+    expect(sockets).toHaveLength(1)
+    expect(sockets[0].send).not.toHaveBeenCalled()
+    sockets[0].open()
+    sockets[0].open()
+    expect(sockets[0].send).toHaveBeenCalledTimes(1)
+    expect(sockets[0].send).toHaveBeenCalledWith(JSON.stringify({ content: '帮我梳理这个项目' }))
+    expect(store.optimisticMessage?.content).toBe('帮我梳理这个项目')
+    store.disconnect()
+  })
+
   it('refreshes run history when a run finishes', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

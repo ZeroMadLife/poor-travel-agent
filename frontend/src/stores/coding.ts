@@ -330,6 +330,7 @@ export const useCodingStore = defineStore('coding', () => {
   const breadcrumb = computed(() => fileTreePath.value.split('/').filter(Boolean))
 
   let stream: CodingStream | null = null
+  const pendingInitialPrompts = new Map<string, string>()
   let approvalPollTimer: number | null = null
   let fileTreeGeneration = 0
   let runsRequestGeneration = 0
@@ -735,6 +736,11 @@ export const useCodingStore = defineStore('coding', () => {
     stream = new CodingStream({
       onEvent: handleTimelineEvent,
       onRawEvent: handleServerEvent,
+      onOpen: (openedSessionId) => {
+        if (openedSessionId !== sessionId.value) return
+        const prompt = pendingInitialPrompts.get(openedSessionId)
+        if (prompt && sendMessage(prompt)) pendingInitialPrompts.delete(openedSessionId)
+      },
       onError: (message) => {
         ensureSession(targetSessionId).errorMessage = message
       },
@@ -798,10 +804,10 @@ export const useCodingStore = defineStore('coding', () => {
     }
   }
 
-  function sendMessage(content: string) {
-    if (!content.trim() || !stream) return
+  function sendMessage(content: string): boolean {
+    if (!content.trim() || !stream) return false
     const sent = stream.send(content)
-    if (!sent) return
+    if (!sent) return false
     const optimistic = {
       id: `optimistic:${sessionId.value}:${Date.now()}`,
       role: 'user' as const,
@@ -814,6 +820,7 @@ export const useCodingStore = defineStore('coding', () => {
     pendingApproval.value = null
     thinkingPhase.value = '正在理解任务'
     startApprovalPolling()
+    return true
   }
 
   async function pollApproval(targetSessionId: string, state: CodingSessionUiState) {
@@ -1257,10 +1264,10 @@ export const useCodingStore = defineStore('coding', () => {
     connectSocket()
   }
 
-  async function startNewSession() {
+  async function createNewSession(initialPrompt = ''): Promise<string> {
     const selection = ++selectionGeneration
     const session = await startCodingSession()
-    if (selection !== selectionGeneration) return
+    if (selection !== selectionGeneration) return ''
     stopSessionTransport()
     sessionId.value = session.session_id
     ensureSession(session.session_id)
@@ -1280,8 +1287,20 @@ export const useCodingStore = defineStore('coding', () => {
       loadRuns(),
       loadContext(),
     ])
-    if (selection !== selectionGeneration || sessionId.value !== session.session_id) return
+    if (selection !== selectionGeneration || sessionId.value !== session.session_id) return ''
+    if (initialPrompt) pendingInitialPrompts.set(session.session_id, initialPrompt)
     connectSocket()
+    return session.session_id
+  }
+
+  async function startNewSession() {
+    await createNewSession()
+  }
+
+  async function startSessionWithPrompt(content: string): Promise<string> {
+    const prompt = content.trim()
+    if (!prompt) throw new Error('请输入内容后再开始对话')
+    return createNewSession(prompt)
   }
 
   async function restoreCurrentSession() {
@@ -1506,6 +1525,7 @@ export const useCodingStore = defineStore('coding', () => {
     liveRefreshPending.clear()
     memoryRefreshPending.clear()
     terminalRefreshPending.clear()
+    pendingInitialPrompts.clear()
   }
 
   return {
@@ -1592,6 +1612,7 @@ export const useCodingStore = defineStore('coding', () => {
     rejectPlan,
     selectSession,
     startNewSession,
+    startSessionWithPrompt,
     restoreCurrentSession,
     connectSocket,
     loadSkills,

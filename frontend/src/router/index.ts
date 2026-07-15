@@ -5,7 +5,12 @@ const router = createRouter({
   routes: [
     {
       path: '/',
-      redirect: '/coding',
+      redirect: '/assistant',
+    },
+    {
+      path: '/assistant',
+      name: 'assistant.home',
+      component: () => import('../views/AssistantHomeView.vue'),
     },
     {
       path: '/coding',
@@ -23,8 +28,23 @@ const router = createRouter({
       component: () => import('../views/SettingsView.vue'),
     },
     {
+      path: '/knowledge',
+      name: 'knowledge',
+      component: () => import('../views/KnowledgeView.vue'),
+    },
+    {
+      path: '/evolution',
+      name: 'evolution',
+      component: () => import('../views/EvolutionView.vue'),
+    },
+    {
+      path: '/public',
+      name: 'public.profile',
+      component: () => import('../views/PublicProfileView.vue'),
+    },
+    {
       path: '/:pathMatch(.*)*',
-      redirect: '/coding',
+      redirect: '/assistant',
     },
   ],
 })

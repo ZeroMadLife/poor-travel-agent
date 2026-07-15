@@ -131,6 +131,60 @@ export type CodingSessionsResponse = {
   sessions: CodingSessionSummary[]
 }
 
+export type AssistantHomeSectionStatus =
+  | 'ready'
+  | 'empty'
+  | 'not_configured'
+  | 'unavailable'
+  | 'error'
+
+export type AssistantHomeSummary = {
+  identity: {
+    mode: 'local' | 'cloud'
+    user_id: string | null
+    display_name: string
+  }
+  knowledge: {
+    status: AssistantHomeSectionStatus
+    source_count: number
+    wiki_page_count: number
+    last_synced_at: string | null
+  }
+  sessions: {
+    status: AssistantHomeSectionStatus
+    items: Array<{
+      session_id: string
+      title: string
+      workspace_name: string
+      updated_at: string
+      message_count: number
+      target: string
+    }>
+    total: number
+    error: string | null
+  }
+  projects: {
+    status: AssistantHomeSectionStatus
+    items: Array<{ project_id: string; name: string }>
+    total: number
+    error: string | null
+  }
+  proposals: {
+    status: AssistantHomeSectionStatus
+    memory_pending: number
+    wiki_pending: number
+    note_pending: number
+    error: string | null
+  }
+  suggested_actions: Array<{
+    id: string
+    kind: 'chat' | 'knowledge' | 'review' | 'project'
+    label: string
+    description: string
+    target: string
+  }>
+}
+
 export type CodingSessionMessage = {
   role: 'user' | 'assistant'
   content: string

@@ -4,6 +4,7 @@ import type { CodingTimelineEvent } from '../types/api'
 
 class FakeSocket implements WebSocketLike {
   readyState = 1
+  onopen: (() => void) | null = null
   onmessage: ((event: { data: string }) => void) | null = null
   onerror: (() => void) | null = null
   onclose: ((event?: { code?: number; wasClean?: boolean }) => void) | null = null
@@ -22,6 +23,11 @@ class FakeSocket implements WebSocketLike {
 
   emit(event: CodingTimelineEvent): void {
     this.onmessage?.({ data: JSON.stringify(event) })
+  }
+
+  emitOpen(): void {
+    this.readyState = 1
+    this.onopen?.()
   }
 
   emitRaw(data: string): void {
@@ -82,6 +88,30 @@ describe('CodingStream', () => {
 
     expect(sockets[0].closed).toBe(true)
     expect(stream.send('hello')).toBe(false)
+  })
+
+  it('reports the active session once its socket opens and ignores stale opens', () => {
+    const sockets: FakeSocket[] = []
+    const onOpen = vi.fn()
+    const stream = new CodingStream({
+      createSocket: () => {
+        const socket = new FakeSocket()
+        socket.readyState = 0
+        sockets.push(socket)
+        return socket
+      },
+      onEvent: vi.fn(),
+      onOpen,
+      onError: vi.fn(),
+    })
+
+    stream.connect('coding_1', 'ws://local/one')
+    stream.connect('coding_2', 'ws://local/two')
+    sockets[0].emitOpen()
+    sockets[1].emitOpen()
+
+    expect(onOpen).toHaveBeenCalledTimes(1)
+    expect(onOpen).toHaveBeenCalledWith('coding_2')
   })
 
   it('ignores events from an old socket after session switch', () => {

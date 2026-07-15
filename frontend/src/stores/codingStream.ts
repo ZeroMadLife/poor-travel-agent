@@ -2,6 +2,7 @@ import type { CodingServerEvent, CodingTimelineEvent } from '../types/api'
 
 export type WebSocketLike = {
   readyState: number
+  onopen: (() => void) | null
   onmessage: ((event: { data: string }) => void) | null
   onerror: (() => void) | null
   onclose: ((event?: { code?: number; wasClean?: boolean }) => void) | null
@@ -15,6 +16,7 @@ export type CodingStreamOptions = {
   createSocket?: WebSocketFactory
   onEvent: (sessionId: string, event: CodingTimelineEvent) => void
   onRawEvent?: (event: CodingServerEvent) => void
+  onOpen?: (sessionId: string) => void
   onError: (message: string) => void
 }
 
@@ -43,6 +45,7 @@ export class CodingStream {
   private readonly createSocket: WebSocketFactory
   private readonly onEvent: (sessionId: string, event: CodingTimelineEvent) => void
   private readonly onRawEvent: ((event: CodingServerEvent) => void) | null
+  private readonly onOpen: ((sessionId: string) => void) | null
   private readonly onError: (message: string) => void
 
   constructor(options: CodingStreamOptions) {
@@ -51,6 +54,7 @@ export class CodingStream {
       ((url: string) => new WebSocket(url) as unknown as WebSocketLike)
     this.onEvent = options.onEvent
     this.onRawEvent = options.onRawEvent ?? null
+    this.onOpen = options.onOpen ?? null
     this.onError = options.onError
   }
 
@@ -72,6 +76,11 @@ export class CodingStream {
     const url = withCursor(this.url, this.cursor)
     const socket = this.createSocket(url)
     this.socket = socket
+    socket.onopen = () => {
+      if (generation !== this.generation || this.socket !== socket) return
+      this.reconnectAttempt = 0
+      this.onOpen?.(sessionId)
+    }
     socket.onmessage = (event) => {
       if (generation !== this.generation) return
       let candidate: unknown
