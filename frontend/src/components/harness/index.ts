@@ -1,3 +1,4 @@
+export { default as ChatHarnessLayout } from './ChatHarnessLayout.vue'
 export { default as ChatExecutionLog } from './chat/ChatExecutionLog.vue'
 export { default as ChatMessageTurn } from './chat/ChatMessageTurn.vue'
 export { default as ChatTimeline } from './chat/ChatTimeline.vue'
