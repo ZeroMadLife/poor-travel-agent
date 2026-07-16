@@ -14,6 +14,7 @@ Loop Engineer 是当前 Mac 上的只读巡检控制面。当前阶段为 **Phas
 - [完整设计](../superpowers/specs/2026-07-16-sage-loop-engineer-harness-design.md)
 - [Phase 2 设计](../superpowers/specs/2026-07-16-sage-loop-engineer-phase2-design.md)：已批准，尚未实施
 - [Phase 2 实施计划](../superpowers/plans/2026-07-16-sage-loop-engineer-phase2.md)：待 Phase 1 独立合入后执行
+- [Phase 3 夜间深度开发 Lane 设计](../superpowers/specs/2026-07-16-sage-loop-engineer-night-lane-design.md)：讨论结论已确认，待用户复核，尚未实施
 
 ## 存储原则
 
