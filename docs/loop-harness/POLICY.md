@@ -5,6 +5,12 @@
 Phase 1 仅允许只读扫描、记录 `NO_OP/REPORT/BLOCKED`、维护本机 SQLite 状态和发送短
 摘要。代码修改、commit、push、PR 和 auto-merge 全部关闭。
 
+## 对外输出语言
+
+Loop 面向用户和团队的输出统一使用简体中文，包括 finding、日报、飞书通知、PR 标题、
+PR 正文、审查说明和验证摘要。代码标识符、路径、命令、错误码及 Conventional Commit
+前缀可以保留英文。中文表达是创建 PR 的硬门禁，不满足时 Controller 必须拒绝发布。
+
 ## 后续三级策略
 
 - Tier A：最多 2 个实现文件和 1 个测试文件、总增删不超过 80 行，证据确定且所有门禁
