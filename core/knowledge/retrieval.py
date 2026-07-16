@@ -9,7 +9,7 @@ import re
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 from core.knowledge.parsing import ParsedDocument
 
@@ -60,6 +60,28 @@ class KnowledgeSearchHit:
 
 
 @dataclass(frozen=True, slots=True)
+class KnowledgeEvidence:
+    """One bounded, citation-stable excerpt selected for an Agent context."""
+
+    hit: KnowledgeSearchHit
+    excerpt: str
+    token_count: int
+    truncated: bool
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeRetrievalBundle:
+    """A token-bounded evidence bundle shared by HTTP and coding tools."""
+
+    query: str
+    status: Literal["evidence_found", "no_evidence"]
+    evidence: tuple[KnowledgeEvidence, ...]
+    token_budget: int
+    used_tokens: int
+    omitted_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class KnowledgeIndexSummary:
     backend: str
     embedding_model: str
@@ -84,6 +106,7 @@ class DenseEmbeddingProvider(Protocol):
     model_id: str
     model_revision: str
     dimensions: int
+    supports_semantic_recall: bool
 
     def embed(self, text: str) -> tuple[float, ...]:
         """Return one normalized vector for deterministic persistence and scoring."""
@@ -94,6 +117,7 @@ class HashingEmbeddingProvider:
 
     model_id = "sage.hashing"
     model_revision = "1.0.0"
+    supports_semantic_recall = False
 
     def __init__(self, dimensions: int = 256) -> None:
         if dimensions < 32 or dimensions > 4_096:
@@ -220,10 +244,22 @@ def lexical_terms(text: str, *, limit: int | None = None) -> tuple[str, ...]:
 
 
 def fts_query(text: str) -> str:
-    unique = tuple(dict.fromkeys(lexical_terms(text, limit=_MAX_QUERY_TERMS)))
+    unique = tuple(dict.fromkeys(_query_terms(text)[:_MAX_QUERY_TERMS]))
     if not unique:
         raise ValueError("knowledge query has no searchable terms")
     return " OR ".join(f'"{term}"' for term in unique)
+
+
+def _query_terms(text: str) -> tuple[str, ...]:
+    normalized = unicodedata.normalize("NFKC", text).lower()
+    terms: list[str] = [match.group(0) for match in _LATIN_TOKEN.finditer(normalized)]
+    for match in _CJK_RUN.finditer(normalized):
+        value = match.group(0)
+        if len(value) == 1:
+            terms.append(value)
+        else:
+            terms.extend(value[index : index + 2] for index in range(len(value) - 1))
+    return tuple(terms)
 
 
 def index_text(chunk: KnowledgeChunk) -> str:
@@ -300,6 +336,57 @@ def citation_id(chunk: KnowledgeChunk) -> str:
     )
 
 
+def assemble_retrieval_bundle(
+    query: str,
+    hits: tuple[KnowledgeSearchHit, ...],
+    *,
+    token_budget: int = 3_000,
+) -> KnowledgeRetrievalBundle:
+    """Select ranked evidence without allowing retrieval to overrun model context."""
+
+    if token_budget < 256 or token_budget > 20_000:
+        raise ValueError("knowledge token_budget must be between 256 and 20000")
+    selected: list[KnowledgeEvidence] = []
+    used_tokens = 0
+    for hit in hits:
+        remaining = token_budget - used_tokens
+        if remaining <= 0:
+            break
+        chunk_tokens = max(1, hit.chunk.token_count)
+        if chunk_tokens <= remaining:
+            selected.append(
+                KnowledgeEvidence(
+                    hit=hit,
+                    excerpt=hit.chunk.text,
+                    token_count=chunk_tokens,
+                    truncated=False,
+                )
+            )
+            used_tokens += chunk_tokens
+            continue
+        if selected:
+            break
+        excerpt = _truncate_excerpt(hit.chunk.text, chunk_tokens, remaining)
+        selected.append(
+            KnowledgeEvidence(
+                hit=hit,
+                excerpt=excerpt,
+                token_count=remaining,
+                truncated=True,
+            )
+        )
+        used_tokens += remaining
+        break
+    return KnowledgeRetrievalBundle(
+        query=query.strip(),
+        status="evidence_found" if selected else "no_evidence",
+        evidence=tuple(selected),
+        token_budget=token_budget,
+        used_tokens=used_tokens,
+        omitted_count=max(0, len(hits) - len(selected)),
+    )
+
+
 def _split_oversized_block(text: str) -> tuple[str, ...]:
     if len(text) <= _MAX_CHUNK_CHARS:
         return (text,)
@@ -318,6 +405,17 @@ def _split_oversized_block(text: str) -> tuple[str, ...]:
             break
         cursor = max(cursor + 1, end - _CHUNK_OVERLAP_CHARS)
     return tuple(pieces)
+
+
+def _truncate_excerpt(text: str, source_tokens: int, token_budget: int) -> str:
+    if not text or token_budget <= 0:
+        return ""
+    ratio = min(1.0, token_budget / max(1, source_tokens))
+    limit = min(len(text), max(80, int(len(text) * ratio)))
+    excerpt = text[:limit].rstrip()
+    if limit < len(text):
+        excerpt += "..."
+    return excerpt
 
 
 def _stable_id(prefix: str, *parts: str) -> str:

@@ -213,6 +213,43 @@ export type KnowledgeIndexSummary = {
   error_count: number
 }
 
+export type KnowledgeEvidence = {
+  citation_id: string
+  rank: number
+  rrf_score: number
+  sparse_rank: number | null
+  sparse_score: number | null
+  dense_rank: number | null
+  dense_score: number | null
+  chunk_id: string
+  page_id: string
+  page_revision: string
+  page_path: string
+  source_id: string
+  source_revision: string
+  source_kind: string
+  source_relative_path: string
+  proposal_id: string
+  artifact_id: string | null
+  block_id: string
+  ordinal: number
+  title: string
+  heading_path: string[]
+  page_number: number | null
+  excerpt: string
+  token_count: number
+  truncated: boolean
+}
+
+export type KnowledgeRetrieval = {
+  query: string
+  status: 'evidence_found' | 'no_evidence'
+  token_budget: number
+  used_tokens: number
+  omitted_count: number
+  citations: KnowledgeEvidence[]
+}
+
 export type KnowledgeMigrationPlanItem = {
   proposal_id: string
   source_root_id: string

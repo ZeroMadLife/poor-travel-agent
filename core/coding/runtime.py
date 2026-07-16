@@ -100,6 +100,7 @@ class CodingRuntime:
         model_reasoning_modes: Mapping[str, tuple[str, ...] | list[str]] | None = None,
         usage_store: UsageStore | None = None,
         owner_user_id: str | None = None,
+        knowledge_store: Any | None = None,
     ) -> None:
         self.session_id = session_id
         self.workspace = WorkspaceContext(root=Path(workspace_root))
@@ -179,6 +180,7 @@ class CodingRuntime:
             runtime=self,
             todo_ledger=self.todo_ledger,
             worker_manager=self.worker_manager,
+            knowledge_store=knowledge_store,
         )
         self.tools = build_tool_registry(
             self.workspace,
@@ -221,6 +223,7 @@ class CodingRuntime:
         reasoning_mode: str = "off",
         model_reasoning_modes: Mapping[str, tuple[str, ...] | list[str]] | None = None,
         usage_store: UsageStore | None = None,
+        knowledge_store: Any | None = None,
     ) -> CodingRuntime:
         """Rehydrate a persisted coding runtime for a new WebSocket connection."""
         storage_path = Path(storage_root)
@@ -245,6 +248,7 @@ class CodingRuntime:
             reasoning_mode=str(session_state.get("reasoning_mode", reasoning_mode)),
             model_reasoning_modes=model_reasoning_modes,
             usage_store=usage_store,
+            knowledge_store=knowledge_store,
         )
 
     def list_files(self, path: str = ".") -> list[dict[str, Any]]:

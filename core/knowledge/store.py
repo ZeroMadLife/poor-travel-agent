@@ -47,7 +47,12 @@ from core.knowledge.policy import (
     evaluate_knowledge_policy,
     is_trusted_local_parser,
 )
-from core.knowledge.retrieval import KnowledgeIndexSummary, KnowledgeSearchHit
+from core.knowledge.retrieval import (
+    KnowledgeIndexSummary,
+    KnowledgeRetrievalBundle,
+    KnowledgeSearchHit,
+    assemble_retrieval_bundle,
+)
 from core.knowledge.synthesis import (
     WorkspaceSynthesis,
     deserialize_synthesis,
@@ -1436,6 +1441,27 @@ class KnowledgeStore:
                 source_ids=source_ids,
                 page_revisions=page_revisions,
             )
+
+    def retrieve(
+        self,
+        query: str,
+        *,
+        top_k: int = 8,
+        token_budget: int = 3_000,
+        visibility: str = "private",
+        source_ids: tuple[str, ...] = (),
+        page_revisions: tuple[str, ...] = (),
+    ) -> KnowledgeRetrievalBundle:
+        """Return one bounded evidence bundle for API and Agent consumers."""
+
+        hits = self.search(
+            query,
+            top_k=top_k,
+            visibility=visibility,
+            source_ids=source_ids,
+            page_revisions=page_revisions,
+        )
+        return assemble_retrieval_bundle(query, hits, token_budget=token_budget)
 
     def propose_rollback(
         self,

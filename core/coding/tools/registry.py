@@ -34,6 +34,7 @@ TOOL_MODULES = (
     "core.coding.tools.agent_tools",
     "core.coding.tools.travel_tools",
     "core.coding.tools.memory_tools",
+    "core.coding.tools.knowledge_tools",
 )
 
 

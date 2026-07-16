@@ -275,6 +275,7 @@ async def create_coding_session(
         model_reasoning_modes=reasoning_modes,
         usage_store=request.app.state.coding_usage_store,
         owner_user_id=account.user_id if account is not None else None,
+        knowledge_store=getattr(request.app.state, "knowledge_store", None),
     )
     sessions: dict[str, CodingRuntime] = request.app.state.coding_sessions
     sessions[session_id] = runtime
@@ -403,6 +404,7 @@ async def resume_coding_session(
         reasoning_mode=reasoning_mode,
         model_reasoning_modes=reasoning_modes,
         usage_store=request.app.state.coding_usage_store,
+        knowledge_store=getattr(request.app.state, "knowledge_store", None),
     )
     sessions[session_id] = runtime
     return CodingSessionResponse(

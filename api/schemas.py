@@ -182,6 +182,58 @@ class KnowledgeIndexResponse(BaseModel):
     error_count: int = Field(ge=0)
 
 
+class KnowledgeSearchRequest(BaseModel):
+    """Retrieve a bounded evidence bundle from approved knowledge revisions."""
+
+    query: str = Field(min_length=1, max_length=2000)
+    top_k: int = Field(default=8, ge=1, le=20)
+    token_budget: int = Field(default=3000, ge=256, le=20000)
+    visibility: Literal["private", "public"] = "private"
+    source_ids: list[str] = Field(default_factory=list, max_length=100)
+    page_revisions: list[str] = Field(default_factory=list, max_length=100)
+
+
+class KnowledgeEvidenceResponse(BaseModel):
+    """Browser-safe citation and excerpt for one retrieval hit."""
+
+    citation_id: str
+    rank: int = Field(ge=1)
+    rrf_score: float = Field(ge=0)
+    sparse_rank: int | None = Field(default=None, ge=1)
+    sparse_score: float | None = None
+    dense_rank: int | None = Field(default=None, ge=1)
+    dense_score: float | None = None
+    chunk_id: str
+    page_id: str
+    page_revision: str
+    page_path: str
+    source_id: str
+    source_revision: str
+    source_kind: str
+    source_relative_path: str
+    proposal_id: str
+    artifact_id: str | None = None
+    block_id: str
+    ordinal: int = Field(ge=0)
+    title: str
+    heading_path: list[str]
+    page_number: int | None = Field(default=None, ge=1)
+    excerpt: str
+    token_count: int = Field(ge=0)
+    truncated: bool
+
+
+class KnowledgeRetrievalResponse(BaseModel):
+    """Evidence-only retrieval response; it never synthesizes an uncited answer."""
+
+    query: str
+    status: Literal["evidence_found", "no_evidence"]
+    token_budget: int = Field(ge=256)
+    used_tokens: int = Field(ge=0)
+    omitted_count: int = Field(ge=0)
+    citations: list[KnowledgeEvidenceResponse]
+
+
 class KnowledgeIngestRequest(BaseModel):
     """Ingest one Markdown file from a server-configured source root."""
 

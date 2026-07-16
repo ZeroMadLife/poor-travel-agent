@@ -2,12 +2,13 @@
 
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 from core.coding.context import WorkspaceContext
-from core.coding.tools.base import RegisteredTool, ToolResult
+from core.coding.tools.base import RegisteredTool, ToolContext, ToolResult
 from core.coding.tools.registry import (
     ToolDefinition,
     build_tool_registry,
@@ -15,6 +16,7 @@ from core.coding.tools.registry import (
     registered_tool_definitions,
 )
 from core.config.settings import Settings
+from core.knowledge import KnowledgeSourceRoot, KnowledgeStore
 from models.itinerary import BudgetBreakdown, Itinerary, ItineraryDay
 
 
@@ -150,6 +152,7 @@ def test_tool_registry_discovers_decorated_tools_with_stable_metadata(tmp_path: 
         "get_route",
         "remember",
         "dream",
+        "knowledge_search",
     }
     assert tools["read_file"].category == "file"
     assert tools["run_shell"].category == "shell"
@@ -159,6 +162,63 @@ def test_tool_registry_discovers_decorated_tools_with_stable_metadata(tmp_path: 
     assert tools["todo_add"].deferred is True
     assert tools["generate_itinerary"].deferred is True
     assert tools["get_weather"].category == "travel"
+    assert tools["knowledge_search"].category == "knowledge"
+    assert tools["knowledge_search"].requires_approval is False
+
+
+def test_knowledge_search_returns_revision_bound_evidence(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    knowledge = tmp_path / "knowledge"
+    knowledge.mkdir()
+    subprocess.run(
+        ["git", "init", "-b", "main"],
+        cwd=knowledge,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    store = KnowledgeStore(
+        knowledge,
+        tmp_path / "knowledge.sqlite3",
+        {
+            "notes": KnowledgeSourceRoot(
+                root_id="notes",
+                kind="obsidian",
+                label="Notes",
+                path=vault,
+            )
+        },
+    )
+    (vault / "memory.md").write_text(
+        "# Memory\n\n长期记忆使用事实证据和动态 TTL。\n",
+        encoding="utf-8",
+    )
+    proposal = store.ingest("notes", "memory.md")
+    store.evaluate_and_apply_policy(proposal.proposal_id)
+    tools = build_tool_registry(
+        _workspace(tmp_path),
+        tool_context=ToolContext(knowledge_store=store),
+    )
+
+    result = tools["knowledge_search"].execute({"query": "长期记忆 TTL"})
+    payload = json.loads(result.content)
+
+    assert result.is_error is False
+    assert payload["status"] == "evidence_found"
+    assert payload["citations"][0]["citation_id"].startswith("kcite_")
+    assert payload["citations"][0]["page_revision"].startswith("krev_")
+    assert payload["citations"][0]["source_relative_path"] == "memory.md"
+    assert str(vault) not in result.content
+
+
+def test_knowledge_search_fails_closed_when_workspace_is_unconfigured(tmp_path: Path) -> None:
+    tools = build_tool_registry(_workspace(tmp_path))
+
+    result = tools["knowledge_search"].execute({"query": "Sage"})
+
+    assert result.is_error is True
+    assert json.loads(result.content)["status"] == "unavailable"
 
 
 def test_registered_tool_definitions_are_decorator_backed() -> None:

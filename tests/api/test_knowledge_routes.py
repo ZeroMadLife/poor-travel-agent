@@ -232,6 +232,42 @@ def test_index_status_and_rebuild_api_contract(tmp_path: Path) -> None:
     assert rebuilt.json() == status_body
 
 
+def test_search_api_returns_bounded_revision_citations_and_no_evidence(tmp_path: Path) -> None:
+    app, vault, _ = _app(tmp_path)
+    (vault / "memory.md").write_text(
+        "# Memory\n\n长期记忆使用事实证据和动态 TTL。\n",
+        encoding="utf-8",
+    )
+    client = TestClient(app)
+    client.post(
+        "/api/v1/knowledge/ingest",
+        json={"source_root_id": "sage-learning", "relative_path": "memory.md"},
+    )
+
+    found = client.post(
+        "/api/v1/knowledge/search",
+        json={"query": "长期记忆 TTL", "top_k": 4, "token_budget": 512},
+    )
+
+    assert found.status_code == 200
+    assert found.headers["cache-control"] == "no-store"
+    body = found.json()
+    assert body["status"] == "evidence_found"
+    assert body["used_tokens"] <= 512
+    assert body["citations"][0]["citation_id"].startswith("kcite_")
+    assert body["citations"][0]["page_revision"].startswith("krev_")
+    assert body["citations"][0]["source_relative_path"] == "memory.md"
+    assert str(vault) not in found.text
+
+    missing = client.post(
+        "/api/v1/knowledge/search",
+        json={"query": "zxqv_9f87ab completely_unrelated_needle"},
+    )
+    assert missing.status_code == 200
+    assert missing.json()["status"] == "no_evidence"
+    assert missing.json()["citations"] == []
+
+
 def test_knowledge_api_rejects_unsafe_paths_and_stale_revisions(tmp_path: Path) -> None:
     app, vault, _ = _app(tmp_path)
     (vault / "note.md").write_text("# Note\n", encoding="utf-8")

@@ -12,6 +12,7 @@ import {
   fetchKnowledgeSummary,
   ingestKnowledgeSource,
   rebuildKnowledgeIndex,
+  searchKnowledge,
   transitionKnowledgeProposal,
   undoKnowledgeAutoApply,
 } from '../api/knowledge'
@@ -34,6 +35,7 @@ vi.mock('../api/knowledge', () => ({
   proposeKnowledgeRollback: vi.fn(),
   retryKnowledgeJobItem: vi.fn(),
   rebuildKnowledgeIndex: vi.fn(),
+  searchKnowledge: vi.fn(),
   transitionKnowledgeProposal: vi.fn(),
   undoKnowledgeAutoApply: vi.fn(),
 }))
@@ -72,6 +74,21 @@ beforeEach(() => {
     status: 'ready', backend: 'sqlite-fts5+hashing', embedding_model: 'sage.hashing',
     embedding_revision: '1.0.0', revision_count: 1, indexed_revision_count: 1,
     active_chunk_count: 4, total_chunk_count: 4, error_count: 0,
+  })
+  vi.mocked(searchKnowledge).mockReset().mockResolvedValue({
+    query: '长期记忆 TTL', status: 'evidence_found', token_budget: 3000,
+    used_tokens: 18, omitted_count: 0,
+    citations: [{
+      citation_id: 'kcite-1', rank: 1, rrf_score: 0.03,
+      sparse_rank: 1, sparse_score: 4.2, dense_rank: 1, dense_score: 0.8,
+      chunk_id: 'chunk-1', page_id: 'page-1', page_revision: 'krev-123456789',
+      page_path: 'wiki/sources/memory.md', source_id: 'source-1',
+      source_revision: 'sha256:123456789', source_kind: 'obsidian',
+      source_relative_path: 'memory.md', proposal_id: 'proposal-1', artifact_id: 'artifact-1',
+      block_id: 'block-1', ordinal: 0, title: 'Memory', heading_path: ['Memory'],
+      page_number: null, excerpt: '长期记忆使用事实证据和动态 TTL。', token_count: 18,
+      truncated: false,
+    }],
   })
   vi.mocked(fetchPendingKnowledgeMigration).mockReset().mockResolvedValue({
     plan_id: 'kmig-review',
@@ -211,6 +228,38 @@ it('shows and rebuilds the revision-aware retrieval index', async () => {
   await flushPromises()
 
   expect(rebuildKnowledgeIndex).toHaveBeenCalledOnce()
+  wrapper.unmount()
+})
+
+it('retrieves revision-bound evidence from the knowledge workspace', async () => {
+  const wrapper = await mountKnowledge()
+
+  const query = wrapper.get('input[aria-label="知识库问题"]')
+  await query.setValue('长期记忆 TTL')
+  query.element.closest('form')?.dispatchEvent(new Event('submit'))
+  await flushPromises()
+
+  expect(searchKnowledge).toHaveBeenCalledWith('长期记忆 TTL')
+  expect(wrapper.text()).toContain('长期记忆使用事实证据和动态 TTL')
+  expect(wrapper.text()).toContain('memory.md')
+  expect(wrapper.text()).toContain('kcite-1')
+  wrapper.unmount()
+})
+
+it('shows an explicit no-evidence state instead of a guessed answer', async () => {
+  vi.mocked(searchKnowledge).mockResolvedValue({
+    query: '不存在的知识', status: 'no_evidence', token_budget: 3000,
+    used_tokens: 0, omitted_count: 0, citations: [],
+  })
+  const wrapper = await mountKnowledge()
+
+  const query = wrapper.get('input[aria-label="知识库问题"]')
+  await query.setValue('不存在的知识')
+  query.element.closest('form')?.dispatchEvent(new Event('submit'))
+  await flushPromises()
+
+  expect(wrapper.text()).toContain('知识库没有找到可用证据')
+  expect(wrapper.text()).toContain('不会把模型猜测包装成知识库结论')
   wrapper.unmount()
 })
 

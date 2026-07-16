@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 
 class ListFilesArgs(BaseModel):
@@ -218,6 +218,23 @@ class ToolSearchArgs(BaseModel):
     def query_not_empty(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("query must not be empty")
+        return value
+
+
+class KnowledgeSearchArgs(BaseModel):
+    """Arguments for evidence-only knowledge retrieval."""
+
+    query: str
+    top_k: int = Field(default=8, ge=1, le=20)
+    token_budget: int = Field(default=3000, ge=256, le=20000)
+
+    @field_validator("query")
+    @classmethod
+    def query_not_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("query must not be empty")
+        if len(value) > 2_000:
+            raise ValueError("query must not exceed 2000 characters")
         return value
 
 

@@ -349,6 +349,9 @@ class LocalKnowledgeIndex:
             key=lambda item: (-item[1], item[0]),
         )
         dense = [item for item in dense if item[1] > 0.0][:candidate_limit]
+        if not self.embedding_provider.supports_semantic_recall:
+            sparse_ids = {chunk_id for chunk_id, _score in sparse}
+            dense = [item for item in dense if item[0] in sparse_ids]
         fused = reciprocal_rank_fusion(sparse, dense)[:top_k]
         chunk_ids = [item[0] for item in fused]
         if not chunk_ids:

@@ -7,6 +7,7 @@ import type {
   KnowledgeMigrationPlan,
   KnowledgeMigrationResult,
   KnowledgeProposal,
+  KnowledgeRetrieval,
   KnowledgeWorkspaceSummary,
 } from '../types/api'
 
@@ -34,6 +35,21 @@ export function fetchKnowledgeIndex(): Promise<KnowledgeIndexSummary> {
 
 export function rebuildKnowledgeIndex(): Promise<KnowledgeIndexSummary> {
   return request('/api/v1/knowledge/index/rebuild', { method: 'POST' })
+}
+
+export function searchKnowledge(
+  query: string,
+  options: { topK?: number; tokenBudget?: number } = {},
+): Promise<KnowledgeRetrieval> {
+  return request('/api/v1/knowledge/search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      query,
+      top_k: options.topK ?? 8,
+      token_budget: options.tokenBudget ?? 3000,
+    }),
+  })
 }
 
 export function fetchPendingKnowledgeMigration(): Promise<KnowledgeMigrationPlan> {

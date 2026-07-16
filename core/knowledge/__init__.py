@@ -9,8 +9,11 @@ from core.knowledge.migration import (
 from core.knowledge.retrieval import (
     HashingEmbeddingProvider,
     KnowledgeChunk,
+    KnowledgeEvidence,
     KnowledgeIndexSummary,
+    KnowledgeRetrievalBundle,
     KnowledgeSearchHit,
+    assemble_retrieval_bundle,
 )
 from core.knowledge.store import (
     KnowledgeConflictError,
@@ -38,6 +41,7 @@ __all__ = [
     "KnowledgeChunk",
     "KnowledgeConflictError",
     "KnowledgeEvent",
+    "KnowledgeEvidence",
     "KnowledgeIndexSummary",
     "KnowledgeMigrationItem",
     "KnowledgeMigrationPlan",
@@ -48,6 +52,7 @@ __all__ = [
     "KnowledgePolicyDecision",
     "KnowledgeProjectionError",
     "KnowledgeProposal",
+    "KnowledgeRetrievalBundle",
     "KnowledgeSearchHit",
     "KnowledgeSourceRoot",
     "KnowledgeStore",
@@ -59,4 +64,5 @@ __all__ = [
     "UnderstandingCitation",
     "WorkspaceSourceEvidence",
     "WorkspaceSynthesis",
+    "assemble_retrieval_bundle",
 ]

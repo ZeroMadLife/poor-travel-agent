@@ -18,6 +18,7 @@ from fastapi import (
 
 from api.schemas import (
     KnowledgeBatchIngestRequest,
+    KnowledgeEvidenceResponse,
     KnowledgeIndexResponse,
     KnowledgeIngestRequest,
     KnowledgeJobEventResponse,
@@ -39,7 +40,9 @@ from api.schemas import (
     KnowledgeProposalEvent,
     KnowledgeProposalResponse,
     KnowledgeProposalsResponse,
+    KnowledgeRetrievalResponse,
     KnowledgeRollbackRequest,
+    KnowledgeSearchRequest,
     KnowledgeSourceRootSummary,
     KnowledgeSourceUnderstandingResponse,
     KnowledgeSynthesisSourceResponse,
@@ -59,6 +62,7 @@ from core.knowledge import (
     KnowledgePolicyDecision,
     KnowledgeProjectionError,
     KnowledgeProposal,
+    KnowledgeRetrievalBundle,
     KnowledgeStore,
     SourceUnderstanding,
     WorkspaceSynthesis,
@@ -113,6 +117,31 @@ async def get_knowledge_index(request: Request, response: Response) -> Knowledge
 async def rebuild_knowledge_index(request: Request) -> KnowledgeIndexResponse:
     store = _require_store(request)
     return _index_response(await asyncio.to_thread(store.rebuild_index))
+
+
+@router.post("/api/v1/knowledge/search", response_model=KnowledgeRetrievalResponse)
+async def search_knowledge(
+    payload: KnowledgeSearchRequest,
+    request: Request,
+    response: Response,
+) -> KnowledgeRetrievalResponse:
+    """Return revision-bound evidence without exposing configured filesystem roots."""
+
+    store = _require_store(request)
+    try:
+        bundle = await asyncio.to_thread(
+            store.retrieve,
+            payload.query,
+            top_k=payload.top_k,
+            token_budget=payload.token_budget,
+            visibility=payload.visibility,
+            source_ids=tuple(payload.source_ids),
+            page_revisions=tuple(payload.page_revisions),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return _retrieval_response(bundle)
 
 
 @router.post(
@@ -604,6 +633,50 @@ def _index_response(summary: KnowledgeIndexSummary) -> KnowledgeIndexResponse:
         active_chunk_count=summary.active_chunk_count,
         total_chunk_count=summary.total_chunk_count,
         error_count=summary.error_count,
+    )
+
+
+def _retrieval_response(bundle: KnowledgeRetrievalBundle) -> KnowledgeRetrievalResponse:
+    citations: list[KnowledgeEvidenceResponse] = []
+    for evidence in bundle.evidence:
+        hit = evidence.hit
+        chunk = hit.chunk
+        citations.append(
+            KnowledgeEvidenceResponse(
+                citation_id=hit.citation_id,
+                rank=hit.rank,
+                rrf_score=hit.rrf_score,
+                sparse_rank=hit.sparse_rank,
+                sparse_score=hit.sparse_score,
+                dense_rank=hit.dense_rank,
+                dense_score=hit.dense_score,
+                chunk_id=chunk.chunk_id,
+                page_id=chunk.page_id,
+                page_revision=chunk.page_revision,
+                page_path=chunk.page_path,
+                source_id=chunk.source_id,
+                source_revision=chunk.source_revision,
+                source_kind=chunk.source_kind,
+                source_relative_path=chunk.source_relative_path,
+                proposal_id=chunk.proposal_id,
+                artifact_id=chunk.artifact_id,
+                block_id=chunk.block_id,
+                ordinal=chunk.ordinal,
+                title=chunk.title,
+                heading_path=list(chunk.heading_path),
+                page_number=chunk.page_number,
+                excerpt=evidence.excerpt,
+                token_count=evidence.token_count,
+                truncated=evidence.truncated,
+            )
+        )
+    return KnowledgeRetrievalResponse(
+        query=bundle.query,
+        status=bundle.status,
+        token_budget=bundle.token_budget,
+        used_tokens=bundle.used_tokens,
+        omitted_count=bundle.omitted_count,
+        citations=citations,
     )
 
 
