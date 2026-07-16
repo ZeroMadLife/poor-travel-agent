@@ -9,9 +9,11 @@ from api.main import create_app
 
 
 def _receive_runtime_event(websocket):
-    """Unwrap the next runtime event from the durable timeline envelope."""
+    """Unwrap the next Engine event, ignoring Harness projection facts."""
     while True:
         envelope = websocket.receive_json()
+        if envelope["kind"] == "harness":
+            continue
         payload = envelope["payload"]
         if "type" in payload and payload["type"] not in {"user"}:
             return payload
@@ -715,8 +717,8 @@ def test_coding_run_history_lists_and_reads_traces(tmp_path: Path) -> None:
     with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
         websocket.send_json({"content": "读 README.md"})
         while True:
-            event = _receive_runtime_event(websocket)
-            if event["type"] == "final":
+            envelope = websocket.receive_json()
+            if envelope["kind"] == "terminal":
                 break
 
     list_response = client.get(f"/api/v1/coding/{session_id}/runs")

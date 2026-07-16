@@ -623,6 +623,7 @@ export type CodingTimelineKind =
   | 'terminal'
   | 'system'
   | 'run'
+  | 'harness'
 
 export type CodingTimelineStatus =
   | 'pending'

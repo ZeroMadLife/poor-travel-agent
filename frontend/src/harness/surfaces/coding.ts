@@ -1,4 +1,5 @@
 import type { CodingTimelineEvent, CodingTimelineStatus } from '../../types/api'
+import { projectHarnessTimeline } from '../timelineProjection'
 import type { HarnessDefinition, HarnessStageStatus, HarnessTimelineEvent } from '../types'
 
 export const codingHarnessDefinition: HarnessDefinition = {
@@ -25,9 +26,12 @@ export const codingHarnessDefinition: HarnessDefinition = {
 
 export function adaptCodingTimeline(events: readonly CodingTimelineEvent[]): HarnessTimelineEvent[] {
   const output: HarnessTimelineEvent[] = []
-  let modelRequestCount = 0
+  const modelRequestCounts = new Map<string, number>()
   const ordered = [...events].sort(
     (left, right) => left.sequence - right.sequence || left.event_id.localeCompare(right.event_id),
+  )
+  const explicitRuns = new Set(
+    ordered.filter((event) => adaptExplicitStageEvent(event)).map((event) => event.run_id),
   )
   for (const event of ordered) {
     const explicit = adaptExplicitStageEvent(event)
@@ -35,11 +39,27 @@ export function adaptCodingTimeline(events: readonly CodingTimelineEvent[]): Har
       output.push(explicit)
       continue
     }
+    if (explicitRuns.has(event.run_id) && event.kind !== 'terminal') continue
     const type = stringValue(event.payload.type) || stringValue(event.payload.event)
+    const modelRequestCount = modelRequestCounts.get(event.run_id) || 0
     output.push(...adaptLegacyEvent(event, modelRequestCount === 0))
-    if (event.kind === 'model' && type === 'model_requested') modelRequestCount += 1
+    if (event.kind === 'model' && type === 'model_requested') {
+      modelRequestCounts.set(event.run_id, modelRequestCount + 1)
+    }
   }
   return output
+}
+
+export function projectLatestCodingHarness(
+  events: readonly CodingTimelineEvent[],
+  preferredRunId = '',
+) {
+  const ordered = [...events].sort(
+    (left, right) => left.sequence - right.sequence || left.event_id.localeCompare(right.event_id),
+  )
+  const runId = preferredRunId || ordered.at(-1)?.run_id || ''
+  const runEvents = runId ? ordered.filter((event) => event.run_id === runId) : []
+  return projectHarnessTimeline(adaptCodingTimeline(runEvents), codingHarnessDefinition)
 }
 
 function adaptExplicitStageEvent(event: CodingTimelineEvent): HarnessTimelineEvent | null {
@@ -52,6 +72,8 @@ function adaptExplicitStageEvent(event: CodingTimelineEvent): HarnessTimelineEve
     detail: stringValue(event.payload.detail) || undefined,
     definitionId: stringValue(event.payload.definition_id) || codingHarnessDefinition.id,
     definitionVersion: numberValue(event.payload.definition_version) || codingHarnessDefinition.version,
+    status: explicitStatus(event.status),
+    operationRef: operationRef(event.payload.operation_ref),
   })
 }
 
@@ -168,6 +190,22 @@ function timelineStatus(status: CodingTimelineStatus): HarnessStageStatus {
   if (status === 'error') return 'failed'
   if (status === 'cancelled' || status === 'interrupted') return 'cancelled'
   return 'completed'
+}
+
+function explicitStatus(status: CodingTimelineStatus): HarnessStageStatus {
+  if (status === 'blocked') return 'blocked'
+  if (status === 'running' || status === 'queued' || status === 'pending') return 'running'
+  if (status === 'error') return 'failed'
+  if (status === 'cancelled' || status === 'interrupted') return 'cancelled'
+  return 'completed'
+}
+
+function operationRef(value: unknown) {
+  const record = recordValue(value)
+  const kind = stringValue(record.kind)
+  const id = stringValue(record.id)
+  if ((kind === 'coding_run' || kind === 'knowledge_job') && id) return { kind, id } as const
+  return undefined
 }
 
 function toolDetail(event: CodingTimelineEvent) {

@@ -31,7 +31,7 @@ _MAX_PAYLOAD_BYTES = 1024 * 1024
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 _KINDS = {
     "user", "assistant", "model", "tool", "approval", "context", "memory",
-    "agent", "terminal", "system", "run",
+    "agent", "terminal", "system", "run", "harness",
 }
 _STATUSES = {
     "pending", "queued", "running", "blocked", "done", "completed", "cancelled",

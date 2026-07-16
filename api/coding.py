@@ -75,6 +75,7 @@ from api.schemas import (
 )
 from core.cloud.auth.repository import CloudRepository
 from core.coding.context import ContextBusyError
+from core.coding.harness import CodingHarnessStageProjector
 from core.coding.memory import workspace_id_from_path
 from core.coding.persistence import (
     CodingSessionStore,
@@ -146,6 +147,7 @@ async def _runtime_timeline_events(
 ) -> AsyncGenerator[RunEvent, None]:
     """Project a complete runtime generator into durable nonterminal events."""
     terminal_status = "completed"
+    harness = CodingHarnessStageProjector(run_id)
     yield RunEvent(
         kind="user",
         status="completed",
@@ -157,26 +159,39 @@ async def _runtime_timeline_events(
             status="completed",
             payload={"type": "skill_invoked", "skill": command, "arguments": arguments},
         )
-    async for event in runtime.run_turn(
-        content,
-        skill_prompt=skill_prompt,
-        surface_context=surface_context,
-        run_id=run_id,
-    ):
-        event_type = str(event.get("type", ""))
-        if event_type == "run_finished":
-            candidate = str(event.get("status", "completed"))
-            if candidate == "retryable":
-                terminal_status = "interrupted"
-            elif candidate in {"completed", "cancelled", "interrupted", "error"}:
-                terminal_status = candidate
-        elif event_type == "error":
-            terminal_status = "error"
-        yield RunEvent(
-            kind=_timeline_kind(event_type),
-            status=_timeline_status(event_type, event),
-            payload=dict(event),
-        )
+    for stage_event in harness.start():
+        yield stage_event
+    try:
+        async for event in runtime.run_turn(
+            content,
+            skill_prompt=skill_prompt,
+            surface_context=surface_context,
+            run_id=run_id,
+        ):
+            event_type = str(event.get("type", ""))
+            if event_type == "run_finished":
+                candidate = str(event.get("status", "completed"))
+                if candidate == "retryable":
+                    terminal_status = "interrupted"
+                elif candidate in {"completed", "cancelled", "interrupted", "error"}:
+                    terminal_status = candidate
+            elif event_type == "error":
+                terminal_status = "error"
+            for stage_event in harness.before(event):
+                yield stage_event
+            yield RunEvent(
+                kind=_timeline_kind(event_type),
+                status=_timeline_status(event_type, event),
+                payload=dict(event),
+            )
+            for stage_event in harness.after(event):
+                yield stage_event
+    except Exception:
+        for stage_event in harness.finish("error"):
+            yield stage_event
+        raise
+    for stage_event in harness.finish(terminal_status):
+        yield stage_event
     yield RunEvent(
         kind="terminal",
         status=terminal_status,

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Eye, EyeOff, FileText, History, House, ScrollText, Settings, X } from 'lucide-vue-next'
+import { Eye, EyeOff, FileText, History, House, ScrollText, Settings, Waypoints, X } from 'lucide-vue-next'
 import {
   CodingApprovalCard,
   CodingComposer,
@@ -15,7 +15,8 @@ import {
   CodingSidebar,
   CodingThinkingIndicator,
 } from '../components/coding'
-import { ChatTimeline } from '../components/harness'
+import { ChatTimeline, HarnessRunStatus } from '../components/harness'
+import { projectLatestCodingHarness } from '../harness/surfaces/coding'
 import { useCodingStore } from '../stores/coding'
 import { useMarkdown } from '../composables/useMarkdown'
 import { useWorkbenchPreferences } from '../composables/useWorkbenchPreferences'
@@ -27,6 +28,7 @@ const router = useRouter()
 const showPlanPreview = ref(false)
 const filesDrawerVisible = ref(false)
 const leftOpen = ref(false)
+const harnessPathVisible = ref(false)
 const deepLinkError = ref('')
 const leftToggleRef = ref<HTMLButtonElement | null>(null)
 const leftSheetRef = ref<HTMLElement | null>(null)
@@ -56,6 +58,10 @@ const thinkingCharacterState = computed(() => {
 const currentSession = computed(() => store.codingSessions.find((session) => session.session_id === store.sessionId))
 const currentSessionTitle = computed(() => currentSession.value?.title || '未命名会话')
 const currentRunStatus = computed(() => store.activeRun || store.isThinking ? '运行中' : '已就绪')
+const harnessProjection = computed(() => projectLatestCodingHarness(
+  store.visibleTimeline,
+  store.activeRun?.run_id || '',
+))
 const mainInert = computed(() => leftOpen.value)
 const drawerError = ref('')
 
@@ -108,6 +114,10 @@ function pendingToolForRun(runId: string) {
 const optimisticAttachedToTurn = computed(() => {
   return Boolean(store.optimisticMessage && store.activeRun &&
     store.turns.some((turn) => turn.run_id === store.activeRun?.run_id))
+})
+
+watch(() => store.activeRun?.run_id || '', (runId, previousRunId) => {
+  if (runId && runId !== previousRunId) harnessPathVisible.value = true
 })
 
 const outputSignature = computed(() => JSON.stringify({
@@ -354,18 +364,22 @@ onBeforeUnmount(() => {
         <CodingSidebar @navigate="navigateSession" @new-session="startNewSession" @archive-current="archiveCurrentSession" @settings="openSettings" @close="closeLeftSheet" />
       </aside>
 
-      <main class="pane-center" :class="{ 'is-inert': mainInert }" :inert="mainInert || undefined" :aria-hidden="mainInert ? 'true' : undefined">
+      <main class="pane-center" :class="{ 'is-inert': mainInert, 'has-harness-path': harnessPathVisible && harnessProjection.runId }" :inert="mainInert || undefined" :aria-hidden="mainInert ? 'true' : undefined">
         <header class="session-titlebar">
           <div class="session-title-copy"><strong :title="currentSessionTitle">{{ currentSessionTitle }}</strong><span :class="{ running: store.activeRun || store.isThinking }">{{ currentRunStatus }}</span></div>
           <div class="titlebar-actions">
             <button ref="leftToggleRef" class="header-icon session-history-toggle" type="button" title="打开会话历史" aria-label="打开会话" @click="openLeftSheet"><History :size="16" /></button>
             <button class="header-icon process-toggle" type="button" :title="showToolProcess ? '隐藏运行摘要' : '显示运行摘要'" :aria-label="showToolProcess ? '隐藏运行摘要' : '显示运行摘要'" :aria-pressed="showToolProcess" @click="showToolProcess = !showToolProcess"><Eye v-if="showToolProcess" :size="16" /><EyeOff v-else :size="16" /></button>
+            <button class="header-icon harness-toggle" type="button" :disabled="!harnessProjection.runId" :title="harnessPathVisible ? '隐藏 Harness 运行路径' : '显示 Harness 运行路径'" :aria-label="harnessPathVisible ? '隐藏 Harness 运行路径' : '显示 Harness 运行路径'" :aria-pressed="harnessPathVisible" @click="harnessPathVisible = !harnessPathVisible"><Waypoints :size="16" /></button>
             <RouterLink class="home-link" to="/assistant" aria-label="返回今天" title="返回今天"><House :size="16" /></RouterLink>
             <button class="files-toggle" type="button" aria-label="打开文件" title="打开文件" @click="openFilesDrawer"><FileText :size="16" /></button>
             <CodingGitBadge />
             <button class="header-icon" type="button" title="打开设置" aria-label="打开设置" @click="openSettings"><Settings :size="16" /></button>
           </div>
         </header>
+        <section v-if="harnessPathVisible && harnessProjection.runId" class="harness-path-panel">
+          <HarnessRunStatus :projection="harnessProjection" />
+        </section>
         <ChatTimeline
           class="message-area"
           :output-signature="outputSignature"
@@ -452,6 +466,10 @@ onBeforeUnmount(() => {
 .header-icon { display:grid; place-items:center; width:30px; height:30px; padding:0; border:1px solid transparent; border-radius:6px; color:#52606f; background:#fff; }.header-icon:hover,.header-icon[aria-pressed="true"] { border-color:#d8dee6; color:#1d4ed8; background:#f4f7fb; }
 .plan-banner { grid-row:1; display:flex; align-items:center; gap:8px; min-height:34px; padding:0 12px; border-bottom:1px solid #cddcf2; color:#244b82; background:#eff5fd; font-size:var(--sage-font-sm); }.plan-banner span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.plan-banner button { margin-left:auto; min-height:24px; border:1px solid #adc5e7; border-radius:5px; color:#1d4ed8; background:#fff; font-size:var(--sage-font-xs); }
 .chat-shell { grid-row:2; position:relative; min-height:0; height:100%; overflow:hidden; }.pane-left,.pane-center { min-height:0; }.pane-left { position:absolute; z-index:32; inset:0 auto 0 0; width:min(340px,100%); overflow:hidden; border-right:1px solid var(--sage-border); background:var(--sage-surface); box-shadow:var(--sage-shadow-drawer); animation:session-drawer-in .18s ease-out; }.pane-center { position:relative; display:grid; grid-template-rows:56px minmax(0,1fr) auto; width:100%; height:100%; min-width:0; min-height:0; background:#fff; }.session-titlebar { display:flex; align-items:center; justify-content:space-between; gap:12px; min-width:0; padding:0 clamp(16px,4vw,52px); border-bottom:1px solid #edf0f3; }.session-title-copy { display:flex; align-items:center; gap:9px; min-width:0; }.session-title-copy strong { min-width:0; overflow:hidden; color:#283342; font-size:var(--sage-font-md); text-overflow:ellipsis; white-space:nowrap; }.session-title-copy span { display:inline-flex; align-items:center; flex:none; color:#748091; font-size:var(--sage-font-xs); }.session-title-copy span::before { width:6px; height:6px; margin-right:5px; border-radius:50%; background:#a7afb9; content:''; }.session-title-copy span.running { color:#137333; }.session-title-copy span.running::before { background:#16a34a; }.titlebar-actions { display:flex; align-items:center; justify-content:flex-end; gap:6px; min-width:0; }.files-toggle,.home-link { display:inline-grid; place-items:center; width:30px; height:30px; padding:0; border:1px solid transparent; border-radius:6px; color:#52606f; background:#fff; text-decoration:none; }.files-toggle:hover,.home-link:hover { border-color:#d8dee6; color:#1d4ed8; background:#f4f7fb; }
+.pane-center.has-harness-path { grid-template-rows:48px minmax(138px,auto) minmax(0,1fr) auto; }
+.harness-path-panel { min-height:0; max-height:260px; overflow:auto; border-bottom:1px solid var(--sage-border); background:var(--sage-surface-raised); }
+.harness-path-panel :deep(.harness-run-status) { padding-top:14px; padding-bottom:16px; }
+.harness-path-panel :deep(.stage-path) { margin-top:18px; }
 .active-run-status { display:flex; width:100%; max-width:1120px; padding-left:42px; }
 .active-run-status :deep(.thinking-indicator) { margin:0 0 12px; }
 .empty-state { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:5px; min-height:100%; color:#8a939e; text-align:center; }.empty-state strong { color:#4b5563; font-size:var(--sage-font-md); }.empty-state span { font-size:var(--sage-font-sm); }
@@ -470,6 +488,7 @@ onBeforeUnmount(() => {
 .session-titlebar { padding-right:clamp(18px,5vw,64px); padding-left:clamp(18px,5vw,64px); }
 @media (max-width:767px) {
   .session-titlebar { padding-right:10px; padding-left:56px; }
+  .pane-center.has-harness-path { grid-template-rows:48px minmax(120px,38vh) minmax(0,1fr) auto; }
 }
 @media (max-width:1100px) {
   .home-link,.titlebar-actions :deep(.git-badge) { display:none; }

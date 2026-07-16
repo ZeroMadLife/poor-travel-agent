@@ -139,7 +139,7 @@ class ToolExecutor:
             )
             return
 
-        description = f"{tool.name} requires approval."
+        description = _approval_description(tool.name)
         pattern_key = f"tool:{tool.name}"
         if tool.name == "knowledge_learn":
             description = "保存本轮引用证据到知识库前需要确认。"
@@ -218,3 +218,14 @@ class ToolExecutor:
 
     def _cancelled_event(self) -> CancelledEvent:
         return CancelledEvent(run_id=self.run_id, content="已停止当前运行。")
+
+
+def _approval_description(tool_name: str) -> str:
+    descriptions = {
+        "write_file": "写入文件前需要确认。",
+        "patch_file": "修改文件前需要确认。",
+        "run_shell": "执行 Shell 命令前需要确认。",
+        "knowledge_learn": "保存本轮引用证据到知识库前需要确认。",
+        "remember": "保存事实到长期工作区记忆前需要确认。",
+    }
+    return descriptions.get(tool_name, f"调用工具 {tool_name} 前需要确认。")

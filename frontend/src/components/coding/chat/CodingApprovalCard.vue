@@ -21,6 +21,17 @@ const diffPath = computed(() => {
   return typeof path === 'string' && path.trim() ? path : props.approval.tool
 })
 
+const approvalDescription = computed(() => {
+  const descriptions: Record<string, string> = {
+    write_file: '写入文件前需要确认。',
+    patch_file: '修改文件前需要确认。',
+    run_shell: '执行 Shell 命令前需要确认。',
+    knowledge_learn: '保存本轮引用证据到知识库前需要确认。',
+    remember: '保存事实到长期工作区记忆前需要确认。',
+  }
+  return descriptions[props.approval.tool] || props.approval.description
+})
+
 const approvalSummary = computed(() => {
   const content = props.approval.args.content
   if (props.approval.tool === 'write_file' && typeof content === 'string') {
@@ -28,7 +39,7 @@ const approvalSummary = computed(() => {
   }
   const command = props.approval.args.command
   if (props.approval.tool === 'run_shell' && typeof command === 'string') {
-    return command
+    return redactText(command)
   }
   if (props.approval.tool === 'knowledge_learn') {
     const topic = typeof props.approval.args.topic === 'string'
@@ -59,6 +70,13 @@ function compactArgs(args: Record<string, unknown>) {
     ]),
   )
 }
+
+function redactText(text: string) {
+  return text
+    .replace(/(authorization\s*:\s*)(?:bearer\s+|basic\s+)?[^\s'"\n]+/gi, '$1[REDACTED]')
+    .replace(/\bbearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
+    .replace(/\b([A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD))\s*=\s*[^\s]+/gi, '$1=[REDACTED]')
+}
 </script>
 
 <template>
@@ -66,7 +84,7 @@ function compactArgs(args: Record<string, unknown>) {
     <div class="approval-main">
       <p class="eyebrow">需要确认</p>
       <h2>{{ approval.tool }}</h2>
-      <p class="description">{{ approval.description }}</p>
+      <p class="description">{{ approvalDescription }}</p>
       <div v-if="approval.diff_preview?.length" class="diff-preview">
         <div class="diff-preview-header">
           <span>{{ diffPath }}</span>
@@ -133,7 +151,7 @@ function compactArgs(args: Record<string, unknown>) {
   grid-template-columns: 1fr auto;
   gap: 14px;
   align-items: end;
-  max-width: 760px;
+  width: min(100%, 760px);
   max-height: min(520px, calc(100vh - 132px));
   margin: 0 0 12px;
   padding: 12px;
@@ -217,9 +235,9 @@ button:disabled {
 }
 
 .allow {
-  border: 1px solid var(--sage-text);
-  color: #fff;
-  background: var(--sage-text);
+  border: 1px solid var(--sage-review-strong);
+  color: var(--sage-bg);
+  background: var(--sage-review-strong);
 }
 
 .session {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { CodingTimelineEvent } from '../types/api'
-import { adaptCodingTimeline, codingHarnessDefinition } from './surfaces/coding'
+import { adaptCodingTimeline, codingHarnessDefinition, projectLatestCodingHarness } from './surfaces/coding'
 import { mergeHarnessEvents, projectHarnessTimeline } from './timelineProjection'
 import type { HarnessTimelineEvent } from './types'
 
@@ -124,5 +124,79 @@ describe('harness timeline projection', () => {
     expect(projectHarnessTimeline(liveEvents, codingHarnessDefinition)).toEqual(
       projectHarnessTimeline(adapted, codingHarnessDefinition),
     )
+  })
+
+  it('prefers explicit stage facts without duplicating legacy inference', () => {
+    const events = adaptCodingTimeline([
+      codingEvent(1, 'user', { type: 'user', content: '解释项目' }),
+      codingEvent(2, 'harness', {
+        type: 'stage_started',
+        definition_id: 'sage.coding.practice',
+        definition_version: 1,
+        stage_id: 'receive',
+      }, 'running'),
+      codingEvent(3, 'harness', {
+        type: 'stage_completed',
+        definition_id: 'sage.coding.practice',
+        definition_version: 1,
+        stage_id: 'receive',
+      }),
+      codingEvent(4, 'terminal', { event: 'run_completed' }),
+    ])
+
+    const projection = projectHarnessTimeline(events, codingHarnessDefinition)
+    expect(projection.visitedPath).toEqual(['receive'])
+    expect(projection.stages.find((stage) => stage.id === 'receive')?.visitCount).toBe(1)
+  })
+
+  it('selects the active run while retaining deterministic replay output', () => {
+    const source = [
+      codingEvent(1, 'user', { type: 'user', content: 'old' }),
+      { ...codingEvent(2, 'terminal', { event: 'run_completed' }), run_id: 'run-old' },
+      { ...codingEvent(3, 'harness', {
+        type: 'stage_started',
+        definition_id: 'sage.coding.practice',
+        definition_version: 1,
+        stage_id: 'act',
+        operation_ref: { kind: 'coding_run', id: 'run-live' },
+      }, 'blocked'), run_id: 'run-live' },
+    ]
+
+    const projection = projectLatestCodingHarness(source, 'run-live')
+    expect(projection.runId).toBe('run-live')
+    expect(projection.activeStageId).toBe('act')
+    expect(projection.status).toBe('blocked')
+    expect(projection.stages.find((stage) => stage.id === 'act')?.operationRef).toEqual({
+      kind: 'coding_run', id: 'run-live',
+    })
+  })
+
+  it('keeps blocked and resumed approval activity in one tool-stage visit', () => {
+    const events = adaptCodingTimeline([
+      codingEvent(1, 'harness', {
+        type: 'stage_started',
+        definition_id: 'sage.coding.practice',
+        definition_version: 1,
+        stage_id: 'act',
+        detail: 'run_shell · pwd',
+      }, 'blocked'),
+      codingEvent(2, 'harness', {
+        type: 'stage_started',
+        definition_id: 'sage.coding.practice',
+        definition_version: 1,
+        stage_id: 'act',
+        detail: 'run_shell · pwd',
+      }, 'running'),
+    ])
+
+    const projection = projectHarnessTimeline(events, codingHarnessDefinition)
+    expect(projection.status).toBe('running')
+    expect(projection.activeStageId).toBe('act')
+    expect(projection.visitedPath).toEqual(['act'])
+    expect(projection.stages.find((stage) => stage.id === 'act')).toMatchObject({
+      status: 'running',
+      visitCount: 1,
+      detail: 'run_shell · pwd',
+    })
   })
 })
