@@ -621,6 +621,16 @@ export type KnowledgePage = {
   revisions: KnowledgePageRevision[]
 }
 
+export type KnowledgePageDocument = {
+  page_id: string
+  path: string
+  title: string
+  updated_at: string
+  revision: KnowledgePageRevision
+  content: string
+  truncated: boolean
+}
+
 export type CodingSessionMessage = {
   role: 'user' | 'assistant'
   content: string

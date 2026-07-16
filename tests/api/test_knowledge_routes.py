@@ -260,6 +260,16 @@ def test_ingest_review_approve_and_rollback_api_contract(tmp_path: Path) -> None
     assert len(page["revisions"]) == 1
     assert (knowledge / page["path"]).is_file()
 
+    page_document = client.get(f"/api/v1/knowledge/pages/{page['page_id']}")
+    assert page_document.status_code == 200
+    assert page_document.headers["cache-control"] == "no-store"
+    assert page_document.json()["revision"]["revision_id"] == page["current_revision"]
+    assert "可恢复、可审核" in page_document.json()["content"]
+    assert page_document.json()["truncated"] is False
+    assert str(vault) not in page_document.text
+    assert client.get("/api/v1/knowledge/pages/page_missing").status_code == 404
+    assert client.get("/api/v1/knowledge/pages/invalid%2Fpage").status_code in {404, 422}
+
     rollback = client.post(
         f"/api/v1/knowledge/pages/{page['page_id']}/rollback",
         json={

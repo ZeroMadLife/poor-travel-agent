@@ -93,6 +93,7 @@ const migrationResult = ref<KnowledgeMigrationResult | null>(null)
 const syncPlan = ref<KnowledgeSyncPlan | null>(null)
 const neighborhood = ref<KnowledgeGraphNeighborhood | null>(null)
 const selectedNodeId = ref<string | null>(null)
+const selectedPageId = ref<string | null>(null)
 const mode = ref<WorkspaceMode>('graph')
 const colorMode = ref<'type' | 'community'>('community')
 const visibleKinds = ref<KnowledgeGraphNodeKind[]>([
@@ -132,7 +133,7 @@ const selectedNode = computed<KnowledgeGraphNode | null>(() =>
   graph.value?.nodes.find((item) => item.node_id === selectedNodeId.value) ?? null,
 )
 const selectedPage = computed<KnowledgePage | null>(() => {
-  const pageId = selectedNode.value?.page_id
+  const pageId = selectedPageId.value ?? selectedNode.value?.page_id
   return pageId ? pages.value.find((item) => item.page_id === pageId) ?? null : null
 })
 const selectedCommunityId = computed(() => communities.value?.node_metrics.find(
@@ -241,6 +242,9 @@ async function refreshJobs() {
 
 async function selectNode(nodeId: string | null) {
   selectedNodeId.value = nodeId
+  selectedPageId.value = nodeId
+    ? graph.value?.nodes.find((item) => item.node_id === nodeId)?.page_id ?? null
+    : null
   neighborhood.value = null
   if (!nodeId) return
   if (viewportWidth.value < 768) harnessLayout.value?.selectTab('details')
@@ -257,15 +261,21 @@ async function selectNode(nodeId: string | null) {
 }
 
 function closeInspector() {
+  selectedPageId.value = null
   void selectNode(null)
 }
 
 function selectPage(page: KnowledgePage) {
   const node = graph.value?.nodes.find((item) => item.page_id === page.page_id)
-  mode.value = 'graph'
+  selectedPageId.value = page.page_id
   libraryOpen.value = false
   if (node) void selectNode(node.node_id)
-  else notice.value = '该页面尚未进入当前图谱 revision，请先重建图谱。'
+  else {
+    selectedNodeId.value = null
+    neighborhood.value = null
+    notice.value = '该页面尚未进入当前图谱 revision，但仍可阅读 Wiki 正文。'
+  }
+  harnessLayout.value?.selectTab('details')
 }
 
 function toggleKind(kind: KnowledgeGraphNodeKind) {

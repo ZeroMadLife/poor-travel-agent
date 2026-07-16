@@ -1,6 +1,6 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, expect, it, vi } from 'vitest'
-import { fetchKnowledgeCitation } from '../../api/knowledge'
+import { fetchKnowledgeCitation, fetchKnowledgePage } from '../../api/knowledge'
 import type {
   KnowledgeGraph,
   KnowledgeGraphCommunities,
@@ -11,6 +11,7 @@ import KnowledgeInspector from './KnowledgeInspector.vue'
 
 vi.mock('../../api/knowledge', () => ({
   fetchKnowledgeCitation: vi.fn(),
+  fetchKnowledgePage: vi.fn(),
 }))
 
 vi.hoisted(() => {
@@ -86,6 +87,15 @@ beforeEach(() => {
     source_relative_path: 'notes/harness.md', block_id: 'block-1', ordinal: 0,
     title: 'Agent Harness', heading_path: ['Harness', 'Recovery'], page_number: null,
     excerpt: 'Harness 使用可恢复的状态机保存执行证据。', token_count: 12, truncated: false,
+  })
+  vi.mocked(fetchKnowledgePage).mockResolvedValue({
+    page_id: 'page-1', path: 'wiki/sources/harness.md', title: 'Agent Harness',
+    updated_at: '', revision: {
+      revision_id: 'krev-page', sequence: 1, content_hash: 'sha256:page',
+      source_revision: 'sha256:source', proposal_id: 'kprop-1', change_kind: 'ingest',
+      git_commit: 'abc123', created_at: '',
+    },
+    content: '# Agent Harness\n\n可恢复执行。\n\n<script>alert(1)</script>', truncated: false,
   })
 })
 
@@ -164,6 +174,11 @@ it('shows revision evidence and one-hop relations in the inspector', async () =>
   await flushPromises()
   expect(document.activeElement).toBe(wrapper.get('button[aria-label="关闭知识详情"]').element)
   await wrapper.findAll('.inspector-tabs button')[1].trigger('click')
+  await flushPromises()
+  expect(fetchKnowledgePage).toHaveBeenCalledWith('page-1')
+  expect(wrapper.get('.wiki-content').text()).toContain('可恢复执行')
+  expect(wrapper.find('.wiki-content script').exists()).toBe(false)
+  await wrapper.findAll('.inspector-tabs button')[2].trigger('click')
   expect(wrapper.text()).toContain('notes/harness.md')
   expect(wrapper.text()).toContain('来源证据')
   expect(wrapper.text()).toContain('sha256:source')
@@ -172,10 +187,38 @@ it('shows revision evidence and one-hop relations in the inspector', async () =>
   expect(fetchKnowledgeCitation).toHaveBeenCalledWith('kcite-1')
   expect(wrapper.text()).toContain('Harness 使用可恢复的状态机保存执行证据。')
   expect(wrapper.text()).toContain('Harness / Recovery')
-  await wrapper.findAll('.inspector-tabs button')[2].trigger('click')
+  await wrapper.findAll('.inspector-tabs button')[3].trigger('click')
   await wrapper.get('.relation-list button').trigger('click')
   expect(wrapper.emitted('select')).toEqual([['source-1']])
   await wrapper.get('.knowledge-inspector').trigger('keydown', { key: 'Escape' })
   expect(wrapper.emitted('close')).toHaveLength(1)
+  wrapper.unmount()
+})
+
+it('reads a canonical Wiki page that is not yet projected into the graph', async () => {
+  const wrapper = mount(KnowledgeInspector, {
+    props: {
+      node: null,
+      page: {
+        page_id: 'page-1', path: 'wiki/sources/harness.md', title: 'Agent Harness',
+        current_revision: 'krev-page', updated_at: '', revisions: [],
+      },
+      neighborhood: null,
+      insights: [],
+      goal: null,
+      alignments: [],
+      communities: [],
+      communityId: null,
+      loading: false,
+      compact: false,
+    },
+  })
+
+  expect(wrapper.findAll('.inspector-tabs button')).toHaveLength(2)
+  await wrapper.findAll('.inspector-tabs button')[1].trigger('click')
+  await flushPromises()
+
+  expect(fetchKnowledgePage).toHaveBeenCalledWith('page-1')
+  expect(wrapper.get('.wiki-content').text()).toContain('可恢复执行')
   wrapper.unmount()
 })

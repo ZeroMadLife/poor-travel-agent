@@ -267,6 +267,19 @@ it('opens node details after selecting a graph node on mobile', async () => {
   wrapper.unmount()
 })
 
+it('opens a Wiki page in the detail dock without leaving the Wiki view', async () => {
+  const wrapper = await mountKnowledge()
+
+  await wrapper.findAll('.stage-tabs button')[1].trigger('click')
+  await wrapper.get('.wiki-main').trigger('click')
+  await flushPromises()
+
+  expect(wrapper.get('.knowledge-harness').attributes('data-active-tab')).toBe('details')
+  expect(wrapper.findAll('.stage-tabs button')[1].attributes('aria-selected')).toBe('true')
+  expect(wrapper.get('.inspector-stub').text()).toContain('Agent Harness')
+  wrapper.unmount()
+})
+
 it('imports a single source from an authorized root', async () => {
   const wrapper = await mountKnowledge()
 

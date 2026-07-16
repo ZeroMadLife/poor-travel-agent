@@ -358,6 +358,16 @@ class KnowledgePage:
 
 
 @dataclass(frozen=True, slots=True)
+class KnowledgePageDocument:
+    page_id: str
+    path: str
+    title: str
+    updated_at: str
+    revision: KnowledgePageRevision
+    content: str
+
+
+@dataclass(frozen=True, slots=True)
 class KnowledgeSummary:
     status: str
     workspace_name: str
@@ -1751,6 +1761,35 @@ class KnowledgeStore:
                     )
                 )
         return result
+
+    def get_page_document(self, page_id: str) -> KnowledgePageDocument:
+        """Load the current canonical Wiki revision without reading a source path."""
+
+        self.initialize()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT page.page_id, page.path, page.title, page.updated_at,
+                       revision.revision_id, revision.sequence, revision.content_hash,
+                       revision.content, revision.source_revision, revision.proposal_id,
+                       revision.change_kind, revision.git_commit, revision.created_at
+                FROM knowledge_pages AS page
+                JOIN knowledge_page_revisions AS revision
+                  ON revision.revision_id = page.current_revision
+                WHERE page.page_id=?
+                """,
+                (_bounded_id(page_id),),
+            ).fetchone()
+        if row is None:
+            raise KeyError(page_id)
+        return KnowledgePageDocument(
+            page_id=str(row["page_id"]),
+            path=str(row["path"]),
+            title=str(row["title"]),
+            updated_at=str(row["updated_at"]),
+            revision=_page_revision(row),
+            content=str(row["content"]),
+        )
 
     def index_summary(self) -> KnowledgeIndexSummary:
         self.initialize()

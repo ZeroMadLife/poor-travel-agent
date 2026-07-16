@@ -607,6 +607,16 @@ class KnowledgePageResponse(BaseModel):
     revisions: list[KnowledgePageRevisionResponse]
 
 
+class KnowledgePageDocumentResponse(BaseModel):
+    page_id: str
+    path: str
+    title: str
+    updated_at: str
+    revision: KnowledgePageRevisionResponse
+    content: str
+    truncated: bool
+
+
 class KnowledgePagesResponse(BaseModel):
     pages: list[KnowledgePageResponse]
 

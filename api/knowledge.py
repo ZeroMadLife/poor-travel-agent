@@ -53,7 +53,9 @@ from api.schemas import (
     KnowledgeMigrationPlanResponse,
     KnowledgeMigrationResultItemResponse,
     KnowledgeMigrationResultResponse,
+    KnowledgePageDocumentResponse,
     KnowledgePageResponse,
+    KnowledgePageRevisionResponse,
     KnowledgePagesResponse,
     KnowledgeParseArtifactResponse,
     KnowledgeParseBlockResponse,
@@ -101,6 +103,7 @@ from core.knowledge import (
     KnowledgeMigrationPlan,
     KnowledgeMigrationResult,
     KnowledgePage,
+    KnowledgePageDocument,
     KnowledgePolicyDecision,
     KnowledgeProjectionError,
     KnowledgeProposal,
@@ -130,6 +133,7 @@ from core.knowledge.sources import default_source_adapter_registry, fetch_source
 router = APIRouter()
 _MAX_DIFF_CHARS = 200_000
 _MAX_CITATION_EXCERPT_CHARS = 3_200
+_MAX_PAGE_CONTENT_CHARS = 200_000
 
 
 @router.get("/api/v1/knowledge", response_model=KnowledgeWorkspaceSummary)
@@ -900,6 +904,26 @@ async def list_knowledge_pages(request: Request) -> KnowledgePagesResponse:
     return KnowledgePagesResponse(pages=[_page_response(page) for page in store.list_pages()])
 
 
+@router.get(
+    "/api/v1/knowledge/pages/{page_id}",
+    response_model=KnowledgePageDocumentResponse,
+)
+async def get_knowledge_page(
+    page_id: Annotated[
+        str,
+        Path(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$", max_length=128),
+    ],
+    request: Request,
+    response: Response,
+) -> KnowledgePageDocumentResponse:
+    try:
+        document = await asyncio.to_thread(_require_store(request).get_page_document, page_id)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail="knowledge page not found") from exc
+    response.headers["Cache-Control"] = "no-store"
+    return _page_document_response(document)
+
+
 @router.post(
     "/api/v1/knowledge/pages/{page_id}/rollback",
     response_model=KnowledgeProposalResponse,
@@ -1561,4 +1585,29 @@ def _page_response(page: KnowledgePage) -> KnowledgePageResponse:
                 for revision in page.revisions
             ],
         }
+    )
+
+
+def _page_document_response(document: KnowledgePageDocument) -> KnowledgePageDocumentResponse:
+    truncated = len(document.content) > _MAX_PAGE_CONTENT_CHARS
+    content = document.content[:_MAX_PAGE_CONTENT_CHARS]
+    return KnowledgePageDocumentResponse(
+        page_id=document.page_id,
+        path=document.path,
+        title=document.title,
+        updated_at=document.updated_at,
+        revision=KnowledgePageRevisionResponse.model_validate(
+            {
+                "revision_id": document.revision.revision_id,
+                "sequence": document.revision.sequence,
+                "content_hash": document.revision.content_hash,
+                "source_revision": document.revision.source_revision,
+                "proposal_id": document.revision.proposal_id,
+                "change_kind": document.revision.change_kind,
+                "git_commit": document.revision.git_commit,
+                "created_at": document.revision.created_at,
+            }
+        ),
+        content=content,
+        truncated=truncated,
     )
