@@ -1,13 +1,16 @@
-# Loop Policy 2.0 Shadow
+# Loop Policy 2.1 PR Canary
 
 ## 当前权限
 
 默认 Phase 1 仅允许只读扫描、记录 `NO_OP/REPORT/BLOCKED`、维护本机 SQLite 状态和发送
 短摘要。显式启用 Phase 2 `SHADOW_WRITE` 后，才允许受控前端 Fixer 在临时 worktree 生成
-未提交 diff；commit、push、PR、Claude 审查和 auto-merge 仍全部关闭。
+未提交 diff。只有人工显式启用 `PR_CANARY` 后，Controller 才能提交受控 diff、push
+`codex/loop-frontend-*` 分支、创建中文 Draft PR 并触发独立 cc-connect Claude 审查。
+auto-merge 仍全部关闭。
 
 Phase 2 `SHADOW_WRITE` 只允许局部前端候选。Controller 根据真实 diff 判定 Tier A/B/C；
-Tier A/B 仍只记录本机 shadow 证据，后端、共享契约和大范围问题只生成中文报告。
+Tier A/B 在 `SHADOW_WRITE` 中只记录本机证据；`PR_CANARY` 中也一律先保持 Draft。
+后端、共享契约和大范围问题只生成中文报告。
 
 ## 对外输出语言
 

@@ -19,6 +19,9 @@ class LoopConfig:
     state_root: Path
     worktree_root: Path
     codex_bin: Path
+    gh_bin: Path = Path("/opt/homebrew/bin/gh")
+    cc_connect_bin: Path = Path("/opt/homebrew/bin/cc-connect")
+    github_repository: str = "ZeroMadLife/sage-agent"
     target_branch: str = "dev/sage-v7"
     remote: str = "origin"
     lease_seconds: int = 90 * 60
@@ -56,12 +59,18 @@ class LoopConfig:
             os.environ.get("SAGE_LOOP_WORKTREE_ROOT", "~/.local/share/sage-loop/worktrees")
         ).expanduser()
         codex_bin = _resolve_codex(os.environ.get("SAGE_LOOP_CODEX_BIN"))
+        gh_bin = _resolve_executable(os.environ.get("SAGE_LOOP_GH_BIN"), "gh")
+        cc_connect_bin = _resolve_executable(
+            os.environ.get("SAGE_LOOP_CC_CONNECT_BIN"), "cc-connect"
+        )
         return cls(
             repo_root=repo_root.resolve(),
             controller_root=controller_root,
             state_root=state_root.absolute(),
             worktree_root=worktree_root.absolute(),
             codex_bin=codex_bin,
+            gh_bin=gh_bin,
+            cc_connect_bin=cc_connect_bin,
         )
 
     def ensure_local_directories(self) -> None:
@@ -87,6 +96,8 @@ class LoopConfig:
             raise LoopConfigError("unsupported target branch")
         if self.remote != "origin":
             raise LoopConfigError("unsupported Git remote")
+        if self.github_repository != "ZeroMadLife/sage-agent":
+            raise LoopConfigError("unsupported GitHub repository")
         if self.scanner_timeout_seconds < 1 or self.fixer_timeout_seconds < 1:
             raise LoopConfigError("Worker timeouts must be positive")
         if self.scanner_timeout_seconds + self.fixer_timeout_seconds > self.run_timeout_seconds:
@@ -123,6 +134,13 @@ def _resolve_codex(explicit: str | None) -> Path:
         if resolved.is_file() and os.access(resolved, os.X_OK):
             return resolved
     return Path(explicit or "codex").expanduser()
+
+
+def _resolve_executable(explicit: str | None, name: str) -> Path:
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    discovered = shutil.which(name)
+    return Path(discovered).resolve() if discovered else Path(name)
 
 
 def _ensure_private_directory(path: Path) -> None:

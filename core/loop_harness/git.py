@@ -12,6 +12,8 @@ from pathlib import Path, PurePosixPath
 from core.loop_harness.errors import LoopBlockedError
 from core.loop_harness.models import DiffSnapshot
 
+_LOOP_BRANCH_PATTERN = re.compile(r"codex/loop-frontend-[a-f0-9]{12}")
+
 
 @dataclass(frozen=True, slots=True)
 class RootStatus:
@@ -197,6 +199,81 @@ class GitController:
             )
             parts.append("\n".join(generated) + "\n")
         return "".join(parts)
+
+    def commit_candidate(
+        self,
+        worktree: Path,
+        *,
+        base_sha: str,
+        branch: str,
+        allowed_paths: tuple[str, ...],
+        message: str,
+    ) -> str:
+        if _LOOP_BRANCH_PATTERN.fullmatch(branch) is None:
+            raise LoopBlockedError("BLOCKED_PR_BRANCH", "Loop candidate branch is invalid")
+        if not allowed_paths:
+            raise LoopBlockedError("BLOCKED_DIFF", "candidate has no allowed paths")
+        snapshot = self.diff_snapshot(worktree, base_sha=base_sha)
+        if set(snapshot.changed_files) != set(allowed_paths):
+            raise LoopBlockedError(
+                "BLOCKED_DIFF_POLICY", "candidate paths changed before commit"
+            )
+        normalized_message = " ".join(message.split())
+        if not normalized_message or len(normalized_message) > 120:
+            raise LoopBlockedError("BLOCKED_COMMIT", "candidate commit message is invalid")
+
+        self._run_at(worktree, "switch", "-c", branch)
+        self._run_at(worktree, "add", "--", *allowed_paths)
+        staged = self._run_at(
+            worktree, "diff", "--cached", "--name-only", "-z", "--"
+        ).stdout
+        staged_paths = tuple(sorted(path for path in staged.split("\0") if path))
+        if set(staged_paths) != set(allowed_paths):
+            raise LoopBlockedError("BLOCKED_COMMIT", "staged paths do not match candidate")
+        self._run_at(
+            worktree,
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgSign=false",
+            "-c",
+            "user.name=Sage Loop Engineer",
+            "-c",
+            "user.email=sage-loop@localhost",
+            "commit",
+            "-m",
+            normalized_message,
+            timeout=120,
+        )
+        head_sha = self._run_at(worktree, "rev-parse", "HEAD").stdout.strip()
+        if head_sha == base_sha or len(head_sha) != 40:
+            raise LoopBlockedError("BLOCKED_COMMIT", "candidate commit SHA is invalid")
+        if self._run_at(
+            worktree, "status", "--porcelain=v1", "--untracked-files=all"
+        ).stdout:
+            raise LoopBlockedError("BLOCKED_COMMIT", "candidate worktree is dirty after commit")
+        return head_sha
+
+    def push_candidate(self, worktree: Path, *, branch: str, head_sha: str) -> None:
+        if _LOOP_BRANCH_PATTERN.fullmatch(branch) is None:
+            raise LoopBlockedError("BLOCKED_PR_BRANCH", "Loop candidate branch is invalid")
+        actual_head = self._run_at(worktree, "rev-parse", "HEAD").stdout.strip()
+        actual_branch = self._run_at(
+            worktree, "symbolic-ref", "--quiet", "--short", "HEAD"
+        ).stdout.strip()
+        if actual_head != head_sha or actual_branch != branch:
+            raise LoopBlockedError("BLOCKED_PR_HEAD_DRIFT", "candidate branch head changed")
+        try:
+            self._run_at(
+                worktree,
+                "push",
+                "--porcelain",
+                self.remote,
+                f"HEAD:refs/heads/{branch}",
+                timeout=120,
+            )
+        except RuntimeError as exc:
+            raise LoopBlockedError("BLOCKED_GITHUB_PUSH", "candidate push failed") from exc
 
     def remove_managed_worktree(self, destination: Path, *, discard_changes: bool) -> None:
         if not destination.exists():

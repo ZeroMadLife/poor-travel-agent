@@ -22,9 +22,16 @@ from core.loop_harness.artifacts import ArtifactStore
 from core.loop_harness.config import LoopConfig
 from core.loop_harness.errors import LeaseBusyError, LeaseLostError, LoopBlockedError
 from core.loop_harness.git import GitController
+from core.loop_harness.github import GitHubAdapter
 from core.loop_harness.manifest import validate_manifest
-from core.loop_harness.models import ArtifactReceipt, RunReport, ValidationResult, WorkerResult
+from core.loop_harness.models import (
+    ArtifactReceipt,
+    RunReport,
+    ValidationResult,
+    WorkerResult,
+)
 from core.loop_harness.policy import classify_candidate, evaluate_diff
+from core.loop_harness.reviewer import CcConnectReviewer
 from core.loop_harness.state import Lease, LoopState
 from core.loop_harness.validation import FrontendValidator
 from core.loop_harness.worker import CodexFixer, CodexWorker
@@ -63,6 +70,8 @@ class LoopRunner:
         fixer: CodexFixer | None = None,
         validator: FrontendValidator | None = None,
         artifact_store: ArtifactStore | None = None,
+        github: GitHubAdapter | None = None,
+        reviewer: CcConnectReviewer | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self.config = config
@@ -86,6 +95,15 @@ class LoopRunner:
         )
         self.validator = validator or FrontendValidator(repo_root=config.repo_root)
         self.artifact_store = artifact_store or ArtifactStore(config.reports_root)
+        self.github = github or GitHubAdapter(
+            gh_bin=config.gh_bin,
+            repository=config.github_repository,
+            target_branch=config.target_branch,
+        )
+        self.reviewer = reviewer or CcConnectReviewer(
+            cc_connect_bin=config.cc_connect_bin,
+            reports_root=config.reports_root,
+        )
         self.logger = logger or logging.getLogger("sage_loop")
 
     def run(self) -> RunReport:
@@ -136,6 +154,9 @@ class LoopRunner:
         error_code: str | None = None
         summary = "run did not reach a terminal result"
         finding_id: str | None = None
+        pr_url: str | None = None
+        review_verdict: str | None = None
+        pr_created_day: str | None = None
         try:
             self.config.ensure_local_directories()
             self.config.validate_static()
@@ -143,11 +164,19 @@ class LoopRunner:
             manifest = validate_manifest(self.config.controller_root, self.config.manifest_path)
             if mode == "DRY_RUN":
                 root_status = self.git.require_clean_integration_root()
-            elif mode == "SHADOW_WRITE":
+            elif mode in {"SHADOW_WRITE", "PR_CANARY"}:
                 root_status = self.git.require_integration_root(allow_dirty=True)
             else:
                 raise LoopBlockedError("PAUSED_MODE", f"unsupported active mode: {mode}")
             self._fenced(lease, self.worker.probe, expected_mode=mode)
+            if mode == "PR_CANARY":
+                self._fenced(lease, self.github.probe, expected_mode=mode)
+                self._fenced(lease, self.github.require_pr_capacity, expected_mode=mode)
+                self._fenced(lease, self.reviewer.probe, expected_mode=mode)
+                try:
+                    pr_created_day = self.state.require_pr_capacity(lease)
+                except LeaseBusyError as exc:
+                    raise LoopBlockedError("SKIPPED_PR_CAPACITY", str(exc)) from exc
 
             self._fenced(lease, self.git.fetch, expected_mode=mode)
             base_sha = self._fenced(lease, self.git.remote_sha, expected_mode=mode)
@@ -336,11 +365,89 @@ class LoopRunner:
                     except sqlite3.Error:
                         self.artifact_store.remove(artifact.directory)
                         raise
-                    terminal_state = "SHADOW_VALIDATED"
-                    error_code = None
-                    summary = fixer_result.summary
+                    if mode == "SHADOW_WRITE":
+                        terminal_state = "SHADOW_VALIDATED"
+                        error_code = None
+                        summary = fixer_result.summary
+                    else:
+                        if pr_created_day is None:
+                            raise LoopBlockedError(
+                                "BLOCKED_STATE", "PR daily quota reservation is missing"
+                            )
+                        branch = f"codex/loop-frontend-{artifact.sha256[:12]}"
+                        commit_message = f"fix(loop): {result.summary}"
+                        head_sha = self._fenced(
+                            lease,
+                            lambda: self.git.commit_candidate(
+                                worktree,
+                                base_sha=base_sha,
+                                branch=branch,
+                                allowed_paths=snapshot.changed_files,
+                                message=commit_message,
+                            ),
+                            expected_mode=mode,
+                        )
+                        self._fenced(lease, self.git.fetch, expected_mode=mode)
+                        push_base_sha = self._fenced(
+                            lease, self.git.remote_sha, expected_mode=mode
+                        )
+                        if push_base_sha != base_sha:
+                            raise LoopBlockedError(
+                                "BLOCKED_BASE_DRIFT", "target branch changed before push"
+                            )
+                        self._fenced(lease, self.github.probe, expected_mode=mode)
+                        self._fenced(
+                            lease,
+                            lambda: self.git.push_candidate(
+                                worktree, branch=branch, head_sha=head_sha
+                            ),
+                            expected_mode=mode,
+                        )
+                        receipt = self._fenced(
+                            lease,
+                            lambda: self.github.create_draft(
+                                branch=branch,
+                                head_sha=head_sha,
+                                candidate=result,
+                                validation=validation,
+                                tier=diff_decision.tier,
+                            ),
+                            expected_mode=mode,
+                        )
+                        self.state.record_pull_request(
+                            lease,
+                            receipt,
+                            base_sha=base_sha,
+                            tier=diff_decision.tier,
+                            created_day=pr_created_day,
+                        )
+                        pr_url = receipt.url
+                        review = self._fenced(
+                            lease,
+                            lambda: self.reviewer.review(
+                                run_id=run_id,
+                                head_sha=head_sha,
+                                artifact_directory=artifact.directory,
+                                changed_files=snapshot.changed_files,
+                            ),
+                            expected_mode=mode,
+                        )
+                        self.state.record_review_result(
+                            lease,
+                            pr_number=receipt.number,
+                            head_sha=head_sha,
+                            result=review,
+                        )
+                        review_verdict = review.verdict
+                        terminal_state = (
+                            "PR_DRAFT_REVIEWED"
+                            if review.verdict == "PASS"
+                            else "PR_DRAFT_CHANGES_REQUESTED"
+                        )
+                        error_code = None
+                        summary = review.summary
         except LoopBlockedError as exc:
-            terminal_state = "BLOCKED"
+            terminal_state = "SKIPPED" if exc.code.startswith("SKIPPED_") else "BLOCKED"
             error_code = exc.code
             summary = str(exc)
         except sqlite3.Error:
@@ -356,7 +463,7 @@ class LoopRunner:
         finally:
             if worktree is not None:
                 try:
-                    if mode == "SHADOW_WRITE":
+                    if mode in {"SHADOW_WRITE", "PR_CANARY"}:
                         self._fenced(
                             lease,
                             lambda: self.git.remove_managed_worktree(
@@ -405,6 +512,8 @@ class LoopRunner:
             failure_count=count,
             paused=paused,
             finding_id=finding_id,
+            pr_url=pr_url,
+            review_verdict=review_verdict,
         )
         self.logger.info(
             "run=%s state=%s code=%s base=%s",
@@ -526,13 +635,19 @@ def _notification(
     failure_count: int,
     paused: bool,
     finding_id: str | None,
+    pr_url: str | None,
+    review_verdict: str | None,
 ) -> str | None:
     if terminal_state == "REPORT" and finding_id:
         return f"Loop 发现 {finding_id}：{summary[:180]}"
     if terminal_state == "SHADOW_VALIDATED":
         return f"Loop shadow 已验证：{summary[:180]}"
+    if terminal_state.startswith("PR_DRAFT_") and pr_url and review_verdict:
+        return f"Loop Draft PR 已审查 [{review_verdict}]：{summary[:120]} {pr_url}"
     if terminal_state != "BLOCKED" or error_code is None:
         return None
+    if pr_url:
+        return f"Loop PR 后续阻断 [{error_code}]：{summary[:120]} {pr_url}"
     if paused:
         return f"Loop 已自动暂停 [{error_code}]：同类故障连续 {failure_count} 次"
     if failure_count == 1:

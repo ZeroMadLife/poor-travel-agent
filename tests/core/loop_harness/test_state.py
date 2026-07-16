@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from core.loop_harness.errors import LeaseBusyError, LeaseLostError
-from core.loop_harness.models import WorkerResult
+from core.loop_harness.models import PullRequestReceipt, ReviewerResult, WorkerResult
 from core.loop_harness.state import LoopState
 
 
@@ -214,9 +214,66 @@ def test_shadow_write_mode_is_explicit_and_invalid_modes_fail_closed(tmp_path) -
 
     assert state.status()["enabled"] is True
     assert state.status()["mode"] == "SHADOW_WRITE"
+    state.set_enabled(True, mode="PR_CANARY")
+    assert state.status()["mode"] == "PR_CANARY"
     with pytest.raises(ValueError, match="unsupported Loop mode"):
         state.set_enabled(True, mode="AUTO_MERGE")
-    assert state.status()["mode"] == "SHADOW_WRITE"
+    assert state.status()["mode"] == "PR_CANARY"
+
+
+def test_pr_capacity_and_review_are_bound_to_exact_head(tmp_path) -> None:
+    state = LoopState(tmp_path / "state.sqlite3")
+    state.initialize()
+    state.set_enabled(True, mode="PR_CANARY")
+    lease = state.acquire_lease(
+        resource="loop-run",
+        run_id="run-pr",
+        owner_id="owner-pr",
+        ttl_seconds=60,
+    )
+    state.begin_run(lease, policy_version="2.1", mode="PR_CANARY")
+    created_day = state.require_pr_capacity(
+        lease, now=datetime(2026, 7, 16, 12, tzinfo=UTC)
+    )
+    receipt = PullRequestReceipt(
+        12,
+        "https://github.com/ZeroMadLife/sage-agent/pull/12",
+        "codex/loop-frontend-abcdef123456",
+        "b" * 40,
+    )
+    state.record_pull_request(
+        lease,
+        receipt,
+        base_sha="a" * 40,
+        tier="A",
+        created_day=created_day,
+    )
+
+    with pytest.raises(LeaseBusyError):
+        state.require_pr_capacity(lease, now=datetime(2026, 7, 16, 13, tzinfo=UTC))
+
+    review = ReviewerResult(
+        "PASS",
+        "未发现阻断问题",
+        (),
+        "测试通过",
+        "不要求截图",
+        "边界通过",
+        "保持 Draft",
+    )
+    state.record_review_result(
+        lease,
+        pr_number=12,
+        head_sha="b" * 40,
+        result=review,
+    )
+
+    with sqlite3.connect(state.path) as connection:
+        row = connection.execute(
+            "SELECT state, review_verdict, created_day FROM pull_requests WHERE number = 12"
+        ).fetchone()
+    assert row == ("DRAFT_REVIEWED", "PASS", "2026-07-16")
+    assert state.status()["open_pull_requests"] == 1
 
 
 def test_initialize_migrates_existing_phase1_database(tmp_path) -> None:

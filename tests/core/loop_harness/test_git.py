@@ -196,3 +196,36 @@ def test_git_controller_marks_vue_directive_changes_as_behavior(tmp_path) -> Non
 
     assert snapshot.behavior_changed is True
     git.remove_managed_worktree(worktree, discard_changes=True)
+
+
+def test_git_controller_commits_exact_candidate_and_pushes_without_force(tmp_path) -> None:
+    root = _repository(tmp_path)
+    view = root / "frontend/src/views/ExampleView.vue"
+    view.parent.mkdir(parents=True)
+    view.write_text("<template><main class=\"old\">文本</main></template>\n", encoding="utf-8")
+    _git(root, "add", ".")
+    _git(root, "commit", "-m", "add view")
+    _git(root, "push", "origin", "dev/sage-v7")
+    git = GitController(root, remote="origin", target_branch="dev/sage-v7")
+    base_sha = git.remote_sha()
+    worktree = tmp_path / "worktrees/run-pr"
+    git.create_detached_worktree(worktree, base_sha)
+    relative = "frontend/src/views/ExampleView.vue"
+    (worktree / relative).write_text(
+        "<template><main class=\"fixed\">文本</main></template>\n", encoding="utf-8"
+    )
+    branch = "codex/loop-frontend-abcdef123456"
+
+    head_sha = git.commit_candidate(
+        worktree,
+        base_sha=base_sha,
+        branch=branch,
+        allowed_paths=(relative,),
+        message="fix(loop): 修复示例间距",
+    )
+    git.push_candidate(worktree, branch=branch, head_sha=head_sha)
+
+    remote_head = _git(root, "ls-remote", "origin", f"refs/heads/{branch}").stdout.split()[0]
+    assert remote_head == head_sha
+    assert _git(worktree, "status", "--porcelain").stdout == ""
+    git.remove_managed_worktree(worktree, discard_changes=True)

@@ -2,7 +2,7 @@
 
 > 日期：2026-07-16
 >
-> 状态：执行中；`SHADOW_WRITE` 基线已交付，PR canary 待执行
+> 状态：执行中；`SHADOW_WRITE` 已部署，PR canary 代码已实现、待认证实跑
 >
 > 设计依据：`docs/superpowers/specs/2026-07-16-sage-loop-engineer-phase2-design.md`
 
@@ -16,7 +16,9 @@
 
 - 已完成小版本 1-3：mode/SQLite 迁移、dirty path 避让、Scanner/Fixer、diff policy；
 - 小版本 4 已完成固定 Vitest/build 验证与 quota 证据，前后截图仍待补；
-- 小版本 5-8 尚未实施，当前不会 push、创建 PR、启动 Claude 或自动合并；
+- 小版本 5-6 的 GitHub Draft PR 与 cc-connect Claude Reviewer 已实现并通过 fake 纵向测试；
+- 当前部署保持 `SHADOW_WRITE`，`gh` 尚未认证，因此不会 push、创建 PR 或启动 Claude；
+- 小版本 4 截图、小版本 5 Issue、小版本 6 自动返工、小版本 7-8 rollout 仍待完成；
 - 实现分支为 `codex/loop-phase2`，基于 Phase 1 PR head 叠加，未修改根目录用户工作。
 
 ## 实施原则

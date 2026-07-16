@@ -12,11 +12,25 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from core.loop_harness.errors import LeaseBusyError, LeaseLostError
-from core.loop_harness.models import ArtifactReceipt, DiffSnapshot, ValidationResult, WorkerResult
+from core.loop_harness.models import (
+    ArtifactReceipt,
+    DiffSnapshot,
+    PullRequestReceipt,
+    ReviewerResult,
+    ValidationResult,
+    WorkerResult,
+)
 
-_SUPPORTED_MODES = {"DRY_RUN", "SHADOW_WRITE", "PAUSED_MANUAL", "PAUSED_ERROR"}
+_SUPPORTED_MODES = {
+    "DRY_RUN",
+    "SHADOW_WRITE",
+    "PR_CANARY",
+    "PAUSED_MANUAL",
+    "PAUSED_ERROR",
+}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS fence_state (
@@ -81,9 +95,17 @@ CREATE TABLE IF NOT EXISTS findings (
 );
 CREATE TABLE IF NOT EXISTS pull_requests (
     number INTEGER PRIMARY KEY,
+    run_id TEXT,
+    branch TEXT,
+    url TEXT,
+    base_sha TEXT,
     head_sha TEXT NOT NULL,
     tier TEXT NOT NULL,
     state TEXT NOT NULL,
+    review_verdict TEXT,
+    review_summary TEXT,
+    created_day TEXT,
+    created_at TEXT,
     merged_sha TEXT,
     updated_at TEXT NOT NULL
 );
@@ -400,6 +422,100 @@ class LoopState:
                 ),
             )
 
+    def require_pr_capacity(self, lease: Lease, *, now: datetime | None = None) -> str:
+        local = (now or datetime.now(UTC)).astimezone(ZoneInfo("Asia/Shanghai"))
+        created_day = local.date().isoformat()
+        with self._transaction() as connection:
+            self._assert_lease_row(connection, lease)
+            open_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM pull_requests WHERE state IN "
+                    "('DRAFT', 'REVIEWING', 'DRAFT_REVIEWED', 'CHANGES_REQUESTED')"
+                ).fetchone()[0]
+            )
+            if open_count:
+                raise LeaseBusyError("an open Loop PR already exists")
+            daily_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM pull_requests WHERE created_day = ?",
+                    (created_day,),
+                ).fetchone()[0]
+            )
+            if daily_count:
+                raise LeaseBusyError("daily Loop PR quota is exhausted")
+        return created_day
+
+    def record_pull_request(
+        self,
+        lease: Lease,
+        receipt: PullRequestReceipt,
+        *,
+        base_sha: str,
+        tier: str,
+        created_day: str,
+    ) -> None:
+        now = _iso_now()
+        with self._transaction() as connection:
+            self._assert_lease_row(connection, lease)
+            existing = connection.execute(
+                "SELECT number, head_sha FROM pull_requests WHERE branch = ?",
+                (receipt.branch,),
+            ).fetchone()
+            if existing is not None and (
+                int(existing["number"]) != receipt.number
+                or str(existing["head_sha"]) != receipt.head_sha
+            ):
+                raise sqlite3.DatabaseError("PR branch idempotency conflict")
+            connection.execute(
+                "INSERT INTO pull_requests(number, run_id, branch, url, base_sha, head_sha, "
+                "tier, state, created_day, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?) "
+                "ON CONFLICT(number) DO UPDATE SET url = excluded.url, "
+                "updated_at = excluded.updated_at",
+                (
+                    receipt.number,
+                    lease.run_id,
+                    receipt.branch,
+                    receipt.url,
+                    base_sha,
+                    receipt.head_sha,
+                    tier,
+                    created_day,
+                    now,
+                    now,
+                ),
+            )
+
+    def record_review_result(
+        self,
+        lease: Lease,
+        *,
+        pr_number: int,
+        head_sha: str,
+        result: ReviewerResult,
+    ) -> None:
+        state = {
+            "PASS": "DRAFT_REVIEWED",
+            "REQUEST_CHANGES": "CHANGES_REQUESTED",
+            "BLOCK": "CHANGES_REQUESTED",
+        }[result.verdict]
+        with self._transaction() as connection:
+            self._assert_lease_row(connection, lease)
+            cursor = connection.execute(
+                "UPDATE pull_requests SET state = ?, review_verdict = ?, review_summary = ?, "
+                "updated_at = ? WHERE number = ? AND head_sha = ?",
+                (
+                    state,
+                    result.verdict,
+                    _bounded(result.summary, 1000),
+                    _iso_now(),
+                    pr_number,
+                    head_sha,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise sqlite3.DatabaseError("PR review head does not match durable state")
+
     def set_enabled(self, enabled: bool, *, mode: str = "DRY_RUN") -> None:
         if mode not in _SUPPORTED_MODES:
             raise ValueError(f"unsupported Loop mode: {mode}")
@@ -472,6 +588,12 @@ class LoopState:
             artifact_bytes = int(
                 connection.execute("SELECT COALESCE(SUM(size_bytes), 0) FROM artifacts").fetchone()[0]
             )
+            open_pull_requests = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM pull_requests WHERE state IN "
+                    "('DRAFT', 'REVIEWING', 'DRAFT_REVIEWED', 'CHANGES_REQUESTED')"
+                ).fetchone()[0]
+            )
         return {
             "enabled": settings.get("enabled", "0") == "1",
             "mode": settings.get("mode", "DRY_RUN"),
@@ -482,6 +604,7 @@ class LoopState:
             "open_findings": open_findings,
             "shadow_validated_candidates": shadow_validated,
             "artifact_bytes": artifact_bytes,
+            "open_pull_requests": open_pull_requests,
         }
 
     def digest(
@@ -639,6 +762,16 @@ def _migrate_schema(connection: sqlite3.Connection) -> None:
             "confidence": "REAL",
             "diff_json": "TEXT",
         },
+        "pull_requests": {
+            "run_id": "TEXT",
+            "branch": "TEXT",
+            "url": "TEXT",
+            "base_sha": "TEXT",
+            "review_verdict": "TEXT",
+            "review_summary": "TEXT",
+            "created_day": "TEXT",
+            "created_at": "TEXT",
+        },
     }
     for table, columns in migrations.items():
         existing = {
@@ -648,6 +781,10 @@ def _migrate_schema(connection: sqlite3.Connection) -> None:
         for name, declaration in columns.items():
             if name not in existing:
                 connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS pull_requests_branch_idx "
+        "ON pull_requests(branch) WHERE branch IS NOT NULL"
+    )
 
 
 def _get_setting(connection: sqlite3.Connection, key: str, default: str) -> str:

@@ -10,6 +10,8 @@ from core.loop_harness.models import (
     ArtifactReceipt,
     DiffSnapshot,
     FixerResult,
+    PullRequestReceipt,
+    ReviewerResult,
     ValidationResult,
     ValidationStep,
     WorkerResult,
@@ -33,6 +35,8 @@ class FakeGit:
         self.removed = 0
         self.discarded = 0
         self.snapshot_calls = 0
+        self.commits = 0
+        self.pushes = 0
 
     def require_clean_integration_root(self) -> RootStatus:
         if self.blocked:
@@ -89,6 +93,17 @@ class FakeGit:
         assert destination.is_dir()
         assert base_sha == "a" * 40
         return "diff --git a/view.vue b/view.vue\n"
+
+    def commit_candidate(self, destination, **kwargs) -> str:
+        assert destination.is_dir()
+        self.commits += 1
+        return "b" * 40
+
+    def push_candidate(self, destination, *, branch: str, head_sha: str) -> None:
+        assert destination.is_dir()
+        assert branch.startswith("codex/loop-frontend-")
+        assert head_sha == "b" * 40
+        self.pushes += 1
 
 
 def test_scan_scopes_start_with_bounded_frontend_components() -> None:
@@ -153,6 +168,49 @@ class FakeArtifactStore:
         directory = self.root / run_id
         directory.mkdir(parents=True)
         return ArtifactReceipt(directory, "a" * 64, len(patch.encode()))
+
+
+class FakeGitHub:
+    def __init__(self) -> None:
+        self.probes = 0
+        self.capacity_checks = 0
+        self.created = 0
+
+    def probe(self) -> None:
+        self.probes += 1
+
+    def require_pr_capacity(self) -> None:
+        self.capacity_checks += 1
+
+    def create_draft(self, *, branch: str, head_sha: str, **kwargs) -> PullRequestReceipt:
+        self.created += 1
+        return PullRequestReceipt(
+            12,
+            "https://github.com/ZeroMadLife/sage-agent/pull/12",
+            branch,
+            head_sha,
+        )
+
+
+class FakeReviewer:
+    def __init__(self) -> None:
+        self.probes = 0
+        self.reviews = 0
+
+    def probe(self) -> None:
+        self.probes += 1
+
+    def review(self, **kwargs) -> ReviewerResult:
+        self.reviews += 1
+        return ReviewerResult(
+            "PASS",
+            "未发现阻断问题",
+            (),
+            "测试通过",
+            "本次不要求截图",
+            "边界通过",
+            "保持 Draft",
+        )
 
 
 def _git(root, *args: str) -> None:
@@ -379,3 +437,48 @@ def test_runner_shadow_invalidates_fixer_result_when_paused_mid_run(
     assert report.state == "BLOCKED"
     assert report.error_code == "BLOCKED_MODE_CHANGED"
     assert state.is_enabled() is False
+
+
+def test_runner_pr_canary_binds_draft_and_review_to_exact_head(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr("core.loop_harness.runner._SCAN_SCOPES", (("frontend/src",),))
+    config = _config(tmp_path)
+    state = LoopState(config.database_path)
+    state.initialize()
+    state.set_enabled(True, mode="PR_CANARY")
+    candidate_path = "frontend/src/views/KnowledgeView.vue"
+    scanner_result = WorkerResult(
+        verdict="FRONTEND_CANDIDATE",
+        summary="修复知识库空状态间距",
+        evidence=(f"{candidate_path}:20",),
+        reproduction=("打开空知识库页面",),
+        changed_files=(candidate_path,),
+        tests=("KnowledgeView.test.ts",),
+        risk_reasons=(),
+        suggested_tier="A",
+        confidence=0.95,
+    )
+    git = FakeGit(snapshot=DiffSnapshot((candidate_path,), 4, 2, (), (), False))
+    github = FakeGitHub()
+    reviewer = FakeReviewer()
+
+    report = LoopRunner(
+        config,
+        state,
+        git=git,
+        worker=FakeWorker(scanner_result),
+        fixer=FakeFixer(
+            FixerResult("已修复知识库空状态间距", (candidate_path,), (), ())
+        ),
+        validator=FakeValidator(),
+        artifact_store=FakeArtifactStore(config.reports_root),
+        github=github,
+        reviewer=reviewer,
+    ).run()
+
+    assert report.state == "PR_DRAFT_REVIEWED"
+    assert report.notification and "pull/12" in report.notification
+    assert git.commits == git.pushes == 1
+    assert github.created == reviewer.reviews == 1
+    assert state.status()["open_pull_requests"] == 1

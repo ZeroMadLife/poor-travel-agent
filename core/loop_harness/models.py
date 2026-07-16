@@ -8,6 +8,7 @@ from typing import Literal
 
 WorkerVerdict = Literal["NO_OP", "FIX", "FRONTEND_CANDIDATE", "REPORT", "BLOCKED"]
 LoopTier = Literal["A", "B", "C"]
+ReviewerVerdict = Literal["PASS", "REQUEST_CHANGES", "BLOCK"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +72,25 @@ class ArtifactReceipt:
     directory: Path
     sha256: str
     size_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class PullRequestReceipt:
+    number: int
+    url: str
+    branch: str
+    head_sha: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewerResult:
+    verdict: ReviewerVerdict
+    summary: str
+    findings: tuple[str, ...]
+    tests: str
+    visual_evidence: str
+    clean_room: str
+    merge_recommendation: str
 
 
 @dataclass(frozen=True, slots=True)

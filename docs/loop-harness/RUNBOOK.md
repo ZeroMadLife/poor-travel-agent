@@ -12,12 +12,17 @@ sage-loopctl enable --dry-run
 
 # Phase 2 shadow：允许隔离 worktree 生成未提交前端 diff，不会 push/提 PR/合并
 sage-loopctl enable --shadow-write
+
+# 人工 PR canary：允许中文 Draft PR + Claude 审查，仍不会自动合并
+sage-loopctl enable --pr-canary
 sage-loopctl cleanup
 ```
 
 Scanner/Fixer 固定使用 Controller 声明的 `gpt-5.6-luna`、低推理强度和 Honglin
 Codex 网关。运行时继续使用 `--ignore-user-config`，并关闭插件、远程插件、浏览器和生图
 能力；只复用 `$CODEX_HOME/auth.json` 的现有登录状态，不读取个人配置来扩大权限。
+`PR_CANARY` 还要求 `gh auth status` 能访问私有仓库，并要求 cc-connect 内部项目
+`sage-loop-review` 可用；凭据只由各 CLI 自己读取，不进入模型 Prompt、日志或 SQLite。
 
 默认目录：
 
@@ -36,8 +41,10 @@ Codex 网关。运行时继续使用 `--ignore-user-config`，并关闭插件、
 - `BLOCKED_ROOT_DIRTY`：完成或移动根目录人工改动，不得由 Harness stash/reset/clean。
 - `PAUSED_POLICY_DRIFT`：人工审查策略相关 commit 后重新执行 `install --refresh-manifest`。
 - `BLOCKED_CODEX`：检查受控 Codex 二进制路径和认证，不在日志输出凭据。
+- `BLOCKED_GITHUB_AUTH`：完成 `gh` 最小权限认证；未认证时保持 `SHADOW_WRITE`。
+- `BLOCKED_REVIEWER`：检查 cc-connect daemon、`sage-loop-review` 和 synthetic relay binding。
 - 连续同类基础设施错误 3 次会自动暂停；修复后手动选择 `enable --dry-run` 或
-  `enable --shadow-write`。Phase 2 shadow 仍不会产生远程副作用。
+  `enable --shadow-write`。`enable --pr-canary` 必须由人工显式执行。
 
 ## 磁盘与卸载
 

@@ -18,8 +18,10 @@ from zoneinfo import ZoneInfo
 from core.loop_harness.artifacts import ArtifactStore
 from core.loop_harness.config import LoopConfig
 from core.loop_harness.git import GitController
+from core.loop_harness.github import GitHubAdapter
 from core.loop_harness.logging import configure_logging
 from core.loop_harness.manifest import validate_manifest, write_manifest
+from core.loop_harness.reviewer import CcConnectReviewer
 from core.loop_harness.runner import LoopRunner
 from core.loop_harness.state import LoopState
 from core.loop_harness.worker import CodexWorker
@@ -56,13 +58,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "enable":
-        if args.dry_run == args.shadow_write:
-            parser.error("choose exactly one of --dry-run or --shadow-write")
+        selected = sum((args.dry_run, args.shadow_write, args.pr_canary))
+        if selected != 1:
+            parser.error("choose exactly one of --dry-run, --shadow-write or --pr-canary")
         config.validate_static()
         validate_manifest(config.controller_root, config.manifest_path)
-        mode = "SHADOW_WRITE" if args.shadow_write else "DRY_RUN"
+        if args.pr_canary:
+            mode = "PR_CANARY"
+        elif args.shadow_write:
+            mode = "SHADOW_WRITE"
+        else:
+            mode = "DRY_RUN"
         state.set_enabled(True, mode=mode)
-        print("Loop shadow-write enabled" if mode == "SHADOW_WRITE" else "Loop dry-run enabled")
+        print(f"Loop {mode.lower().replace('_', '-')} enabled")
         return 0
 
     if args.command == "pause":
@@ -85,13 +93,25 @@ def main(argv: list[str] | None = None) -> int:
             remote=config.remote,
             target_branch=config.target_branch,
         )
-        root = git.require_integration_root(allow_dirty=state.mode() == "SHADOW_WRITE")
+        root = git.require_integration_root(
+            allow_dirty=state.mode() in {"SHADOW_WRITE", "PR_CANARY"}
+        )
         version = CodexWorker(
             codex_bin=config.codex_bin,
             controller_root=config.controller_root,
             reports_root=config.reports_root,
             timeout_seconds=config.run_timeout_seconds,
         ).probe()
+        if state.mode() == "PR_CANARY":
+            GitHubAdapter(
+                gh_bin=config.gh_bin,
+                repository=config.github_repository,
+                target_branch=config.target_branch,
+            ).probe()
+            CcConnectReviewer(
+                cc_connect_bin=config.cc_connect_bin,
+                reports_root=config.reports_root,
+            ).probe()
         print(
             f"doctor ok: mode={state.mode()} branch={root.branch} head={root.head_sha} "
             f"dirty_paths={len(root.dirty_paths)} codex={version}"
@@ -159,6 +179,7 @@ def _parser() -> argparse.ArgumentParser:
     enable = subparsers.add_parser("enable")
     enable.add_argument("--dry-run", action="store_true")
     enable.add_argument("--shadow-write", action="store_true")
+    enable.add_argument("--pr-canary", action="store_true")
     subparsers.add_parser("pause")
     subparsers.add_parser("status")
     subparsers.add_parser("doctor")
@@ -183,6 +204,8 @@ def _write_launcher(config: LoopConfig, destination: Path) -> None:
         "SAGE_LOOP_STATE_ROOT": str(config.state_root),
         "SAGE_LOOP_WORKTREE_ROOT": str(config.worktree_root),
         "SAGE_LOOP_CODEX_BIN": str(config.codex_bin),
+        "SAGE_LOOP_GH_BIN": str(config.gh_bin),
+        "SAGE_LOOP_CC_CONNECT_BIN": str(config.cc_connect_bin),
     }
     lines = ["#!/bin/sh", "set -eu"]
     for key, value in exports.items():

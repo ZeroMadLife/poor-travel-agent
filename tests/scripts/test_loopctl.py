@@ -74,3 +74,8 @@ def test_enable_shadow_write_is_explicit(tmp_path, monkeypatch, capsys) -> None:
     output = capsys.readouterr().out
     assert "shadow-write enabled" in output
     assert LoopState(state_root / "state.sqlite3").status()["mode"] == "SHADOW_WRITE"
+
+    assert main(["enable", "--pr-canary"]) == 0
+    output = capsys.readouterr().out
+    assert "pr-canary enabled" in output
+    assert LoopState(state_root / "state.sqlite3").status()["mode"] == "PR_CANARY"
