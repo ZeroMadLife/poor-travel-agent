@@ -26,6 +26,7 @@ from api.schemas import (
     KnowledgeJobItemResponse,
     KnowledgeJobResponse,
     KnowledgeJobsResponse,
+    KnowledgeLearningRequest,
     KnowledgeMigrationApplyRequest,
     KnowledgeMigrationPlanItemResponse,
     KnowledgeMigrationPlanResponse,
@@ -55,6 +56,7 @@ from api.schemas import (
 )
 from core.knowledge import (
     KnowledgeConflictError,
+    KnowledgeEvidenceError,
     KnowledgeIndexSummary,
     KnowledgeMigrationPlan,
     KnowledgeMigrationResult,
@@ -142,6 +144,34 @@ async def search_knowledge(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     response.headers["Cache-Control"] = "no-store"
     return _retrieval_response(bundle)
+
+
+@router.post(
+    "/api/v1/knowledge/learnings",
+    response_model=KnowledgeProposalResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_knowledge_learning(
+    payload: KnowledgeLearningRequest,
+    request: Request,
+) -> KnowledgeProposalResponse:
+    """Create a reversible, extractive Wiki revision from current citations."""
+
+    store = _require_store(request)
+    try:
+        proposal = await asyncio.to_thread(
+            store.propose_evidence_learning,
+            payload.topic,
+            tuple(payload.citation_ids),
+            session_id=payload.session_id,
+            run_id=payload.run_id,
+            event_id=payload.event_id,
+        )
+    except KnowledgeEvidenceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _proposal_response(store, proposal)
 
 
 @router.post(

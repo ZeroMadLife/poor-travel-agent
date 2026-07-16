@@ -19,6 +19,12 @@ from importlib import import_module
 from pathlib import Path, PurePosixPath
 from threading import RLock
 
+from core.knowledge.evolution import (
+    EvidenceLearning,
+    build_evidence_learning,
+    deserialize_evidence_learning,
+    serialize_evidence_learning,
+)
 from core.knowledge.index import LocalKnowledgeIndex
 from core.knowledge.migration import (
     KnowledgeMigrationItem,
@@ -69,7 +75,7 @@ from core.knowledge.understanding import (
 
 _MAX_PROPOSAL_BYTES = 4 * 1024 * 1024
 _ROOT_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 7
 _SOURCE_FORMATS = {
     ".md": ("text/markdown", 2 * 1024 * 1024),
     ".markdown": ("text/markdown", 2 * 1024 * 1024),
@@ -163,6 +169,18 @@ CREATE TABLE IF NOT EXISTS knowledge_workspace_syntheses (
 );
 CREATE INDEX IF NOT EXISTS knowledge_workspace_syntheses_input_idx
     ON knowledge_workspace_syntheses(input_hash, created_at);
+CREATE TABLE IF NOT EXISTS knowledge_evidence_learnings (
+    learning_id TEXT PRIMARY KEY,
+    proposal_id TEXT NOT NULL UNIQUE,
+    input_hash TEXT NOT NULL,
+    generator_id TEXT NOT NULL,
+    generator_version TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS knowledge_evidence_learnings_input_idx
+    ON knowledge_evidence_learnings(input_hash, created_at);
 CREATE TABLE IF NOT EXISTS knowledge_policy_decisions (
     decision_id TEXT PRIMARY KEY,
     proposal_id TEXT NOT NULL UNIQUE,
@@ -226,6 +244,10 @@ class KnowledgeConflictError(KnowledgeStoreError):
 
 class KnowledgeProjectionError(KnowledgeStoreError):
     """An approved proposal could not be projected into the Git wiki."""
+
+
+class KnowledgeEvidenceError(KnowledgeStoreError):
+    """A learning deposit references missing, stale, or invalid evidence."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -917,6 +939,194 @@ class KnowledgeStore:
             raise KnowledgeStoreError("workspace synthesis integrity check failed")
         return synthesis
 
+    def propose_evidence_learning(
+        self,
+        topic: str,
+        citation_ids: tuple[str, ...],
+        *,
+        session_id: str = "",
+        run_id: str = "",
+        event_id: str = "",
+    ) -> KnowledgeProposal:
+        """Auto-apply an extractive learning page backed by current citations."""
+
+        self.initialize()
+        normalized_topic = " ".join(topic.split())
+        if not normalized_topic or len(normalized_topic) > 160:
+            raise ValueError("knowledge learning topic must be between 1 and 160 characters")
+        _scan_text_secrets(normalized_topic)
+        for value in (session_id, run_id, event_id):
+            if len(value) > 128:
+                raise ValueError("knowledge learning provenance identifier is too long")
+        topic_digest = hashlib.sha256(normalized_topic.lower().encode("utf-8")).hexdigest()
+        page_id = f"page_learning_{topic_digest[:32]}"
+        target_path = f"wiki/learnings/{_slug(normalized_topic)}-{topic_digest[-8:]}.md"
+        source_id = f"learning_{topic_digest[:32]}"
+        with self._lock, self._exclusive_lock(), self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                resolved = self.knowledge_index.resolve_citations(
+                    connection, citation_ids, visibility="private"
+                )
+            except (KeyError, ValueError) as exc:
+                connection.rollback()
+                raise KnowledgeEvidenceError(str(exc)) from exc
+            if any(
+                chunk.source_kind not in {"obsidian", "markdown", "github", "feishu"}
+                for _citation_id, chunk in resolved
+            ):
+                connection.rollback()
+                raise KnowledgeEvidenceError(
+                    "knowledge learning citations must reference original source material"
+                )
+            page = connection.execute(
+                """
+                SELECT page.current_revision, revision.content
+                FROM knowledge_pages AS page
+                JOIN knowledge_page_revisions AS revision
+                  ON revision.revision_id=page.current_revision
+                WHERE page.page_id=?
+                """,
+                (page_id,),
+            ).fetchone()
+            base_revision = str(page["current_revision"]) if page else ""
+            base_content = str(page["content"]) if page else ""
+            learning = build_evidence_learning(
+                topic=normalized_topic,
+                page_id=page_id,
+                target_path=target_path,
+                resolved_citations=resolved,
+                base_content=base_content,
+                session_id=session_id,
+                run_id=run_id,
+                event_id=event_id,
+            )
+            _scan_text_secrets(learning.rendered_markdown)
+            existing = connection.execute(
+                """
+                SELECT proposal.*
+                FROM knowledge_evidence_learnings AS learning
+                JOIN knowledge_proposals AS proposal
+                  ON proposal.proposal_id=learning.proposal_id
+                WHERE learning.learning_id=?
+                """,
+                (learning.learning_id,),
+            ).fetchone()
+            if existing is not None:
+                connection.rollback()
+                return _proposal(existing)
+            proposal_id = "kprop_" + hashlib.sha256(
+                f"{learning.learning_id}\0{base_revision}".encode()
+            ).hexdigest()[:32]
+            now = _now()
+            connection.execute(
+                """
+                INSERT INTO knowledge_proposals (
+                    proposal_id, source_id, source_root_id, source_kind,
+                    source_relative_path, source_revision, raw_path, page_id,
+                    target_path, title, proposed_content, base_page_revision,
+                    change_kind, status, projection_status, revision,
+                    parse_artifact_id, error, created_at, updated_at
+                ) VALUES (?, ?, 'knowledge', 'agent_learning', ?, ?, '', ?, ?, ?, ?, ?,
+                          'learning', 'pending', 'pending', 0, NULL, NULL, ?, ?)
+                """,
+                (
+                    proposal_id,
+                    source_id,
+                    target_path,
+                    learning.input_hash,
+                    page_id,
+                    target_path,
+                    normalized_topic,
+                    learning.rendered_markdown,
+                    base_revision,
+                    now,
+                    now,
+                ),
+            )
+            payload_json = serialize_evidence_learning(learning)
+            connection.execute(
+                """
+                INSERT INTO knowledge_evidence_learnings (
+                    learning_id, proposal_id, input_hash, generator_id,
+                    generator_version, payload_hash, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    learning.learning_id,
+                    proposal_id,
+                    learning.input_hash,
+                    learning.generator_id,
+                    learning.generator_version,
+                    hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
+                    payload_json,
+                    now,
+                ),
+            )
+            self._event(
+                connection,
+                proposal_id,
+                "learning_evidence_verified",
+                0,
+                {
+                    "learning_id": learning.learning_id,
+                    "input_hash": learning.input_hash,
+                    "citation_count": str(len(learning.citations)),
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "event_id": event_id,
+                },
+            )
+            connection.commit()
+        return self.evaluate_and_apply_policy(proposal_id)
+
+    def get_evidence_learning(self, proposal_id: str) -> EvidenceLearning | None:
+        proposal = self.get_proposal(proposal_id)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM knowledge_evidence_learnings WHERE proposal_id=?",
+                (_bounded_id(proposal_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        payload_json = str(row["payload_json"])
+        if hashlib.sha256(payload_json.encode("utf-8")).hexdigest() != str(
+            row["payload_hash"]
+        ):
+            raise KnowledgeStoreError("evidence learning integrity check failed")
+        try:
+            learning = deserialize_evidence_learning(payload_json)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise KnowledgeStoreError("evidence learning integrity check failed") from exc
+        if (
+            learning.learning_id != str(row["learning_id"])
+            or learning.input_hash != str(row["input_hash"])
+            or learning.generator_id != str(row["generator_id"])
+            or learning.generator_version != str(row["generator_version"])
+            or learning.page_id != proposal.page_id
+            or learning.target_path != proposal.target_path
+            or learning.rendered_markdown != proposal.proposed_content
+        ):
+            raise KnowledgeStoreError("evidence learning integrity check failed")
+        return learning
+
+    def _evidence_learning_is_current(self, learning: EvidenceLearning) -> bool:
+        citation_ids = tuple(item.citation_id for item in learning.citations)
+        try:
+            with self._connect() as connection:
+                resolved = self.knowledge_index.resolve_citations(
+                    connection, citation_ids, visibility="private"
+                )
+        except (KeyError, ValueError):
+            return False
+        resolved_by_id = {citation: chunk for citation, chunk in resolved}
+        return all(
+            resolved_by_id[item.citation_id].chunk_id == item.chunk_id
+            and resolved_by_id[item.citation_id].page_revision == item.page_revision
+            and resolved_by_id[item.citation_id].source_revision == item.source_revision
+            for item in learning.citations
+        )
+
     def list_proposals(self, status: str | None = None) -> list[KnowledgeProposal]:
         self.initialize()
         if status not in {None, "pending", "approved", "rejected"}:
@@ -1227,6 +1437,7 @@ class KnowledgeStore:
             return proposal
         if decision is None:
             artifact = self.get_parse_artifact(proposal_id)
+            learning = self.get_evidence_learning(proposal_id)
             visibility = _proposal_visibility(proposal.proposed_content)
             outcome = evaluate_knowledge_policy(
                 KnowledgePolicyInput(
@@ -1235,6 +1446,13 @@ class KnowledgeStore:
                     target_path=proposal.target_path,
                     visibility=visibility,
                     parser_id=(artifact.document.provenance.parser_id if artifact else None),
+                    evidence_verified=(
+                        self._evidence_learning_is_current(learning)
+                        if learning is not None
+                        else False
+                    ),
+                    evidence_count=(len(learning.citations) if learning is not None else 0),
+                    generator_id=(learning.generator_id if learning is not None else None),
                 )
             )
             now = _now()
@@ -1891,7 +2109,7 @@ class KnowledgeStore:
             raise ValueError("knowledge database directory must not be a symbolic link")
         with self._connect() as connection:
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if version not in {0, 1, 2, 3, 4, 5, _SCHEMA_VERSION}:
+            if version not in {0, 1, 2, 3, 4, 5, 6, _SCHEMA_VERSION}:
                 raise KnowledgeStoreError(f"unsupported knowledge schema version {version}")
             connection.executescript(_SCHEMA)
             proposal_columns = {

@@ -17,6 +17,7 @@ import {
   buildKnowledgeJobStreamUrl,
   cancelKnowledgeJob,
   createKnowledgeJob,
+  depositKnowledgeLearning,
   fetchKnowledgeJob,
   fetchKnowledgeJobs,
   fetchKnowledgeIndex,
@@ -56,6 +57,7 @@ const migrationResult = ref<KnowledgeMigrationResult | null>(null)
 const retrieval = ref<KnowledgeRetrieval | null>(null)
 const retrievalQuery = ref('')
 const retrievalError = ref('')
+const learningStatus = ref('')
 const jobsAvailable = ref(true)
 const loading = ref(true)
 const error = ref('')
@@ -135,6 +137,7 @@ async function retrieveEvidence() {
   if (!query) return
   busy.value = { ...busy.value, retrieval: true }
   retrievalError.value = ''
+  learningStatus.value = ''
   try {
     retrieval.value = await searchKnowledge(query)
   } catch (reason) {
@@ -142,6 +145,29 @@ async function retrieveEvidence() {
   } finally {
     const next = { ...busy.value }
     delete next.retrieval
+    busy.value = next
+  }
+}
+
+async function depositRetrieval() {
+  const current = retrieval.value
+  const topic = retrievalQuery.value.trim()
+  if (!current?.citations.length || !topic) return
+  busy.value = { ...busy.value, learning: true }
+  retrievalError.value = ''
+  learningStatus.value = ''
+  try {
+    const proposal = await depositKnowledgeLearning(
+      topic,
+      current.citations.map((item) => item.citation_id),
+    )
+    learningStatus.value = `已沉淀为可撤销学习页：${proposal.title}`
+    await refresh()
+  } catch (reason) {
+    retrievalError.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    const next = { ...busy.value }
+    delete next.learning
     busy.value = next
   }
 }
@@ -425,6 +451,13 @@ onUnmounted(() => {
             </footer>
           </li>
         </ol>
+        <div v-if="retrieval?.citations.length" class="learning-action">
+          <button type="button" :disabled="busy.learning" @click="depositRetrieval">
+            <Sparkles :size="15" />{{ busy.learning ? '正在沉淀' : '沉淀为学习笔记' }}
+          </button>
+          <span v-if="learningStatus" role="status">{{ learningStatus }}</span>
+          <em v-else>只保存上方引用片段，不让模型补写未经证实的事实。</em>
+        </div>
       </section>
 
       <section
@@ -592,7 +625,8 @@ onUnmounted(() => {
 .jobs-disabled { margin:0 0 9px; color:var(--sage-coral); font-size:var(--sage-font-xs); }
   .index-status { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:12px; padding:13px 0; border-bottom:1px solid var(--sage-border); color:var(--sage-source); }.index-status div { display:flex; flex-direction:column; min-width:0; gap:3px; }.index-status strong { color:var(--sage-text); font-size:var(--sage-font-sm); }.index-status span { overflow:hidden; color:var(--sage-text-muted); font-size:var(--sage-font-xs); text-overflow:ellipsis; white-space:nowrap; }.index-status button { display:inline-flex; align-items:center; gap:5px; min-height:32px; border:1px solid var(--sage-border-strong); border-radius:var(--sage-radius-sm); background:var(--sage-surface); color:var(--sage-text-secondary); padding:0 10px; }
   .retrieval-section { padding:30px 0; border-bottom:1px solid var(--sage-border); }.retrieval-section>header { display:flex; align-items:end; justify-content:space-between; gap:20px; }.retrieval-section>header span { color:var(--sage-source); font-size:var(--sage-font-xs); font-weight:700; text-transform:uppercase; }.retrieval-section h2 { margin:5px 0 0; font-size:var(--sage-font-lg); }.retrieval-section>header p { max-width:650px; margin:7px 0 0; color:var(--sage-text-secondary); font-size:var(--sage-font-sm); line-height:1.55; }.retrieval-section>header em { color:var(--sage-text-muted); font-size:var(--sage-font-xs); font-style:normal; white-space:nowrap; }.retrieval-form { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:10px; margin-top:18px; border:1px solid var(--sage-border-strong); border-radius:var(--sage-radius); background:var(--sage-surface); padding:7px 7px 7px 12px; color:var(--sage-text-muted); }.retrieval-form:focus-within { border-color:var(--sage-source); box-shadow:0 0 0 3px var(--sage-source-bg); }.retrieval-form input { min-width:0; height:34px; border:0; outline:0; background:transparent; color:var(--sage-text); font:inherit; }.retrieval-form button { min-height:34px; border:1px solid var(--sage-source); border-radius:var(--sage-radius-sm); background:var(--sage-source); color:white; padding:0 14px; font-weight:700; }.retrieval-error,.no-evidence { margin:14px 0 0; padding:13px 14px; border-left:3px solid var(--sage-coral); background:var(--sage-danger-bg); color:var(--sage-text-secondary); }.no-evidence { border-color:var(--sage-review-strong); background:var(--sage-review-bg); }.no-evidence strong,.no-evidence span { display:block; }.no-evidence span { margin-top:4px; font-size:var(--sage-font-xs); }.citation-list { margin:18px 0 0; padding:0; list-style:none; }.citation-list>li { padding:17px 0; border-top:1px solid var(--sage-border); }.citation-heading { display:grid; grid-template-columns:28px minmax(0,1fr) auto; align-items:start; gap:10px; }.citation-rank { display:grid; place-items:center; width:26px; height:26px; border-radius:50%; background:var(--sage-source-bg); color:var(--sage-source); font-size:var(--sage-font-xs); font-weight:800; }.citation-heading strong,.citation-heading div>span { display:block; }.citation-heading div>span { margin-top:3px; color:var(--sage-text-muted); font-size:var(--sage-font-xs); }.citation-heading>code { color:var(--sage-text-muted); font-size:11px; }.citation-list>li>p { margin:11px 0; color:var(--sage-text-secondary); font-size:var(--sage-font-sm); line-height:1.65; white-space:pre-wrap; }.citation-list footer { display:flex; flex-wrap:wrap; gap:8px 14px; color:var(--sage-text-muted); font-size:11px; }.citation-list footer code { color:var(--sage-text-secondary); }
+  .learning-action { display:flex; align-items:center; gap:12px; padding-top:14px; border-top:1px solid var(--sage-border); }.learning-action button { display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:36px; border:1px solid var(--sage-source); border-radius:var(--sage-radius-sm); background:var(--sage-source); color:white; padding:0 13px; font-weight:700; }.learning-action span { color:var(--sage-success); font-size:var(--sage-font-sm); }.learning-action em { color:var(--sage-text-muted); font-size:var(--sage-font-xs); font-style:normal; }
   .migration-banner { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:14px; margin:22px 0 0; padding:16px; border:1px solid var(--sage-border-strong); border-radius:var(--sage-radius); background:var(--sage-source-bg); }.migration-icon { display:grid; place-items:center; width:38px; height:38px; border-radius:var(--sage-radius-sm); background:var(--sage-source); color:white; }.migration-copy strong { font-size:var(--sage-font-md); }.migration-copy p { margin:4px 0 0; color:var(--sage-text-secondary); font-size:var(--sage-font-sm); line-height:1.55; }.migration-counts { display:flex; flex-wrap:wrap; gap:12px; margin-top:8px; color:var(--sage-text-muted); font-size:var(--sage-font-xs); }.migration-banner button { display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:36px; border:1px solid var(--sage-source); border-radius:var(--sage-radius-sm); background:var(--sage-source); color:white; padding:0 13px; font-weight:650; }.migration-banner em { color:var(--sage-review-strong); font-size:var(--sage-font-sm); font-style:normal; font-weight:650; }.migration-result { margin:10px 0 0; color:var(--sage-success); font-size:var(--sage-font-sm); }
   .knowledge-error,.knowledge-state { margin:22px 0 0; padding:10px 12px; border-left:3px solid var(--sage-coral); background:var(--sage-danger-bg); color:var(--sage-text-secondary); font-size:var(--sage-font-sm); }.knowledge-state { border-color:var(--sage-source); background:var(--sage-source-bg); }.knowledge-metrics { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); border-bottom:1px solid var(--sage-border); }.knowledge-metrics div { min-width:0; padding:24px 18px; border-right:1px solid var(--sage-border); }.knowledge-metrics div:last-child { border-right:0; }.knowledge-metrics strong,.knowledge-metrics span { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.knowledge-metrics strong { font-size:19px; }.knowledge-metrics span { margin-top:5px; color:var(--sage-text-muted); font-size:var(--sage-font-xs); }.ingest-section>div p { margin-top:5px; font-size:var(--sage-font-xs); }.single-ingest { border-top:1px solid var(--sage-border); }.ingest-form { display:grid; grid-template-columns:190px minmax(0,1fr) auto; gap:8px; }.ingest-form select,.ingest-form input { min-width:0; height:38px; border:1px solid var(--sage-border-strong); border-radius:var(--sage-radius-sm); background:var(--sage-surface); color:var(--sage-text); padding:0 10px; }.ingest-form button,.proposal-actions button,.page-row button,.job-row button,.auto-row button { display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:34px; border:1px solid var(--sage-border-strong); border-radius:var(--sage-radius-sm); background:var(--sage-surface); color:var(--sage-text); padding:0 12px; font-weight:650; }.ingest-form button,.proposal-actions .approve { border-color:var(--sage-source); background:var(--sage-source); color:white; }.knowledge-section { padding:30px 0; border-bottom:1px solid var(--sage-border); }.knowledge-section>header { display:flex; align-items:end; justify-content:space-between; gap:16px; margin-bottom:18px; }.knowledge-section>header span { color:var(--sage-text-muted); font-size:var(--sage-font-xs); text-transform:uppercase; }.knowledge-section h2 { margin:5px 0 0; font-size:var(--sage-font-lg); }.knowledge-section>header>strong { color:var(--sage-source); font-size:22px; }.empty-copy { color:var(--sage-text-muted); }.proposal-row,.page-row,.job-row,.auto-row { padding:18px 0; border-top:1px solid var(--sage-border); }.auto-row { display:flex; align-items:center; justify-content:space-between; gap:16px; }.auto-row strong,.auto-row span { display:block; }.auto-row span { margin-top:5px; color:var(--sage-text-muted); font-size:var(--sage-font-xs); }.auto-row em { color:var(--sage-text-muted); font-style:normal; font-size:var(--sage-font-sm); }.proposal-heading,.job-heading { display:flex; justify-content:space-between; gap:18px; }.proposal-heading strong,.proposal-heading span,.page-row>div strong,.page-row>div code,.job-heading strong,.job-heading span { display:block; }.proposal-heading span,.proposal-heading code,.page-row code,.job-heading span,.job-heading code { margin-top:5px; color:var(--sage-text-muted); font-size:var(--sage-font-xs); }.job-progress { height:6px; margin:14px 0 10px; overflow:hidden; border-radius:3px; background:var(--sage-border); }.job-progress span { display:block; height:100%; background:var(--sage-source); transition:width .2s ease; }.job-counts { display:flex; align-items:center; gap:14px; color:var(--sage-text-muted); font-size:var(--sage-font-xs); }.job-counts button { margin-left:auto; min-height:28px; color:var(--sage-coral); }.failed-items { margin:12px 0 0; padding:0; list-style:none; }.failed-items li { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:9px 0; border-top:1px dashed var(--sage-border); }.failed-items code,.failed-items span { display:block; }.failed-items span { margin-top:3px; color:var(--sage-coral); font-size:var(--sage-font-xs); }.proposal-row pre { max-height:320px; margin:14px 0; overflow:auto; border:1px solid var(--sage-border); border-radius:var(--sage-radius-sm); background:var(--sage-code-bg); color:var(--sage-code-text); padding:13px; font-size:12px; line-height:1.55; }.proposal-actions { display:flex; justify-content:flex-end; gap:8px; }.proposal-actions .reject { color:var(--sage-coral); }.page-row ol { margin:14px 0 0; padding:0; list-style:none; }.page-row li { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:38px; border-top:1px dashed var(--sage-border); color:var(--sage-text-secondary); font-size:var(--sage-font-sm); }.page-row em { color:var(--sage-success); font-style:normal; font-weight:650; }button:disabled,input:disabled,select:disabled { opacity:.5; cursor:not-allowed; }
-@media (max-width:760px) { .knowledge-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }.knowledge-metrics div:nth-child(2) { border-right:0; }.index-status { grid-template-columns:auto minmax(0,1fr); }.index-status button { grid-column:1 / -1; justify-content:center; width:100%; }.retrieval-section>header { align-items:flex-start; flex-direction:column; gap:8px; }.retrieval-form { grid-template-columns:auto minmax(0,1fr); }.retrieval-form button { grid-column:1 / -1; width:100%; }.citation-heading { grid-template-columns:28px minmax(0,1fr); }.citation-heading>code { grid-column:2; overflow:hidden; text-overflow:ellipsis; }.migration-banner { grid-template-columns:auto minmax(0,1fr); align-items:start; }.migration-banner button,.migration-banner>em { grid-column:1 / -1; width:100%; }.ingest-form { grid-template-columns:1fr; }.proposal-heading,.job-heading { flex-direction:column; gap:4px; }.job-counts { flex-wrap:wrap; }.job-counts button { margin-left:0; }.failed-items li { align-items:flex-start; flex-direction:column; }.proposal-actions { justify-content:stretch; }.proposal-actions button { flex:1; }.page-row li { align-items:flex-start; flex-direction:column; padding:9px 0; } }
+@media (max-width:760px) { .knowledge-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }.knowledge-metrics div:nth-child(2) { border-right:0; }.index-status { grid-template-columns:auto minmax(0,1fr); }.index-status button { grid-column:1 / -1; justify-content:center; width:100%; }.retrieval-section>header { align-items:flex-start; flex-direction:column; gap:8px; }.retrieval-form { grid-template-columns:auto minmax(0,1fr); }.retrieval-form button { grid-column:1 / -1; width:100%; }.citation-heading { grid-template-columns:28px minmax(0,1fr); }.citation-heading>code { grid-column:2; overflow:hidden; text-overflow:ellipsis; }.learning-action { align-items:stretch; flex-direction:column; }.learning-action button { width:100%; }.migration-banner { grid-template-columns:auto minmax(0,1fr); align-items:start; }.migration-banner button,.migration-banner>em { grid-column:1 / -1; width:100%; }.ingest-form { grid-template-columns:1fr; }.proposal-heading,.job-heading { flex-direction:column; gap:4px; }.job-counts { flex-wrap:wrap; }.job-counts button { margin-left:0; }.failed-items li { align-items:flex-start; flex-direction:column; }.proposal-actions { justify-content:stretch; }.proposal-actions button { flex:1; }.page-row li { align-items:flex-start; flex-direction:column; padding:9px 0; } }
 </style>

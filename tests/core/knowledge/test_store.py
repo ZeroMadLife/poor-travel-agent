@@ -8,6 +8,7 @@ import pytest
 
 from core.knowledge import (
     KnowledgeConflictError,
+    KnowledgeEvidenceError,
     KnowledgeSourceRoot,
     KnowledgeStore,
 )
@@ -175,7 +176,7 @@ def test_v1_metadata_database_migrates_to_v6_without_rewriting_existing_rows(
             "SELECT proposal_id, parse_artifact_id FROM knowledge_proposals "
             "WHERE proposal_id='legacy'"
         ).fetchone()
-    assert version == 6
+    assert version == 7
     assert "parse_artifact_id" in columns
     assert artifact_table is not None
     assert policy_table is not None
@@ -205,7 +206,7 @@ def test_v2_parse_artifacts_backfill_source_understanding(tmp_path: Path) -> Non
     assert understanding is not None
     assert "可追溯的旧解析产物" in understanding.summary
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 7
         assert connection.execute(
             "SELECT COUNT(*) FROM knowledge_source_understandings"
         ).fetchone()[0] == 1
@@ -341,6 +342,64 @@ def test_index_rebuild_preserves_chunk_and_citation_ids(tmp_path: Path) -> None:
     assert after.chunk.chunk_id == before.chunk.chunk_id
     assert after.citation_id == before.citation_id
     assert after.chunk.page_revision == before.chunk.page_revision
+
+
+def test_evidence_learning_auto_applies_is_idempotent_and_rejects_stale_citations(
+    tmp_path: Path,
+) -> None:
+    store, vault, repository = _store(tmp_path)
+    source = vault / "context.md"
+    source.write_text(
+        "# Context\n\n上下文压缩保留恢复锚点。\n",
+        encoding="utf-8",
+    )
+    store.evaluate_and_apply_policy(store.ingest("sage-learning", "context.md").proposal_id)
+    citation = store.search("上下文压缩恢复锚点")[0]
+
+    learning = store.propose_evidence_learning(
+        "上下文恢复策略",
+        (citation.citation_id,),
+        session_id="session-1",
+        run_id="run-1",
+        event_id="event-1",
+    )
+    repeated = store.propose_evidence_learning(
+        "上下文恢复策略",
+        (citation.citation_id,),
+        session_id="session-2",
+        run_id="run-2",
+    )
+
+    assert learning.status == "approved"
+    assert learning.projection_status == "complete"
+    assert learning.change_kind == "learning"
+    assert repeated.proposal_id == learning.proposal_id
+    decision = store.get_policy_decision(learning.proposal_id)
+    assert decision is not None
+    assert decision.action == "auto_apply"
+    assert decision.risk_level == "low"
+    assert decision.applied_page_revision is not None
+    artifact = store.get_evidence_learning(learning.proposal_id)
+    assert artifact is not None
+    assert artifact.session_id == "session-1"
+    assert artifact.citations[0].citation_id == citation.citation_id
+    page = (repository / learning.target_path).read_text(encoding="utf-8")
+    assert "不包含模型自由生成的新事实" in page
+    assert citation.citation_id in page
+    assert str(vault) not in page
+
+    derived_citation = next(
+        hit
+        for hit in store.search("上下文恢复策略")
+        if hit.chunk.source_kind == "agent_learning"
+    )
+    with pytest.raises(KnowledgeEvidenceError, match="original source material"):
+        store.propose_evidence_learning("递归学习", (derived_citation.citation_id,))
+
+    source.write_text("# Context\n\n新版上下文使用动态窗口。\n", encoding="utf-8")
+    store.evaluate_and_apply_policy(store.ingest("sage-learning", "context.md").proposal_id)
+    with pytest.raises(KnowledgeEvidenceError, match="stale or unknown"):
+        store.propose_evidence_learning("旧版证据", (citation.citation_id,))
 
 
 def test_failed_index_projection_is_atomic_and_rebuildable(tmp_path: Path) -> None:
@@ -485,7 +544,7 @@ def test_low_risk_local_ingest_auto_applies_once_and_persists_policy(tmp_path: P
     assert first.status == "approved"
     assert first.projection_status == "complete"
     assert decision is not None
-    assert decision.policy_version == "1.0.0"
+    assert decision.policy_version == "1.1.0"
     assert decision.risk_level == "low"
     assert decision.action == "auto_apply"
     assert decision.applied_page_revision == store.list_pages()[0].current_revision

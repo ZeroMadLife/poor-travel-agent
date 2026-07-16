@@ -259,6 +259,30 @@ def test_search_api_returns_bounded_revision_citations_and_no_evidence(tmp_path:
     assert body["citations"][0]["source_relative_path"] == "memory.md"
     assert str(vault) not in found.text
 
+    learned = client.post(
+        "/api/v1/knowledge/learnings",
+        json={
+            "topic": "长期记忆策略",
+            "citation_ids": [body["citations"][0]["citation_id"]],
+            "session_id": "browser-test",
+        },
+    )
+    assert learned.status_code == 201
+    learning = learned.json()
+    assert learning["status"] == "approved"
+    assert learning["projection_status"] == "complete"
+    assert learning["change_kind"] == "learning"
+    assert learning["target_path"].startswith("wiki/learnings/")
+    assert learning["policy_decision"]["action"] == "auto_apply"
+    assert learning["policy_decision"]["undo_available"] is True
+    assert str(vault) not in learned.text
+
+    stale = client.post(
+        "/api/v1/knowledge/learnings",
+        json={"topic": "伪造学习", "citation_ids": ["kcite_missing"]},
+    )
+    assert stale.status_code == 409
+
     missing = client.post(
         "/api/v1/knowledge/search",
         json={"query": "zxqv_9f87ab completely_unrelated_needle"},

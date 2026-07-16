@@ -4,6 +4,7 @@ import { beforeEach, expect, it, vi } from 'vitest'
 import {
   applyPendingKnowledgeMigration,
   createKnowledgeJob,
+  depositKnowledgeLearning,
   fetchKnowledgeIndex,
   fetchKnowledgeJobs,
   fetchPendingKnowledgeMigration,
@@ -23,6 +24,7 @@ vi.mock('../api/knowledge', () => ({
   buildKnowledgeJobStreamUrl: vi.fn(),
   cancelKnowledgeJob: vi.fn(),
   createKnowledgeJob: vi.fn(),
+  depositKnowledgeLearning: vi.fn(),
   fetchKnowledgeIndex: vi.fn(),
   fetchKnowledgeJob: vi.fn(),
   fetchKnowledgeJobs: vi.fn(),
@@ -105,6 +107,22 @@ beforeEach(() => {
   })
   vi.mocked(applyPendingKnowledgeMigration).mockReset()
   vi.mocked(createKnowledgeJob).mockReset()
+  vi.mocked(depositKnowledgeLearning).mockReset().mockResolvedValue({
+    ...proposal,
+    proposal_id: 'learning-1',
+    title: '长期记忆 TTL',
+    target_path: 'wiki/learnings/long-term-memory.md',
+    change_kind: 'learning',
+    status: 'approved',
+    projection_status: 'complete',
+    revision: 1,
+    policy_decision: {
+      decision_id: 'kpol-learning', policy_id: 'sage.knowledge-autonomy',
+      policy_version: '1.1.0', risk_level: 'low', action: 'auto_apply',
+      reason_codes: ['extractive_content_only'], applied_page_revision: 'krev-learning',
+      undo_available: true, undo_proposal_id: null, undo_page_revision: null, undone_at: null,
+    },
+  })
   vi.mocked(ingestKnowledgeSource).mockReset().mockResolvedValue(proposal)
   vi.mocked(transitionKnowledgeProposal).mockReset().mockResolvedValue({
     ...proposal, status: 'approved', projection_status: 'complete', revision: 1,
@@ -243,6 +261,13 @@ it('retrieves revision-bound evidence from the knowledge workspace', async () =>
   expect(wrapper.text()).toContain('长期记忆使用事实证据和动态 TTL')
   expect(wrapper.text()).toContain('memory.md')
   expect(wrapper.text()).toContain('kcite-1')
+
+  const deposit = wrapper.findAll('button').find((button) => button.text().includes('沉淀为学习笔记'))
+  expect(deposit).toBeDefined()
+  await deposit!.trigger('click')
+  await flushPromises()
+  expect(depositKnowledgeLearning).toHaveBeenCalledWith('长期记忆 TTL', ['kcite-1'])
+  expect(wrapper.text()).toContain('已沉淀为可撤销学习页')
   wrapper.unmount()
 })
 

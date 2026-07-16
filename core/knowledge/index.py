@@ -384,6 +384,39 @@ class LocalKnowledgeIndex:
             if chunk_id in chunks
         )
 
+    def resolve_citations(
+        self,
+        connection: sqlite3.Connection,
+        citation_ids: tuple[str, ...],
+        *,
+        visibility: str = "private",
+    ) -> tuple[tuple[str, KnowledgeChunk], ...]:
+        """Resolve only current citations so stale evidence cannot be redeposited."""
+
+        if not citation_ids or len(citation_ids) > 8:
+            raise ValueError("knowledge learning requires between 1 and 8 citations")
+        if len(set(citation_ids)) != len(citation_ids):
+            raise ValueError("knowledge learning citations must be unique")
+        if visibility not in {"private", "public"}:
+            raise ValueError("invalid knowledge visibility")
+        rows = connection.execute(
+            """
+            SELECT * FROM knowledge_chunks
+            WHERE workspace_id=? AND visibility=? AND active=1
+            """,
+            (self.workspace_id, visibility),
+        ).fetchall()
+        resolved: dict[str, KnowledgeChunk] = {}
+        for row in rows:
+            chunk = self._chunk(row)
+            candidate = citation_id(chunk)
+            if candidate in citation_ids:
+                resolved[candidate] = chunk
+        missing = [item for item in citation_ids if item not in resolved]
+        if missing:
+            raise KeyError("knowledge learning citation is stale or unknown")
+        return tuple((item, resolved[item]) for item in citation_ids)
+
     def _insert_chunk(
         self, connection: sqlite3.Connection, chunk: KnowledgeChunk, created_at: str
     ) -> None:

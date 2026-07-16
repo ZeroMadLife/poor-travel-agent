@@ -297,7 +297,7 @@ export type KnowledgeProposal = {
   target_path: string
   title: string
   base_page_revision: string
-  change_kind: 'ingest' | 'rollback' | 'synthesis' | 'retraction'
+  change_kind: 'ingest' | 'rollback' | 'synthesis' | 'retraction' | 'learning'
   status: 'pending' | 'approved' | 'rejected'
   projection_status: 'pending' | 'complete' | 'error'
   revision: number
@@ -385,7 +385,7 @@ export type KnowledgePageRevision = {
   content_hash: string
   source_revision: string
   proposal_id: string
-  change_kind: 'ingest' | 'rollback' | 'synthesis' | 'retraction'
+  change_kind: 'ingest' | 'rollback' | 'synthesis' | 'retraction' | 'learning'
   git_commit: string
   created_at: string
 }

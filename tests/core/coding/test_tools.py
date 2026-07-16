@@ -153,6 +153,7 @@ def test_tool_registry_discovers_decorated_tools_with_stable_metadata(tmp_path: 
         "remember",
         "dream",
         "knowledge_search",
+        "knowledge_learn",
     }
     assert tools["read_file"].category == "file"
     assert tools["run_shell"].category == "shell"
@@ -164,6 +165,7 @@ def test_tool_registry_discovers_decorated_tools_with_stable_metadata(tmp_path: 
     assert tools["get_weather"].category == "travel"
     assert tools["knowledge_search"].category == "knowledge"
     assert tools["knowledge_search"].requires_approval is False
+    assert tools["knowledge_learn"].requires_approval is False
 
 
 def test_knowledge_search_returns_revision_bound_evidence(tmp_path: Path) -> None:
@@ -211,6 +213,19 @@ def test_knowledge_search_returns_revision_bound_evidence(tmp_path: Path) -> Non
     assert payload["citations"][0]["source_relative_path"] == "memory.md"
     assert str(vault) not in result.content
 
+    deposited = tools["knowledge_learn"].execute(
+        {
+            "topic": "长期记忆策略",
+            "citation_ids": [payload["citations"][0]["citation_id"]],
+        }
+    )
+    deposit_payload = json.loads(deposited.content)
+    assert deposited.is_error is False
+    assert deposit_payload["status"] == "deposited"
+    assert deposit_payload["target_path"].startswith("wiki/learnings/")
+    assert deposit_payload["page_revision"].startswith("krev_")
+    assert deposit_payload["undo_available"] is True
+
 
 def test_knowledge_search_fails_closed_when_workspace_is_unconfigured(tmp_path: Path) -> None:
     tools = build_tool_registry(_workspace(tmp_path))
@@ -219,6 +234,10 @@ def test_knowledge_search_fails_closed_when_workspace_is_unconfigured(tmp_path: 
 
     assert result.is_error is True
     assert json.loads(result.content)["status"] == "unavailable"
+    learning = tools["knowledge_learn"].execute(
+        {"topic": "Sage", "citation_ids": ["kcite_missing"]}
+    )
+    assert learning.is_error is True
 
 
 def test_registered_tool_definitions_are_decorator_backed() -> None:

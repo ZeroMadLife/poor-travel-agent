@@ -52,6 +52,17 @@ export function searchKnowledge(
   })
 }
 
+export function depositKnowledgeLearning(
+  topic: string,
+  citationIds: string[],
+): Promise<KnowledgeProposal> {
+  return request('/api/v1/knowledge/learnings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ topic, citation_ids: citationIds }),
+  })
+}
+
 export function fetchPendingKnowledgeMigration(): Promise<KnowledgeMigrationPlan> {
   return request('/api/v1/knowledge/migrations/pending')
 }

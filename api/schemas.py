@@ -234,6 +234,16 @@ class KnowledgeRetrievalResponse(BaseModel):
     citations: list[KnowledgeEvidenceResponse]
 
 
+class KnowledgeLearningRequest(BaseModel):
+    """Create an extractive learning note from current knowledge citations."""
+
+    topic: str = Field(min_length=1, max_length=160)
+    citation_ids: list[str] = Field(min_length=1, max_length=8)
+    session_id: str = Field(default="", max_length=128)
+    run_id: str = Field(default="", max_length=128)
+    event_id: str = Field(default="", max_length=128)
+
+
 class KnowledgeIngestRequest(BaseModel):
     """Ingest one Markdown file from a server-configured source root."""
 
@@ -386,7 +396,7 @@ class KnowledgeProposalResponse(BaseModel):
     target_path: str
     title: str
     base_page_revision: str
-    change_kind: Literal["ingest", "rollback", "synthesis", "retraction"]
+    change_kind: Literal["ingest", "rollback", "synthesis", "retraction", "learning"]
     status: Literal["pending", "approved", "rejected"]
     projection_status: Literal["pending", "complete", "error"]
     revision: int = Field(ge=0)
@@ -498,7 +508,7 @@ class KnowledgePageRevisionResponse(BaseModel):
     content_hash: str
     source_revision: str
     proposal_id: str
-    change_kind: Literal["ingest", "rollback", "synthesis", "retraction"]
+    change_kind: Literal["ingest", "rollback", "synthesis", "retraction", "learning"]
     git_commit: str
     created_at: str
 

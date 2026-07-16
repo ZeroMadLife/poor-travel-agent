@@ -1,5 +1,6 @@
 """Auditable personal knowledge workspace primitives."""
 
+from core.knowledge.evolution import EvidenceLearning, EvidenceLearningCitation
 from core.knowledge.migration import (
     KnowledgeMigrationItem,
     KnowledgeMigrationPlan,
@@ -18,6 +19,7 @@ from core.knowledge.retrieval import (
 from core.knowledge.store import (
     KnowledgeConflictError,
     KnowledgeEvent,
+    KnowledgeEvidenceError,
     KnowledgePage,
     KnowledgePageRevision,
     KnowledgePolicyDecision,
@@ -37,11 +39,14 @@ from core.knowledge.understanding import (
 )
 
 __all__ = [
+    "EvidenceLearning",
+    "EvidenceLearningCitation",
     "HashingEmbeddingProvider",
     "KnowledgeChunk",
     "KnowledgeConflictError",
     "KnowledgeEvent",
     "KnowledgeEvidence",
+    "KnowledgeEvidenceError",
     "KnowledgeIndexSummary",
     "KnowledgeMigrationItem",
     "KnowledgeMigrationPlan",

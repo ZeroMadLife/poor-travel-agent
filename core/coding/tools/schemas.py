@@ -238,6 +238,22 @@ class KnowledgeSearchArgs(BaseModel):
         return value
 
 
+class KnowledgeLearnArgs(BaseModel):
+    """Arguments for an extractive, citation-gated learning deposit."""
+
+    topic: str
+    citation_ids: list[str] = Field(min_length=1, max_length=8)
+
+    @field_validator("topic")
+    @classmethod
+    def topic_not_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("topic must not be empty")
+        if len(value) > 160:
+            raise ValueError("topic must not exceed 160 characters")
+        return value
+
+
 class RememberArgs(BaseModel):
     """Arguments for remember."""
 

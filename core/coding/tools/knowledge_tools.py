@@ -8,7 +8,7 @@ from typing import Any
 from core.coding.context import WorkspaceContext
 from core.coding.tools.base import ToolContext, ToolResult
 from core.coding.tools.registry import register_tool
-from core.coding.tools.schemas import KnowledgeSearchArgs
+from core.coding.tools.schemas import KnowledgeLearnArgs, KnowledgeSearchArgs
 from core.knowledge import KnowledgeStore
 
 
@@ -59,7 +59,9 @@ def knowledge_search(
         "token_budget": bundle.token_budget,
         "omitted_count": bundle.omitted_count,
         "instruction": (
-            "Use only the cited excerpts for knowledge-base claims."
+            "Use only the cited excerpts for knowledge-base claims. After a useful "
+            "investigation, knowledge_learn can deposit these citation IDs as an "
+            "extractive, reversible learning note."
             if bundle.evidence
             else "The knowledge base has no evidence for this query. Say so explicitly."
         ),
@@ -79,5 +81,57 @@ def knowledge_search(
             }
             for evidence in bundle.evidence
         ],
+    }
+    return ToolResult(content=json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@register_tool(
+    name="knowledge_learn",
+    description=(
+        "Persist a reversible evidence snapshot from citation IDs returned by "
+        "knowledge_search. Freeform factual content is not accepted."
+    ),
+    schema={"topic": "str", "citation_ids": "list[str](1..8)"},
+    schema_model=KnowledgeLearnArgs,
+    risky=False,
+    category="knowledge",
+    requires_approval=False,
+    timeout=30.0,
+    deferred=False,
+)
+def knowledge_learn(
+    workspace: WorkspaceContext,
+    args: dict[str, Any],
+    tool_context: ToolContext | None = None,
+) -> ToolResult:
+    """Deposit only server-resolved excerpts, never model-authored claims."""
+
+    _ = workspace
+    store = tool_context.knowledge_store if tool_context is not None else None
+    runtime = tool_context.runtime if tool_context is not None else None
+    if not isinstance(store, KnowledgeStore):
+        return ToolResult(
+            content=json.dumps(
+                {"status": "unavailable", "message": "knowledge workspace is not configured"},
+                ensure_ascii=False,
+            ),
+            is_error=True,
+        )
+    proposal = store.propose_evidence_learning(
+        str(args["topic"]),
+        tuple(str(item) for item in args["citation_ids"]),
+        session_id=str(getattr(runtime, "session_id", "")),
+        run_id=str(getattr(runtime, "active_run_id", "") or ""),
+        event_id=str(getattr(runtime, "_turn_id", "") or ""),
+    )
+    decision = store.get_policy_decision(proposal.proposal_id)
+    payload = {
+        "status": "deposited",
+        "proposal_id": proposal.proposal_id,
+        "page_id": proposal.page_id,
+        "target_path": proposal.target_path,
+        "page_revision": decision.applied_page_revision if decision is not None else None,
+        "citation_ids": list(args["citation_ids"]),
+        "undo_available": bool(decision and decision.applied_page_revision),
     }
     return ToolResult(content=json.dumps(payload, ensure_ascii=False, indent=2))
