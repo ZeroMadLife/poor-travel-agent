@@ -140,6 +140,7 @@ def test_deerflow_tools_reuse_sage_workspace_registry(tmp_path: Path) -> None:
     )
     tools = build_deerflow_coding_tools(runtime, run_id="r1")
     assert {tool.name for tool in tools} == {
+        "agent",
         "list_files",
         "read_file",
         "search",
@@ -149,6 +150,21 @@ def test_deerflow_tools_reuse_sage_workspace_registry(tmp_path: Path) -> None:
     }
     listing = next(tool for tool in tools if tool.name == "list_files")
     assert "README.md" in str(asyncio.run(listing.ainvoke({"path": "."})))
+
+
+def test_event_adapter_projects_agent_started_event() -> None:
+    adapter = HarnessEventAdapter(session_id="s1", run_id="r1")
+    events = adapter.adapt(
+        HarnessStreamItem(
+            1,
+            "custom",
+            {"type": "agent_started", "agent_run_id": "agent_1", "status": "started"},
+            "source-agent",
+        )
+    )
+    assert events[0].kind == "agent"
+    assert events[0].status == "running"
+    assert events[0].payload["agent_run_id"] == "agent_1"
 
 
 def test_runtime_adapter_streams_read_tool_result(tmp_path: Path) -> None:

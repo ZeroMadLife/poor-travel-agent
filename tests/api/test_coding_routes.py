@@ -123,6 +123,37 @@ class DeerflowApprovalFakeModel(FakeMessagesListChatModel):
         return self
 
 
+class DeerflowAgentFakeModel(FakeMessagesListChatModel):
+    """Tool-capable fake that launches one bounded Explore worker."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "agent",
+                            "args": {
+                                "description": "读取 README",
+                                "prompt": "读取 README 并返回第一行",
+                                "subagent_type": "Explore",
+                                "write_scope": [],
+                            },
+                            "id": "call-agent",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(content="子任务已启动"),
+            ]
+        )
+
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):  # type: ignore[no-untyped-def]
+        _ = tools, tool_choice, kwargs
+        return self
+
+
 def test_create_coding_session(tmp_path: Path) -> None:
     """POST /api/v1/coding/session creates a coding runtime session."""
     client = TestClient(
@@ -281,6 +312,34 @@ def test_enabled_deerflow_profile_reuses_approval_endpoint_for_write_tool(tmp_pa
 
     assert (tmp_path / "approved.txt").read_text(encoding="utf-8") == "ok"
     assert any(item.get("type") == "approval_granted" for item in payloads)
+    assert any(item.get("type") == "final" for item in payloads)
+
+
+def test_enabled_deerflow_profile_projects_subagent_launch(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# Sage\n", encoding="utf-8")
+    app = create_app(
+        coding_model_factory=DeerflowAgentFakeModel,
+        coding_workspace_root=tmp_path,
+        coding_storage_root=tmp_path / ".coding",
+        coding_deerflow_v2_enabled=True,
+    )
+    with TestClient(app) as client:
+        session_id = client.post(
+            "/api/v1/coding/session",
+            json={"runtime_profile": "deerflow_v2"},
+        ).json()["session_id"]
+        with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
+            websocket.send_json({"content": "启动一个探索任务"})
+            payloads: list[dict] = []
+            while True:
+                event = websocket.receive_json()
+                payloads.append(event["payload"])
+                if event["kind"] == "terminal":
+                    break
+
+    agent_events = [item for item in payloads if item.get("type") == "agent_started"]
+    assert agent_events
+    assert agent_events[0]["agent_run_id"].startswith("agent_")
     assert any(item.get("type") == "final" for item in payloads)
 
 

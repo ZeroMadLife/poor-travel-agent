@@ -112,12 +112,31 @@ class HarnessEventAdapter:
         if not isinstance(payload, Mapping):
             return ()
         event_type = str(payload.get("type", ""))
-        if event_type in {"approval_required", "approval_granted", "tool_call", "tool_result"}:
+        if event_type in {
+            "approval_required",
+            "approval_granted",
+            "tool_call",
+            "tool_result",
+            "agent_started",
+            "agent_completed",
+        }:
             event_payload = {str(key): _bounded_value(value) for key, value in payload.items()}
             return (
                 self._event(
-                    "approval" if event_type.startswith("approval") else "tool",
-                    "blocked" if event_type == "approval_required" else "completed",
+                    (
+                        "approval"
+                        if event_type.startswith("approval")
+                        else "agent"
+                        if event_type.startswith("agent")
+                        else "tool"
+                    ),
+                    (
+                        "blocked"
+                        if event_type == "approval_required"
+                        else "running"
+                        if event_type == "agent_started"
+                        else "completed"
+                    ),
                     event_payload,
                     source_event_id=source_event_id,
                 ),

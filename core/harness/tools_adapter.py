@@ -12,7 +12,7 @@ from core.coding.runtime import CodingRuntime
 from core.coding.tool_executor.executor import ToolExecutor
 
 _DEERFLOW_TOOLS = frozenset(
-    {"list_files", "read_file", "search", "write_file", "patch_file", "run_shell"}
+    {"list_files", "read_file", "search", "write_file", "patch_file", "run_shell", "agent"}
 )
 
 
@@ -49,6 +49,10 @@ def build_deerflow_coding_tools(runtime: CodingRuntime, *, run_id: str) -> list[
                     writer(payload)
                 if isinstance(event, ToolResultEvent):
                     result = event.content
+                    if _name == "agent" and writer is not None:
+                        agent_event = _agent_started_event(result)
+                        if agent_event is not None:
+                            writer(agent_event)
             return result or f"{_name} completed without a result"
 
         tools.append(
@@ -69,6 +73,24 @@ def _stream_writer() -> Callable[[Any], None] | None:
         return get_stream_writer()
     except (KeyError, RuntimeError):
         return None
+
+
+def _agent_started_event(content: str) -> dict[str, Any] | None:
+    """Project a worker launch into a small public event, never its full trace."""
+    import json
+
+    try:
+        payload = json.loads(content)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or not str(payload.get("task_id", "")).strip():
+        return None
+    return {
+        "type": "agent_started",
+        "agent_run_id": str(payload["task_id"]),
+        "status": str(payload.get("status", "started")),
+        "description": str(payload.get("description", ""))[:400],
+    }
 
 
 __all__ = ["build_deerflow_coding_tools"]
