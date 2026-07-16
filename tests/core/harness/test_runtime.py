@@ -12,7 +12,7 @@ from sage_harness.runtime.events import HarnessStreamItem
 
 from core.harness.event_adapter import HarnessEventAdapter
 from core.harness.runtime_adapter import SageHarnessRuntimeAdapter
-from core.harness.tools_adapter import build_deerflow_read_tools
+from core.harness.tools_adapter import build_deerflow_coding_tools
 
 
 class BindableFakeMessagesListChatModel(FakeMessagesListChatModel):
@@ -87,10 +87,17 @@ def test_deerflow_tools_reuse_sage_workspace_registry(tmp_path: Path) -> None:
         model=object(),
         storage_root=tmp_path / ".coding",
     )
-    tools = build_deerflow_read_tools(runtime)
-    assert {tool.name for tool in tools} == {"list_files", "read_file", "search"}
+    tools = build_deerflow_coding_tools(runtime, run_id="r1")
+    assert {tool.name for tool in tools} == {
+        "list_files",
+        "read_file",
+        "search",
+        "write_file",
+        "patch_file",
+        "run_shell",
+    }
     listing = next(tool for tool in tools if tool.name == "list_files")
-    assert "README.md" in str(listing.invoke({"path": "."}))
+    assert "README.md" in str(asyncio.run(listing.ainvoke({"path": "."})))
 
 
 def test_runtime_adapter_streams_read_tool_result(tmp_path: Path) -> None:
@@ -123,7 +130,7 @@ def test_runtime_adapter_streams_read_tool_result(tmp_path: Path) -> None:
             adapter = SageHarnessRuntimeAdapter(
                 model=model,
                 checkpointer=saver,
-                tools=build_deerflow_read_tools(runtime),
+                tools=build_deerflow_coding_tools(runtime, run_id="r1"),
             )
             events = [
                 event

@@ -90,7 +90,7 @@ from core.coding.run_coordinator import ActiveRunConflictError, RunEvent
 from core.coding.runtime import CodingRuntime
 from core.harness import RuntimeProfile, normalize_runtime_profile
 from core.harness.runtime_adapter import SageHarnessRuntimeAdapter
-from core.harness.tools_adapter import build_deerflow_read_tools
+from core.harness.tools_adapter import build_deerflow_coding_tools
 
 _SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 
@@ -239,7 +239,7 @@ async def _deerflow_timeline_events(
     adapter = SageHarnessRuntimeAdapter(
         model=runtime.model,
         checkpointer=checkpointer,
-        tools=build_deerflow_read_tools(runtime),
+        tools=build_deerflow_coding_tools(runtime, run_id=run_id),
     )
     runtime.append_harness_message(role="user", content=content, run_id=run_id)
     yield RunEvent(

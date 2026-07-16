@@ -97,6 +97,32 @@ class DeerflowToolFakeModel(FakeMessagesListChatModel):
         return self
 
 
+class DeerflowApprovalFakeModel(FakeMessagesListChatModel):
+    """Tool-capable fake used to verify the existing approval endpoint wakes graph runs."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "write_file",
+                            "args": {"path": "approved.txt", "content": "ok"},
+                            "id": "call-write-file",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(content="写入完成"),
+            ]
+        )
+
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):  # type: ignore[no-untyped-def]
+        _ = tools, tool_choice, kwargs
+        return self
+
+
 def test_create_coding_session(tmp_path: Path) -> None:
     """POST /api/v1/coding/session creates a coding runtime session."""
     client = TestClient(
@@ -220,6 +246,42 @@ def test_enabled_deerflow_profile_streams_read_tool_summary(tmp_path: Path) -> N
     assert tool_calls and tool_calls[0]["tool_calls"][0]["name"] == "list_files"
     assert tool_results and "README.md" in tool_results[0]["content"]
     assert any(payload.get("type") == "text_delta" for payload in payloads)
+
+
+def test_enabled_deerflow_profile_reuses_approval_endpoint_for_write_tool(tmp_path: Path) -> None:
+    app = create_app(
+        coding_model_factory=DeerflowApprovalFakeModel,
+        coding_workspace_root=tmp_path,
+        coding_storage_root=tmp_path / ".coding",
+        coding_deerflow_v2_enabled=True,
+    )
+    with TestClient(app) as client:
+        session_id = client.post(
+            "/api/v1/coding/session",
+            json={"runtime_profile": "deerflow_v2", "approval_policy": "ask"},
+        ).json()["session_id"]
+        with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
+            websocket.send_json({"content": "写一个文件"})
+            approval = None
+            while approval is None:
+                event = websocket.receive_json()
+                if event["payload"].get("type") == "approval_required":
+                    approval = event["payload"]
+            response = client.post(
+                f"/api/v1/coding/{session_id}/approval/respond",
+                json={"approval_id": approval["approval_id"], "choice": "once"},
+            )
+            assert response.status_code == 200
+            payloads: list[dict] = []
+            while True:
+                event = websocket.receive_json()
+                payloads.append(event["payload"])
+                if event["kind"] == "terminal":
+                    break
+
+    assert (tmp_path / "approved.txt").read_text(encoding="utf-8") == "ok"
+    assert any(item.get("type") == "approval_granted" for item in payloads)
+    assert any(item.get("type") == "final" for item in payloads)
 
 
 def test_create_coding_session_accepts_approval_policy(tmp_path: Path) -> None:

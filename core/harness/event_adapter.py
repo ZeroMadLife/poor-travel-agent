@@ -111,6 +111,17 @@ class HarnessEventAdapter:
     def _custom(self, payload: Any, source_event_id: str) -> tuple[RunEvent, ...]:
         if not isinstance(payload, Mapping):
             return ()
+        event_type = str(payload.get("type", ""))
+        if event_type in {"approval_required", "approval_granted", "tool_call", "tool_result"}:
+            event_payload = {str(key): _bounded_value(value) for key, value in payload.items()}
+            return (
+                self._event(
+                    "approval" if event_type.startswith("approval") else "tool",
+                    "blocked" if event_type == "approval_required" else "completed",
+                    event_payload,
+                    source_event_id=source_event_id,
+                ),
+            )
         safe = {str(key): _bounded_value(value) for key, value in payload.items()}
         return (
             self._event(
