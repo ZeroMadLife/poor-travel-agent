@@ -539,6 +539,8 @@ async def create_coding_session(
         workspace_id=workspace_id_from_path(workspace_root),
         permission_mode=runtime.permission_mode,
         runtime_profile=runtime.runtime_profile,
+        sandbox_provider=runtime.sandbox_provider,
+        sandbox_image=runtime.sandbox_image,
     )
 
 
@@ -644,6 +646,8 @@ async def resume_coding_session(
             workspace_id=workspace_id_from_path(active_runtime.workspace.root),
             permission_mode=active_runtime.permission_mode,
             runtime_profile=active_runtime.runtime_profile,
+            sandbox_provider=active_runtime.sandbox_provider,
+            sandbox_image=active_runtime.sandbox_image,
         )
     try:
         runtime_profile = _require_enabled_runtime_profile(persisted.get("runtime_profile"), request)
@@ -704,6 +708,8 @@ async def resume_coding_session(
         workspace_id=workspace_id_from_path(persisted_workspace),
         permission_mode=runtime.permission_mode,
         runtime_profile=runtime.runtime_profile,
+        sandbox_provider=runtime.sandbox_provider,
+        sandbox_image=runtime.sandbox_image,
     )
 
 

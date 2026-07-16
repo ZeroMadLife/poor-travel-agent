@@ -99,7 +99,7 @@ describe('coding API client', () => {
   it('creates a coding session', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ session_id: 'c1', workspace_root: '/tmp/repo', workspace_id: 'w1', permission_mode: 'default', runtime_profile: 'legacy' }),
+      json: async () => ({ session_id: 'c1', workspace_root: '/tmp/repo', workspace_id: 'w1', permission_mode: 'default', runtime_profile: 'legacy', sandbox_provider: 'local_workspace', sandbox_image: 'python:3.11-slim' }),
     })
     vi.stubGlobal('fetch', fetchMock)
 
@@ -107,6 +107,7 @@ describe('coding API client', () => {
 
     expect(response.session_id).toBe('c1')
     expect(response.runtime_profile).toBe('legacy')
+    expect(response.sandbox_provider).toBe('local_workspace')
     expect(fetchMock).toHaveBeenCalledWith(expect.any(URL), {
       credentials: 'include',
       method: 'POST',
@@ -362,7 +363,7 @@ describe('coding API client', () => {
   it('resumes a coding session', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ session_id: 's1', workspace_root: '/tmp/repo', workspace_id: 'w1', permission_mode: 'auto', runtime_profile: 'legacy' }),
+      json: async () => ({ session_id: 's1', workspace_root: '/tmp/repo', workspace_id: 'w1', permission_mode: 'auto', runtime_profile: 'legacy', sandbox_provider: 'local_workspace', sandbox_image: 'python:3.11-slim' }),
     })
     vi.stubGlobal('fetch', fetchMock)
 

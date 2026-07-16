@@ -1343,6 +1343,8 @@ class CodingRuntime:
         self.session["model_spec"] = self.model_spec
         self.session["reasoning_mode"] = self.reasoning_mode
         self.session["runtime_profile"] = self.runtime_profile
+        self.session["sandbox_provider"] = self.sandbox_provider
+        self.session["sandbox_image"] = self.sandbox_image
         if self.owner_user_id is not None:
             self.session["owner_user_id"] = self.owner_user_id
 

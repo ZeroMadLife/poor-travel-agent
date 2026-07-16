@@ -116,6 +116,8 @@ export type CodingSessionResponse = {
   workspace_id: string
   permission_mode: PermissionMode
   runtime_profile: CodingRuntimeProfile
+  sandbox_provider?: string
+  sandbox_image?: string
 }
 
 export type CodingSessionSummary = {

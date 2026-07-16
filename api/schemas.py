@@ -36,6 +36,8 @@ class CodingSessionResponse(BaseModel):
     workspace_id: str
     permission_mode: Literal["default", "accept_edits", "auto", "plan"] = "default"
     runtime_profile: Literal["legacy", "deerflow_v2"] = "legacy"
+    sandbox_provider: str = "local_workspace"
+    sandbox_image: str = "python:3.11-slim"
 
 
 class CodingSessionSummary(BaseModel):
