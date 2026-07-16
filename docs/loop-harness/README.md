@@ -12,6 +12,8 @@ Loop Engineer 是当前 Mac 上的只读巡检控制面。当前阶段为 **Phas
 - [RUNBOOK.md](RUNBOOK.md)：安装、启停、排障和卸载
 - [findings/OPEN.md](findings/OPEN.md)：去重后的开放大问题
 - [完整设计](../superpowers/specs/2026-07-16-sage-loop-engineer-harness-design.md)
+- [Phase 2 设计](../superpowers/specs/2026-07-16-sage-loop-engineer-phase2-design.md)：已批准，尚未实施
+- [Phase 2 实施计划](../superpowers/plans/2026-07-16-sage-loop-engineer-phase2.md)：待 Phase 1 独立合入后执行
 
 ## 存储原则
 
