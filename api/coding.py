@@ -88,8 +88,17 @@ from core.coding.persistence.session_event_journal import SessionEvent
 from core.coding.provider_settings import SageProviderSettings, SageProviderSettingsStore
 from core.coding.run_coordinator import ActiveRunConflictError, RunEvent
 from core.coding.runtime import CodingRuntime
+from core.harness import RuntimeProfile, normalize_runtime_profile
 
 _SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+
+
+def _require_enabled_runtime_profile(value: object, request: Request) -> RuntimeProfile:
+    """Resolve a requested profile and enforce the server-owned rollout gate."""
+    profile = normalize_runtime_profile(value)
+    if profile == "deerflow_v2" and not bool(request.app.state.coding_deerflow_v2_enabled):
+        raise HTTPException(status_code=422, detail="deerflow_v2 runtime profile is disabled")
+    return profile
 
 
 async def _enforce_coding_session_owner(connection: HTTPConnection) -> None:
@@ -281,6 +290,7 @@ async def create_coding_session(
     registry = combined_capabilities(request, account)
     reasoning_modes = combined_reasoning_modes(request, account)
     session_id = str(uuid4())
+    runtime_profile = _require_enabled_runtime_profile(payload.runtime_profile, request)
     runtime = CodingRuntime(
         session_id=session_id,
         workspace_root=workspace_root,
@@ -299,6 +309,7 @@ async def create_coding_session(
         usage_store=request.app.state.coding_usage_store,
         owner_user_id=account.user_id if account is not None else None,
         knowledge_store=getattr(request.app.state, "knowledge_store", None),
+        runtime_profile=runtime_profile,
     )
     sessions: dict[str, CodingRuntime] = request.app.state.coding_sessions
     sessions[session_id] = runtime
@@ -308,6 +319,7 @@ async def create_coding_session(
         workspace_root=str(workspace_root.resolve()),
         workspace_id=workspace_id_from_path(workspace_root),
         permission_mode=runtime.permission_mode,
+        runtime_profile=runtime.runtime_profile,
     )
 
 
@@ -395,7 +407,12 @@ async def resume_coding_session(
             workspace_root=str(active_runtime.workspace.root.resolve()),
             workspace_id=workspace_id_from_path(active_runtime.workspace.root),
             permission_mode=active_runtime.permission_mode,
+            runtime_profile=active_runtime.runtime_profile,
         )
+    try:
+        runtime_profile = _require_enabled_runtime_profile(persisted.get("runtime_profile"), request)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="invalid persisted runtime profile") from exc
     account = await load_account_model_context(request, include_credentials=True)
     catalog = combined_catalog(request, account)
     model_factory = combined_model_factory(request, account)
@@ -430,6 +447,7 @@ async def resume_coding_session(
         model_reasoning_modes=reasoning_modes,
         usage_store=request.app.state.coding_usage_store,
         knowledge_store=getattr(request.app.state, "knowledge_store", None),
+        runtime_profile=runtime_profile,
     )
     sessions[session_id] = runtime
     return CodingSessionResponse(
@@ -437,6 +455,7 @@ async def resume_coding_session(
         workspace_root=str(persisted_workspace),
         workspace_id=workspace_id_from_path(persisted_workspace),
         permission_mode=runtime.permission_mode,
+        runtime_profile=runtime.runtime_profile,
     )
 
 

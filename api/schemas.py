@@ -25,6 +25,7 @@ class CodingSessionRequest(BaseModel):
 
     workspace_root: str | None = Field(default=None, description="Workspace root override")
     approval_policy: Literal["auto", "ask", "never"] = "auto"
+    runtime_profile: Literal["legacy", "deerflow_v2"] | None = None
 
 
 class CodingSessionResponse(BaseModel):
@@ -34,6 +35,7 @@ class CodingSessionResponse(BaseModel):
     workspace_root: str
     workspace_id: str
     permission_mode: Literal["default", "accept_edits", "auto", "plan"] = "default"
+    runtime_profile: Literal["legacy", "deerflow_v2"] = "legacy"
 
 
 class CodingSessionSummary(BaseModel):
@@ -45,6 +47,7 @@ class CodingSessionSummary(BaseModel):
     created_at: str = ""
     updated_at: str = ""
     runtime_mode: str = "default"
+    runtime_profile: Literal["legacy", "deerflow_v2"] = "legacy"
     message_count: int = 0
     pinned: bool = False
     archived: bool = False

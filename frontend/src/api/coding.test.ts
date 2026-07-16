@@ -99,18 +99,19 @@ describe('coding API client', () => {
   it('creates a coding session', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ session_id: 'c1', workspace_root: '/tmp/repo', permission_mode: 'default' }),
+      json: async () => ({ session_id: 'c1', workspace_root: '/tmp/repo', workspace_id: 'w1', permission_mode: 'default', runtime_profile: 'legacy' }),
     })
     vi.stubGlobal('fetch', fetchMock)
 
     const response = await startCodingSession('/tmp/repo')
 
     expect(response.session_id).toBe('c1')
+    expect(response.runtime_profile).toBe('legacy')
     expect(fetchMock).toHaveBeenCalledWith(expect.any(URL), {
       credentials: 'include',
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workspace_root: '/tmp/repo', approval_policy: 'ask' }),
+      body: JSON.stringify({ workspace_root: '/tmp/repo', approval_policy: 'ask', runtime_profile: 'legacy' }),
     })
   })
 
@@ -344,6 +345,7 @@ describe('coding API client', () => {
             created_at: '2026-07-08T10:00:00',
             updated_at: '2026-07-08T10:00:01',
             runtime_mode: 'default',
+            runtime_profile: 'legacy',
             message_count: 2,
           },
         ],
@@ -360,15 +362,30 @@ describe('coding API client', () => {
   it('resumes a coding session', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ session_id: 's1', workspace_root: '/tmp/repo', permission_mode: 'auto' }),
+      json: async () => ({ session_id: 's1', workspace_root: '/tmp/repo', workspace_id: 'w1', permission_mode: 'auto', runtime_profile: 'legacy' }),
     })
     vi.stubGlobal('fetch', fetchMock)
 
     const response = await resumeCodingSession('s1')
 
     expect(response.session_id).toBe('s1')
+    expect(response.runtime_profile).toBe('legacy')
     expect(fetchMock).toHaveBeenCalledWith(expect.any(URL), {
       credentials: 'include', method: 'POST',
+    })
+  })
+
+  it('sends an explicit DeerFlow runtime profile when requested', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ session_id: 'deerflow-1', workspace_root: '/tmp/repo', workspace_id: 'w1', permission_mode: 'ask', runtime_profile: 'deerflow_v2' }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await startCodingSession('/tmp/repo', 'ask', 'deerflow_v2')
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1].body))).toMatchObject({
+      workspace_root: '/tmp/repo', approval_policy: 'ask', runtime_profile: 'deerflow_v2',
     })
   })
 

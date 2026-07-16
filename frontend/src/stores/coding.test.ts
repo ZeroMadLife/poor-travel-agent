@@ -1451,6 +1451,7 @@ describe('coding store', () => {
             created_at: '2026-07-08T10:00:00',
             updated_at: '2026-07-08T10:00:01',
             runtime_mode: 'default',
+            runtime_profile: 'legacy',
             message_count: 2,
           },
         ],
@@ -1468,7 +1469,7 @@ describe('coding store', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 503 }))
     const store = useCodingStore()
     store.codingSessions = [{
-      session_id: 'existing', title: '保留会话', workspace_root: '/tmp', created_at: '', updated_at: '', runtime_mode: 'default', message_count: 1,
+      session_id: 'existing', title: '保留会话', workspace_root: '/tmp', created_at: '', updated_at: '', runtime_mode: 'default', runtime_profile: 'legacy', message_count: 1,
     }]
 
     await expect(store.loadSessions()).rejects.toThrow('fetch sessions failed')

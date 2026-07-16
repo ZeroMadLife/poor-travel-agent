@@ -75,6 +75,50 @@ def test_create_coding_session(tmp_path: Path) -> None:
     assert data["session_id"]
     assert data["workspace_root"] == str(tmp_path.resolve())
     assert data["permission_mode"] == "default"
+    assert data["runtime_profile"] == "legacy"
+
+
+def test_deerflow_profile_requires_server_rollout_gate(tmp_path: Path) -> None:
+    client = TestClient(
+        create_app(
+            coding_model_factory=FakeModel,
+            coding_workspace_root=tmp_path,
+            coding_storage_root=tmp_path / ".coding",
+        )
+    )
+
+    response = client.post(
+        "/api/v1/coding/session",
+        json={"runtime_profile": "deerflow_v2"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "deerflow_v2 runtime profile is disabled"
+
+
+def test_enabled_deerflow_profile_is_persisted_and_resumed(tmp_path: Path) -> None:
+    app = create_app(
+        coding_model_factory=FakeModel,
+        coding_workspace_root=tmp_path,
+        coding_storage_root=tmp_path / ".coding",
+        coding_deerflow_v2_enabled=True,
+    )
+    client = TestClient(app)
+    created = client.post(
+        "/api/v1/coding/session",
+        json={"runtime_profile": "deerflow_v2"},
+    )
+
+    assert created.status_code == 200
+    session_id = created.json()["session_id"]
+    assert created.json()["runtime_profile"] == "deerflow_v2"
+    app.state.coding_sessions.pop(session_id)
+
+    resumed = client.post(f"/api/v1/coding/session/{session_id}/resume")
+
+    assert resumed.status_code == 200
+    assert resumed.json()["runtime_profile"] == "deerflow_v2"
+    assert app.state.coding_sessions[session_id].runtime_profile == "deerflow_v2"
 
 
 def test_create_coding_session_accepts_approval_policy(tmp_path: Path) -> None:

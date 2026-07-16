@@ -23,6 +23,7 @@ import type {
   CodingRunDetailResponse,
   CodingRunDiff,
   CodingRunsResponse,
+  CodingRuntimeProfile,
   CodingSessionMessagesResponse,
   CodingSessionResponse,
   CodingSessionSummary,
@@ -86,11 +87,16 @@ function isTimelineEvent(value: unknown, sessionId: string): value is CodingTime
 export async function startCodingSession(
   workspaceRoot?: string,
   approvalPolicy: 'auto' | 'ask' | 'never' = 'ask',
+  runtimeProfile: CodingRuntimeProfile = 'legacy',
 ): Promise<CodingSessionResponse> {
   const response = await apiFetch(new URL('/api/v1/coding/session', API_BASE_URL), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ workspace_root: workspaceRoot || null, approval_policy: approvalPolicy }),
+    body: JSON.stringify({
+      workspace_root: workspaceRoot || null,
+      approval_policy: approvalPolicy,
+      runtime_profile: runtimeProfile,
+    }),
   })
 
   if (!response.ok) {

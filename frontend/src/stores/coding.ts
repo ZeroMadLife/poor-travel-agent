@@ -53,6 +53,7 @@ import type {
   CodingRunSummary,
   CodingServerEvent,
   CodingSessionSummary,
+  CodingRuntimeProfile,
   CodingSkillSummary,
   CodingToolResultEvent,
   CodingTimelineEvent,
@@ -76,6 +77,7 @@ export type { ChatMessage, ToolActivity } from './codingEvents'
 export type CodingSessionUiState = {
   workspaceRoot: string
   permissionMode: PermissionMode
+  runtimeProfile: CodingRuntimeProfile
   timeline: CodingTimelineEvent[]
   olderTimeline: CodingTimelineEvent[]
   turns: TimelineTurn[]
@@ -125,6 +127,7 @@ function createSessionUiState(): CodingSessionUiState {
   return {
     workspaceRoot: '',
     permissionMode: 'default',
+    runtimeProfile: 'legacy',
     timeline: [],
     olderTimeline: [],
     turns: [],
@@ -272,6 +275,7 @@ export const useCodingStore = defineStore('coding', () => {
   const thinkingPhase = sessionField('thinkingPhase')
   const runtimeMode = sessionField('runtimeMode')
   const permissionMode = sessionField('permissionMode')
+  const runtimeProfile = sessionField('runtimeProfile')
   const planTopic = sessionField('planTopic')
   const planPath = sessionField('planPath')
   const planReview = sessionField('planReview')
@@ -713,6 +717,7 @@ export const useCodingStore = defineStore('coding', () => {
     ensureSession(session.session_id)
     workspaceRoot.value = session.workspace_root
     permissionMode.value = session.permission_mode
+    runtimeProfile.value = session.runtime_profile || 'legacy'
     await Promise.all([
       loadSkills(),
       loadMcpServers(),
@@ -1247,6 +1252,7 @@ export const useCodingStore = defineStore('coding', () => {
     ensureSession(session.session_id)
     workspaceRoot.value = session.workspace_root
     permissionMode.value = session.permission_mode
+    runtimeProfile.value = session.runtime_profile || 'legacy'
     runs.value = []
     selectedRun.value = null
     diffDrawerVisible.value = false
@@ -1274,6 +1280,7 @@ export const useCodingStore = defineStore('coding', () => {
     ensureSession(session.session_id)
     workspaceRoot.value = session.workspace_root
     permissionMode.value = session.permission_mode
+    runtimeProfile.value = session.runtime_profile || 'legacy'
     runs.value = []
     selectedRun.value = null
     diffDrawerVisible.value = false
@@ -1565,6 +1572,7 @@ export const useCodingStore = defineStore('coding', () => {
     thinkingPhase,
     runtimeMode,
     permissionMode,
+    runtimeProfile,
     planTopic,
     planPath,
     planReview,

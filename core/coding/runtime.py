@@ -73,6 +73,7 @@ from core.coding.tool_executor import (
 from core.coding.tools.base import ToolContext
 from core.coding.tools.registry import build_tool_registry
 from core.coding.usage_store import UsageSample, UsageStore
+from core.harness import RuntimeProfile, normalize_runtime_profile
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,7 @@ class CodingRuntime:
         usage_store: UsageStore | None = None,
         owner_user_id: str | None = None,
         knowledge_store: Any | None = None,
+        runtime_profile: RuntimeProfile | None = None,
     ) -> None:
         self.session_id = session_id
         self.workspace = WorkspaceContext(root=Path(workspace_root))
@@ -128,6 +130,7 @@ class CodingRuntime:
                 "updated_at": now(),
                 "history": [],
                 "runtime_mode": {"mode": "default"},
+                "runtime_profile": normalize_runtime_profile(runtime_profile),
                 "todos": {"next_id": 1, "items": []},
             }
         )
@@ -140,6 +143,11 @@ class CodingRuntime:
             raise ValueError("coding session owner does not match persisted state")
         self.session.setdefault("history", [])
         self.session.setdefault("runtime_mode", {"mode": "default"})
+        persisted_runtime_profile = normalize_runtime_profile(self.session.get("runtime_profile"))
+        if runtime_profile is not None and persisted_runtime_profile != runtime_profile:
+            raise ValueError("coding session runtime profile does not match persisted state")
+        self._runtime_profile = persisted_runtime_profile
+        self.session["runtime_profile"] = self._runtime_profile
         self.session.setdefault("todos", {"next_id": 1, "items": []})
         self.session.setdefault("activated_tools", [])
         self.activated_tools = {
@@ -224,6 +232,7 @@ class CodingRuntime:
         model_reasoning_modes: Mapping[str, tuple[str, ...] | list[str]] | None = None,
         usage_store: UsageStore | None = None,
         knowledge_store: Any | None = None,
+        runtime_profile: RuntimeProfile | None = None,
     ) -> CodingRuntime:
         """Rehydrate a persisted coding runtime for a new WebSocket connection."""
         storage_path = Path(storage_root)
@@ -249,7 +258,13 @@ class CodingRuntime:
             model_reasoning_modes=model_reasoning_modes,
             usage_store=usage_store,
             knowledge_store=knowledge_store,
+            runtime_profile=runtime_profile,
         )
+
+    @property
+    def runtime_profile(self) -> RuntimeProfile:
+        """Return the creation-time runtime profile; it has no mutable setter."""
+        return self._runtime_profile
 
     def list_files(self, path: str = ".") -> list[dict[str, Any]]:
         """Return directory entries (dirs first, then files), workspace-safe."""
@@ -1248,6 +1263,7 @@ class CodingRuntime:
         self.session["permission_mode"] = self.permission_mode
         self.session["model_spec"] = self.model_spec
         self.session["reasoning_mode"] = self.reasoning_mode
+        self.session["runtime_profile"] = self.runtime_profile
         if self.owner_user_id is not None:
             self.session["owner_user_id"] = self.owner_user_id
 

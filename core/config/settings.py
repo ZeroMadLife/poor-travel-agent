@@ -116,6 +116,7 @@ class Settings(BaseSettings):
     # forced to Secure by the app factory regardless of this value.
     cloud_secure_cookies: bool = False
     cloud_frontend_url: str = "http://localhost:5173"
+    sage_deerflow_v2_enabled: bool = False
 
     # GitHub OAuth is used for identity only. Repository authorization is
     # handled separately by a GitHub App so private repository access can be

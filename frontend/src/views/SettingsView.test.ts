@@ -50,7 +50,7 @@ it('shows memory review actions and read-only MCP state', async () => {
 it('does not archive the active session or leak rejected session mutations', async () => {
   const store = useCodingStore()
   store.sessionId = 'active'
-  store.codingSessions = [{ session_id: 'active', title: '当前会话', workspace_root: '', created_at: '', updated_at: '', runtime_mode: 'default', message_count: 0 }]
+  store.codingSessions = [{ session_id: 'active', title: '当前会话', workspace_root: '', created_at: '', updated_at: '', runtime_mode: 'default', runtime_profile: 'legacy', message_count: 0 }]
   store.setSessionArchived = vi.fn().mockRejectedValue(new Error('服务不可用'))
   const { root, view } = await mountSettings('/settings/sessions')
   const archive = view().get('button[title="请在聊天页归档当前会话"]')

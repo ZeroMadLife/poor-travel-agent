@@ -164,6 +164,7 @@ def create_app(
     coding_model_capabilities: dict[str, object] | ModelCapabilityRegistry | None = None,
     coding_default_model: str | None = None,
     coding_checkpoint_anchor_key: bytes | None = None,
+    coding_deerflow_v2_enabled: bool | None = None,
     cloud_repository: CloudRepository | None = None,
     cloud_dev_login_enabled: bool | None = None,
     cloud_secure_cookies: bool | None = None,
@@ -322,6 +323,11 @@ def create_app(
     else:
         app.state.coding_model_factory = coding_model_factory
     app.state.coding_checkpoint_anchor_key = coding_checkpoint_anchor_key
+    app.state.coding_deerflow_v2_enabled = (
+        settings.sage_deerflow_v2_enabled
+        if coding_deerflow_v2_enabled is None
+        else coding_deerflow_v2_enabled
+    )
     app.state.coding_workspace_root = resolved_workspace_root
     app.state.coding_storage_root = Path(coding_storage_root or (repo_root / ".coding")).resolve()
     configured_knowledge_root = (

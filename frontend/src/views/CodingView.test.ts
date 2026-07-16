@@ -108,9 +108,9 @@ describe('CodingView chat route lifecycle', () => {
     const store = useCodingStore()
     store.loadSessions = vi.fn(async () => {
       store.codingSessions = [
-        { session_id: 'older', title: '', workspace_root: '', created_at: '', updated_at: '2026-01-01T00:00:00Z', runtime_mode: 'default', message_count: 0 },
-        { session_id: 'archived', title: '', workspace_root: '', created_at: '', updated_at: '2026-02-01T00:00:00Z', runtime_mode: 'default', message_count: 0, archived: true },
-        { session_id: 'newest', title: '', workspace_root: '', created_at: '', updated_at: '2026-03-01T00:00:00Z', runtime_mode: 'default', message_count: 0 },
+        { session_id: 'older', title: '', workspace_root: '', created_at: '', updated_at: '2026-01-01T00:00:00Z', runtime_mode: 'default', runtime_profile: 'legacy', message_count: 0 },
+        { session_id: 'archived', title: '', workspace_root: '', created_at: '', updated_at: '2026-02-01T00:00:00Z', runtime_mode: 'default', runtime_profile: 'legacy', message_count: 0, archived: true },
+        { session_id: 'newest', title: '', workspace_root: '', created_at: '', updated_at: '2026-03-01T00:00:00Z', runtime_mode: 'default', runtime_profile: 'legacy', message_count: 0 },
       ]
     })
     store.selectSession = vi.fn(async (sessionId: string) => { store.sessionId = sessionId })
@@ -217,7 +217,7 @@ describe('CodingView chat route lifecycle', () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 })
     const store = useCodingStore()
     store.sessionId = 'session-a'
-    store.codingSessions = [{ session_id: 'session-a', title: '修复路由', workspace_root: '', created_at: '', updated_at: '', runtime_mode: 'default', message_count: 0 }]
+    store.codingSessions = [{ session_id: 'session-a', title: '修复路由', workspace_root: '', created_at: '', updated_at: '', runtime_mode: 'default', runtime_profile: 'legacy', message_count: 0 }]
     const { root, wrapper } = await mountChat('/coding/session/session-a')
 
     expect(wrapper().find('.pane-left').exists()).toBe(false)

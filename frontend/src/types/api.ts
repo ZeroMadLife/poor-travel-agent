@@ -5,6 +5,7 @@ export type ProgressEvent = {
 }
 
 export type PermissionMode = 'default' | 'accept_edits' | 'auto' | 'plan'
+export type CodingRuntimeProfile = 'legacy' | 'deerflow_v2'
 
 export type ToolCallEvent = {
   type: 'tool_call'
@@ -114,6 +115,7 @@ export type CodingSessionResponse = {
   workspace_root: string
   workspace_id: string
   permission_mode: PermissionMode
+  runtime_profile: CodingRuntimeProfile
 }
 
 export type CodingSessionSummary = {
@@ -123,6 +125,7 @@ export type CodingSessionSummary = {
   created_at: string
   updated_at: string
   runtime_mode: string
+  runtime_profile: CodingRuntimeProfile
   message_count: number
   pinned?: boolean
   archived?: boolean
