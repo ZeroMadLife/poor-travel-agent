@@ -104,9 +104,6 @@ class Settings(BaseSettings):
     redis_password: str = ""
     redis_db: int = 0
 
-    qdrant_host: str = "localhost"
-    qdrant_port: int = 6333
-
     app_env: str = "development"
     app_debug: bool = True
     app_host: str = "0.0.0.0"

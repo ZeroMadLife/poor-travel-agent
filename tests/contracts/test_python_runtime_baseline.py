@@ -47,3 +47,7 @@ def test_release_install_excludes_abandoned_mem0_stack() -> None:
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     assert "qdrant:" not in compose
     assert "qdrant_data" not in compose
+
+    settings = (ROOT / "core" / "config" / "settings.py").read_text(encoding="utf-8")
+    assert "qdrant_host" not in settings
+    assert "qdrant_port" not in settings
