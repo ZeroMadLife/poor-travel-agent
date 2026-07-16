@@ -96,6 +96,7 @@ from core.harness.context_adapter import (
     context_status_event,
 )
 from core.harness.mcp_adapter import mcp_catalog_event
+from core.harness.memory_adapter import CodingMemoryPort
 from core.harness.runtime_adapter import SageHarnessRuntimeAdapter
 from core.harness.tools_adapter import build_deerflow_coding_tools
 
@@ -308,7 +309,11 @@ async def _deerflow_timeline_events(
         adapter = SageHarnessRuntimeAdapter(
             model=runtime.model,
             checkpointer=checkpointer,
-            tools=build_deerflow_coding_tools(runtime, run_id=run_id),
+            tools=build_deerflow_coding_tools(
+                runtime,
+                run_id=run_id,
+                memory_port=CodingMemoryPort(runtime),
+            ),
             system_prompt=build_deerflow_system_prompt(runtime),
         )
         graph_compaction: dict[str, object] | None = None

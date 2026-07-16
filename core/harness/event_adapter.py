@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import Any
 
@@ -81,7 +82,7 @@ class HarnessEventAdapter:
                 )
             return ()
         if message_type == "tool":
-            return (
+            events = [
                 self._event(
                     "tool",
                     "completed",
@@ -93,8 +94,24 @@ class HarnessEventAdapter:
                         "message_id": projected.get("id", ""),
                     },
                     source_event_id=source_event_id,
-                ),
+                )
+            ]
+            memory_payload = _memory_proposal_payload(
+                tool_name=str(projected.get("name", "")),
+                content=content,
+                session_id=self.session_id,
+                run_id=self.run_id,
             )
+            if memory_payload is not None:
+                events.append(
+                    self._event(
+                        "memory",
+                        "completed",
+                        memory_payload,
+                        source_event_id=f"{source_event_id}:memory-proposal",
+                    )
+                )
+            return tuple(events)
         return ()
 
     def _updates(self, payload: Any, source_event_id: str) -> tuple[RunEvent, ...]:
@@ -123,6 +140,22 @@ class HarnessEventAdapter:
         if not isinstance(payload, Mapping):
             return ()
         event_type = str(payload.get("type", ""))
+        if event_type == "memory_proposal_ready":
+            memory_payload = _validated_memory_proposal_payload(
+                payload,
+                session_id=self.session_id,
+                run_id=self.run_id,
+            )
+            if memory_payload is None:
+                return ()
+            return (
+                self._event(
+                    "memory",
+                    "completed",
+                    memory_payload,
+                    source_event_id=source_event_id,
+                ),
+            )
         if event_type in {
             "approval_required",
             "approval_granted",
@@ -193,6 +226,57 @@ class HarnessEventAdapter:
 def _public_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
     allowed = {"lc_agent_name", "langgraph_node", "ls_provider", "ls_model_type"}
     return {key: _bounded_value(item) for key, item in value.items() if key in allowed}
+
+
+def _memory_proposal_payload(
+    *,
+    tool_name: str,
+    content: object,
+    session_id: str,
+    run_id: str,
+) -> dict[str, Any] | None:
+    if tool_name != "remember" or not isinstance(content, str):
+        return None
+    try:
+        value = json.loads(content)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(value, Mapping) or value.get("status") != "pending":
+        return None
+    return _validated_memory_proposal_payload(
+        value,
+        session_id=session_id,
+        run_id=run_id,
+    )
+
+
+def _validated_memory_proposal_payload(
+    value: Mapping[object, object],
+    *,
+    session_id: str,
+    run_id: str,
+) -> dict[str, Any] | None:
+    proposal_id = value.get("proposal_id")
+    reflection_id = value.get("reflection_id")
+    candidate_count = value.get("candidate_count")
+    base_revision = value.get("base_revision")
+    if not isinstance(proposal_id, str) or not proposal_id.strip():
+        return None
+    if not isinstance(reflection_id, str) or not reflection_id.strip():
+        return None
+    if type(candidate_count) is not int or candidate_count < 1:
+        return None
+    if type(base_revision) is not int or base_revision < 0:
+        return None
+    return {
+        "type": "memory_proposal_ready",
+        "session_id": session_id,
+        "run_id": run_id,
+        "reflection_id": reflection_id[:4000],
+        "proposal_id": proposal_id[:4000],
+        "candidate_count": candidate_count,
+        "base_revision": base_revision,
+    }
 
 
 def _bounded_value(value: Any) -> Any:

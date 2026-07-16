@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from typing import Any
 
 from langchain_core.tools import BaseTool, StructuredTool
+from sage_harness import MemoryPort
 
 from core.coding.engine.events import ToolResultEvent, event_to_dict
 from core.coding.runtime import CodingRuntime
@@ -16,7 +18,12 @@ _DEERFLOW_TOOLS = frozenset(
 )
 
 
-def build_deerflow_coding_tools(runtime: CodingRuntime, *, run_id: str) -> list[BaseTool]:
+def build_deerflow_coding_tools(
+    runtime: CodingRuntime,
+    *,
+    run_id: str,
+    memory_port: MemoryPort | None = None,
+) -> list[BaseTool]:
     """Build LangChain tools through Sage's existing executor and approval gate."""
     tools: list[BaseTool] = []
     from core.coding.tools.registry import registered_tool_definitions
@@ -63,6 +70,45 @@ def build_deerflow_coding_tools(runtime: CodingRuntime, *, run_id: str) -> list[
                 args_schema=definition.schema_model,
             )
         )
+    if memory_port is not None:
+        remember_definition = definitions.get("remember")
+        if remember_definition is not None:
+
+            async def propose_memory(
+                fact: str,
+                topic: str = "project-conventions",
+            ) -> str:
+                receipt = await memory_port.propose(
+                    runtime.session_id,
+                    run_id,
+                    fact,
+                    topic=topic,
+                )
+                return json.dumps(
+                    {
+                        "proposal_id": receipt.proposal_id,
+                        "status": receipt.status,
+                        "requires_user_confirmation": receipt.status == "pending",
+                        "session_id": receipt.thread_id,
+                        "run_id": receipt.run_id,
+                        "reflection_id": receipt.reflection_id,
+                        "candidate_count": receipt.candidate_count,
+                        "base_revision": receipt.base_revision,
+                    },
+                    ensure_ascii=True,
+                )
+
+            tools.append(
+                StructuredTool.from_function(
+                    coroutine=propose_memory,
+                    name="remember",
+                    description=(
+                        "Propose a stable workspace convention or decision for user review. "
+                        "This tool never writes durable memory until the proposal is approved."
+                    ),
+                    args_schema=remember_definition.schema_model,
+                )
+            )
     return tools
 
 

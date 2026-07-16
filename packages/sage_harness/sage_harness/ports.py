@@ -94,6 +94,19 @@ class MemoryReference:
 
 
 @dataclass(frozen=True, slots=True)
+class MemoryProposalReceipt:
+    """Host-owned receipt for a proposal that has not bypassed confirmation."""
+
+    proposal_id: str
+    thread_id: str
+    run_id: str
+    reflection_id: str
+    status: Literal["pending", "approved", "rejected"]
+    candidate_count: int
+    base_revision: int
+
+
+@dataclass(frozen=True, slots=True)
 class McpServerReference:
     """Sanitized MCP server metadata safe to expose to the agent runtime."""
 
@@ -156,7 +169,9 @@ class MemoryPort(Protocol):
         thread_id: str,
         run_id: str,
         content: str,
-    ) -> str: ...
+        *,
+        topic: str = "project-conventions",
+    ) -> MemoryProposalReceipt: ...
 
 
 class McpCatalogPort(Protocol):

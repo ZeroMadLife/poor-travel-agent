@@ -74,8 +74,10 @@ class CodingHarnessStageProjector:
             output.extend(self._settle_active("completed"))
             return tuple(output)
         if event_type == "memory_proposal_ready":
+            previous = self._active_stage
             output = [*self._settle_active("completed")]
-            output.append(self._transition("reply", "memory"))
+            if previous is not None and previous != "memory":
+                output.append(self._transition(previous, "memory"))
             output.append(self._start_stage("memory"))
             output.extend(self._settle_active("completed"))
             return tuple(output)

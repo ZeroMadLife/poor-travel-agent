@@ -11,12 +11,14 @@ from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from sage_harness.runtime.checkpoint import open_sqlite_checkpointer, thread_config
 from sage_harness.runtime.events import HarnessStreamItem
 
+from core.coding.runtime import CodingRuntime
 from core.harness.context_adapter import (
     build_deerflow_durable_context,
     build_deerflow_system_prompt,
     context_status_event,
 )
 from core.harness.event_adapter import HarnessEventAdapter
+from core.harness.memory_adapter import CodingMemoryPort
 from core.harness.runtime_adapter import SageHarnessRuntimeAdapter
 from core.harness.tools_adapter import build_deerflow_coding_tools
 
@@ -188,6 +190,57 @@ def test_event_adapter_projects_agent_started_event() -> None:
     assert events[0].kind == "agent"
     assert events[0].status == "running"
     assert events[0].payload["agent_run_id"] == "agent_1"
+
+
+def test_event_adapter_projects_memory_proposal_without_candidate_content() -> None:
+    adapter = HarnessEventAdapter(session_id="s1", run_id="r1")
+    events = adapter.adapt(
+        HarnessStreamItem(
+            1,
+            "custom",
+            {
+                "type": "memory_proposal_ready",
+                "session_id": "s-forged",
+                "run_id": "r-forged",
+                "reflection_id": "harness_r1",
+                "proposal_id": "prop_1",
+                "candidate_count": 1,
+                "base_revision": 0,
+                "content": "private candidate content",
+            },
+            "source-memory",
+        )
+    )
+
+    assert events[0].kind == "memory"
+    assert events[0].payload["proposal_id"] == "prop_1"
+    assert events[0].payload["session_id"] == "s1"
+    assert events[0].payload["run_id"] == "r1"
+    assert "content" not in events[0].payload
+
+
+def test_event_adapter_binds_memory_proposal_to_current_run() -> None:
+    adapter = HarnessEventAdapter(session_id="s-current", run_id="r-current")
+    tool = ToolMessage(
+        name="remember",
+        tool_call_id="call-memory",
+        content=(
+            '{"status":"pending","session_id":"s-forged","run_id":"r-forged",'
+            '"reflection_id":"reflection-1","proposal_id":"prop-1",'
+            '"candidate_count":1,"base_revision":0}'
+        ),
+    )
+
+    events = adapter.adapt(
+        HarnessStreamItem(1, "messages", (tool, {}), "source-memory-tool")
+    )
+
+    assert [event.payload["type"] for event in events] == [
+        "tool_result",
+        "memory_proposal_ready",
+    ]
+    assert events[1].payload["session_id"] == "s-current"
+    assert events[1].payload["run_id"] == "r-current"
 
 
 def test_deerflow_system_prompt_reuses_sage_working_memory(tmp_path: Path) -> None:
@@ -397,3 +450,68 @@ def test_runtime_adapter_streams_read_tool_result(tmp_path: Path) -> None:
     payloads = asyncio.run(run())
     assert any(item.get("type") == "tool_result" for item in payloads)
     assert any(item.get("type") == "text_delta" for item in payloads)
+
+
+def test_runtime_adapter_streams_proposal_only_memory_tool(tmp_path: Path) -> None:
+    async def run() -> tuple[list[dict[str, object]], CodingRuntime]:
+        async with open_sqlite_checkpointer(tmp_path / "memory-checkpoints.sqlite3") as saver:
+            runtime = CodingRuntime(
+                session_id="s-memory",
+                workspace_root=tmp_path,
+                model=object(),
+                storage_root=tmp_path / ".coding",
+                runtime_profile="deerflow_v2",
+            )
+            model = BindableFakeMessagesListChatModel(
+                responses=[
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "remember",
+                                "args": {
+                                    "fact": "Keep graph checkpoints resumable",
+                                    "topic": "project-conventions",
+                                },
+                                "id": "call-memory",
+                                "type": "tool_call",
+                            }
+                        ],
+                    ),
+                    AIMessage(content="I prepared a memory proposal for review."),
+                ]
+            )
+            adapter = SageHarnessRuntimeAdapter(
+                model=model,
+                checkpointer=saver,
+                tools=build_deerflow_coding_tools(
+                    runtime,
+                    run_id="r-memory",
+                    memory_port=CodingMemoryPort(runtime),
+                ),
+            )
+            async with runtime.harness_turn("r-memory"):
+                events = [
+                    event.payload
+                    async for event in adapter.stream_turn(
+                        session_id="s-memory",
+                        run_id="r-memory",
+                        workspace_id="w-memory",
+                        workspace_path=str(tmp_path),
+                        content="Remember the checkpoint convention",
+                    )
+                ]
+            return events, runtime
+
+    payloads, runtime = asyncio.run(run())
+
+    assert any(item.get("type") == "tool_call" and item.get("tool") == "remember" for item in payloads)
+    proposal_event = next(
+        item for item in payloads if item.get("type") == "memory_proposal_ready"
+    )
+    assert proposal_event["candidate_count"] == 1
+    assert "content" not in proposal_event
+    assert any(item.get("type") == "tool_result" for item in payloads)
+    assert any(item.get("type") == "text_delta" for item in payloads)
+    assert runtime.memory_manager.memory_store.list_facts() == []
+    assert len(runtime.memory_manager.list_proposals("pending")) == 1

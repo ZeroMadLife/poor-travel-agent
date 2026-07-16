@@ -123,6 +123,36 @@ def test_approval_blocks_the_tool_stage_without_creating_a_second_visit() -> Non
     )
 
 
+def test_memory_proposal_transitions_from_the_current_stage() -> None:
+    projector = CodingHarnessStageProjector("run-memory")
+    events = [*projector.start()]
+    events.extend(projector.before({"type": "model_requested"}))
+    events.extend(
+        projector.before(
+            {"type": "tool_call", "tool": "remember", "args": {"fact": "Use SQLite"}}
+        )
+    )
+    events.extend(
+        projector.after(
+            {
+                "type": "tool_result",
+                "tool": "remember",
+                "content": '{"status":"pending"}',
+                "is_error": False,
+            }
+        )
+    )
+    events.extend(projector.after({"type": "memory_proposal_ready"}))
+
+    transitions = [
+        event.payload
+        for event in events
+        if event.payload.get("type") == "transition_taken"
+    ]
+    assert transitions[-1]["from_stage_id"] == "plan"
+    assert transitions[-1]["to_stage_id"] == "memory"
+
+
 def test_redacts_secrets_from_tool_stage_details() -> None:
     projector = CodingHarnessStageProjector("run-secret")
     events = projector.before({
