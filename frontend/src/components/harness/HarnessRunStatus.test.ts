@@ -38,6 +38,31 @@ describe('HarnessRunStatus', () => {
     expect(wrapper.get('.stage-edge').classes()).toContain('taken')
   })
 
+  it('renders sanitized runtime resources without connection configuration', () => {
+    const wrapper = mount(HarnessRunStatus, {
+      props: {
+        projection: projection({
+          runtimeResources: [
+            {
+              id: 'mcp-catalog', kind: 'mcp', label: 'MCP 目录',
+              detail: '3 个服务 · 2 已配置 · 1 未配置', status: 'blocked',
+            },
+            {
+              id: 'context-budget', kind: 'context', label: '上下文',
+              detail: '420 / 32000 tokens', status: 'completed',
+            },
+          ],
+        }),
+      },
+    })
+
+    expect(wrapper.get('.runtime-resources').text()).toContain('MCP 目录')
+    expect(wrapper.get('.runtime-resources').text()).toContain('1 未配置')
+    expect(wrapper.get('.runtime-resources').text()).toContain('420 / 32000 tokens')
+    expect(wrapper.text()).not.toContain('command')
+    expect(wrapper.text()).not.toContain('env')
+  })
+
   it('shows an ordered replay notice when the historical definition is missing', () => {
     const wrapper = mount(HarnessRunStatus, {
       props: {

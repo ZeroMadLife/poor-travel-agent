@@ -722,12 +722,14 @@ export type CodingEventMeta = {
 
 export type CodingToolCallEvent = CodingEventMeta & {
   type: 'tool_call'
+  tool_call_id?: string
   tool: string
   args: Record<string, unknown>
 }
 
 export type CodingToolResultEvent = CodingEventMeta & {
   type: 'tool_result'
+  tool_call_id?: string
   tool: string
   args: Record<string, unknown>
   content: string

@@ -282,7 +282,9 @@ def test_enabled_deerflow_profile_streams_read_tool_summary(tmp_path: Path) -> N
     payloads = [event["payload"] for event in events]
     tool_calls = [payload for payload in payloads if payload.get("type") == "tool_call"]
     tool_results = [payload for payload in payloads if payload.get("type") == "tool_result"]
-    assert tool_calls and tool_calls[0]["tool_calls"][0]["name"] == "list_files"
+    assert tool_calls and tool_calls[0]["tool"] == "list_files"
+    assert tool_calls[0]["args"] == {"path": "."}
+    assert tool_calls[0]["tool_call_id"] == "call-list-files"
     assert tool_results and "README.md" in tool_results[0]["content"]
     assert any(payload.get("type") == "text_delta" for payload in payloads)
 

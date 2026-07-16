@@ -171,6 +171,33 @@ describe('harness timeline projection', () => {
     })
   })
 
+  it('projects DeerFlow MCP context into the stage path and sanitized resources', () => {
+    const projection = projectLatestCodingHarness([
+      codingEvent(1, 'user', { type: 'user', content: '列出文件' }),
+      codingEvent(2, 'harness', {
+        type: 'mcp_catalog_updated',
+        servers: [
+          { name: 'docs', transport: 'stdio', status: 'configured', tool_names: [] },
+          { name: 'remote', transport: 'http', status: 'unconfigured', tool_names: [] },
+        ],
+      }),
+      codingEvent(3, 'tool', {
+        type: 'tool_call', tool: 'run_shell', args: { command: 'pwd' },
+      }, 'running'),
+      codingEvent(4, 'tool', {
+        type: 'tool_result', tool: 'run_shell', args: { command: 'pwd' }, content: '/repo',
+      }),
+      codingEvent(5, 'assistant', { type: 'text_delta', delta: '完成' }, 'running'),
+    ])
+
+    expect(projection.visitedPath).toEqual(['receive', 'context', 'plan', 'act', 'reply'])
+    expect(projection.stages.find((stage) => stage.id === 'act')?.detail).toBe('run_shell · pwd')
+    expect(projection.runtimeResources).toContainEqual(expect.objectContaining({
+      kind: 'mcp', label: 'MCP 目录', detail: '2 个服务 · 1 已配置 · 1 未配置',
+      status: 'blocked',
+    }))
+  })
+
   it('keeps blocked and resumed approval activity in one tool-stage visit', () => {
     const events = adaptCodingTimeline([
       codingEvent(1, 'harness', {

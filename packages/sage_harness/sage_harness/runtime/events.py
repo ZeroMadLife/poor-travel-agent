@@ -57,6 +57,9 @@ def message_payload(message: Any) -> dict[str, Any]:
     name = getattr(message, "name", None)
     if name:
         projected["name"] = str(name)
+    tool_call_id = getattr(message, "tool_call_id", None)
+    if tool_call_id:
+        projected["tool_call_id"] = str(tool_call_id)
     tool_calls = getattr(message, "tool_calls", None)
     if tool_calls:
         projected["tool_calls"] = _bounded_json(tool_calls)

@@ -42,19 +42,29 @@ class HarnessEventAdapter:
         message_type = str(projected.get("type", ""))
         content = projected.get("content", "")
         if message_type == "ai":
-            if projected.get("tool_calls"):
-                return (
-                    self._event(
-                        "tool",
-                        "running",
-                        {
-                            "type": "tool_call",
-                            "tool_calls": projected["tool_calls"],
-                            "message_id": projected.get("id", ""),
-                        },
-                        source_event_id=source_event_id,
-                    ),
-                )
+            tool_calls = projected.get("tool_calls")
+            if isinstance(tool_calls, list) and tool_calls:
+                events: list[RunEvent] = []
+                for index, call in enumerate(tool_calls):
+                    if not isinstance(call, Mapping):
+                        continue
+                    name = str(call.get("name", ""))
+                    args = call.get("args", {})
+                    events.append(
+                        self._event(
+                            "tool",
+                            "running",
+                            {
+                                "type": "tool_call",
+                                "tool": name,
+                                "args": args if isinstance(args, Mapping) else {},
+                                "tool_call_id": str(call.get("id", "")),
+                                "message_id": projected.get("id", ""),
+                            },
+                            source_event_id=f"{source_event_id}:call:{index}",
+                        )
+                    )
+                return tuple(events)
             if content:
                 return (
                     self._event(
@@ -78,6 +88,7 @@ class HarnessEventAdapter:
                     {
                         "type": "tool_result",
                         "tool": projected.get("name", ""),
+                        "tool_call_id": projected.get("tool_call_id", ""),
                         "content": content,
                         "message_id": projected.get("id", ""),
                     },

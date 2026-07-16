@@ -1,6 +1,11 @@
 import type { CodingTimelineEvent, CodingTimelineStatus } from '../../types/api'
 import { projectHarnessTimeline } from '../timelineProjection'
-import type { HarnessDefinition, HarnessStageStatus, HarnessTimelineEvent } from '../types'
+import type {
+  HarnessDefinition,
+  HarnessRuntimeResource,
+  HarnessStageStatus,
+  HarnessTimelineEvent,
+} from '../types'
 
 export const codingHarnessDefinition: HarnessDefinition = {
   id: 'sage.coding.practice',
@@ -27,6 +32,8 @@ export const codingHarnessDefinition: HarnessDefinition = {
 export function adaptCodingTimeline(events: readonly CodingTimelineEvent[]): HarnessTimelineEvent[] {
   const output: HarnessTimelineEvent[] = []
   const modelRequestCounts = new Map<string, number>()
+  const replyPreparedRuns = new Set<string>()
+  const replyStartedRuns = new Set<string>()
   const ordered = [...events].sort(
     (left, right) => left.sequence - right.sequence || left.event_id.localeCompare(right.event_id),
   )
@@ -42,10 +49,19 @@ export function adaptCodingTimeline(events: readonly CodingTimelineEvent[]): Har
     if (explicitRuns.has(event.run_id) && event.kind !== 'terminal') continue
     const type = stringValue(event.payload.type) || stringValue(event.payload.event)
     const modelRequestCount = modelRequestCounts.get(event.run_id) || 0
-    output.push(...adaptLegacyEvent(event, modelRequestCount === 0))
+    output.push(...adaptLegacyEvent(
+      event,
+      modelRequestCount === 0,
+      !replyStartedRuns.has(event.run_id),
+      replyPreparedRuns.has(event.run_id),
+    ))
     if (event.kind === 'model' && type === 'model_requested') {
       modelRequestCounts.set(event.run_id, modelRequestCount + 1)
     }
+    if (event.kind === 'model' && type === 'model_parsed' && event.payload.kind !== 'tool') {
+      replyPreparedRuns.add(event.run_id)
+    }
+    if (event.kind === 'assistant' && type === 'text_delta') replyStartedRuns.add(event.run_id)
   }
   return output
 }
@@ -59,7 +75,10 @@ export function projectLatestCodingHarness(
   )
   const runId = preferredRunId || ordered.at(-1)?.run_id || ''
   const runEvents = runId ? ordered.filter((event) => event.run_id === runId) : []
-  return projectHarnessTimeline(adaptCodingTimeline(runEvents), codingHarnessDefinition)
+  return {
+    ...projectHarnessTimeline(adaptCodingTimeline(runEvents), codingHarnessDefinition),
+    runtimeResources: projectCodingRuntimeResources(runEvents),
+  }
 }
 
 function adaptExplicitStageEvent(event: CodingTimelineEvent): HarnessTimelineEvent | null {
@@ -77,7 +96,12 @@ function adaptExplicitStageEvent(event: CodingTimelineEvent): HarnessTimelineEve
   })
 }
 
-function adaptLegacyEvent(event: CodingTimelineEvent, initialModelRequest: boolean): HarnessTimelineEvent[] {
+function adaptLegacyEvent(
+  event: CodingTimelineEvent,
+  initialModelRequest: boolean,
+  initialAssistantDelta: boolean,
+  replyPrepared: boolean,
+): HarnessTimelineEvent[] {
   const type = stringValue(event.payload.type) || stringValue(event.payload.event)
   if (event.kind === 'user') {
     return [
@@ -89,6 +113,13 @@ function adaptLegacyEvent(event: CodingTimelineEvent, initialModelRequest: boole
   }
   if (event.kind === 'context') {
     return settleStageFromStatus(event, 'context', 0)
+  }
+  if (event.kind === 'harness' && type === 'mcp_catalog_updated') {
+    return [
+      eventFrom(event, 'stage_completed', 0, { stageId: 'context' }),
+      transition(event, 1, 'context', 'plan'),
+      eventFrom(event, 'stage_started', 2, { stageId: 'plan' }),
+    ]
   }
   if (event.kind === 'model' && type === 'model_requested') {
     return [
@@ -133,7 +164,14 @@ function adaptLegacyEvent(event: CodingTimelineEvent, initialModelRequest: boole
     })]
   }
   if (event.kind === 'assistant' && type === 'text_delta') {
-    return [eventFrom(event, 'stage_started', 0, { stageId: 'reply' })]
+    if (!initialAssistantDelta) return []
+    return [
+      ...(!replyPrepared ? [
+        eventFrom(event, 'stage_completed', 0, { stageId: 'plan' }),
+        transition(event, 1, 'plan', 'reply'),
+      ] : []),
+      eventFrom(event, 'stage_started', 2, { stageId: 'reply' }),
+    ]
   }
   if (event.kind === 'assistant') {
     return [eventFrom(event, 'stage_completed', 0, { stageId: 'reply' })]
@@ -145,6 +183,63 @@ function adaptLegacyEvent(event: CodingTimelineEvent, initialModelRequest: boole
     return [eventFrom(event, 'run_terminal', 0, { status: timelineStatus(event.status) })]
   }
   return []
+}
+
+function projectCodingRuntimeResources(
+  events: readonly CodingTimelineEvent[],
+): HarnessRuntimeResource[] {
+  const resources: HarnessRuntimeResource[] = []
+  const catalog = [...events].reverse().find(
+    (event) => event.payload.type === 'mcp_catalog_updated',
+  )
+  if (catalog) {
+    const servers = arrayValue(catalog.payload.servers).map(recordValue)
+    const connected = servers.filter((server) => stringValue(server.status) === 'connected').length
+    const configured = servers.filter((server) => (
+      stringValue(server.status) === 'configured' || stringValue(server.status) === 'connected'
+    )).length
+    const unavailable = servers.length - configured
+    const detail = [
+      `${servers.length} 个服务`,
+      connected ? `${connected} 已连接` : `${configured} 已配置`,
+      unavailable ? `${unavailable} 未配置` : '',
+    ].filter(Boolean).join(' · ')
+    resources.push({
+      id: 'mcp-catalog',
+      kind: 'mcp',
+      label: 'MCP 目录',
+      detail,
+      status: servers.some((server) => stringValue(server.status) === 'error')
+        ? 'failed'
+        : unavailable ? 'blocked' : 'completed',
+    })
+  }
+  const context = [...events].reverse().find((event) => event.kind === 'context')
+  if (context) {
+    const used = numberValue(context.payload.used_tokens)
+    const limit = numberValue(context.payload.effective_limit_tokens)
+    resources.push({
+      id: 'context-budget',
+      kind: 'context',
+      label: '上下文',
+      detail: limit ? `${used} / ${limit} tokens` : `${used} tokens`,
+      status: explicitStatus(context.status),
+    })
+  }
+  const agents = events.filter(
+    (event) => event.kind === 'agent' && event.payload.type === 'agent_started',
+  )
+  for (const event of agents) {
+    const agentId = stringValue(event.payload.agent_run_id) || event.event_id
+    resources.push({
+      id: `agent:${agentId}`,
+      kind: 'agent',
+      label: '子代理',
+      detail: stringValue(event.payload.description) || agentId,
+      status: explicitStatus(event.status),
+    })
+  }
+  return resources
 }
 
 function settleStageFromStatus(event: CodingTimelineEvent, stageId: string, offset: number) {
@@ -226,4 +321,8 @@ function numberValue(value: unknown) {
 
 function recordValue(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+}
+
+function arrayValue(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : []
 }

@@ -51,7 +51,25 @@ def test_event_adapter_exposes_ai_delta_and_tool_result_without_private_state() 
     assert ai_events[0].payload["delta"] == "公开回答"
     assert ai_events[0].event_id == "source-ai:public"
     assert tool_events[0].payload["type"] == "tool_result"
+    assert tool_events[0].payload["tool_call_id"] == "call-1"
     assert "analysis" not in str(ai_events[0].payload)
+
+
+def test_event_adapter_splits_ai_tool_calls_into_public_rows() -> None:
+    adapter = HarnessEventAdapter(session_id="s1", run_id="r1")
+    ai = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "list_files", "args": {"path": "."}, "id": "call-1"},
+            {"name": "read_file", "args": {"path": "README.md"}, "id": "call-2"},
+        ],
+    )
+
+    events = adapter.adapt(HarnessStreamItem(1, "messages", (ai, {}), "source-ai"))
+
+    assert [event.payload["tool"] for event in events] == ["list_files", "read_file"]
+    assert [event.payload["tool_call_id"] for event in events] == ["call-1", "call-2"]
+    assert events[0].event_id == "source-ai:call:0:public"
 
 
 def test_event_adapter_summarizes_values_instead_of_dumping_checkpoint() -> None:

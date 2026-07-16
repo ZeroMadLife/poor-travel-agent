@@ -1,15 +1,22 @@
 <script setup lang="ts">
 import {
+  Bot,
   CheckCircle2,
   Circle,
   Clock3,
+  Database,
   LoaderCircle,
   PauseCircle,
+  PlugZap,
   RotateCcw,
   XCircle,
 } from 'lucide-vue-next'
 import { computed } from 'vue'
-import type { HarnessProjection, HarnessStageStatus } from '../../harness/types'
+import type {
+  HarnessProjection,
+  HarnessRuntimeResource,
+  HarnessStageStatus,
+} from '../../harness/types'
 
 const props = defineProps<{
   projection: HarnessProjection
@@ -33,6 +40,12 @@ function iconFor(status: HarnessStageStatus) {
   if (status === 'completed') return CheckCircle2
   if (status === 'failed' || status === 'cancelled') return XCircle
   return Circle
+}
+
+function resourceIcon(resource: HarnessRuntimeResource) {
+  if (resource.kind === 'mcp') return PlugZap
+  if (resource.kind === 'agent') return Bot
+  return Database
 }
 
 function transitionTaken(from: string, to?: string) {
@@ -64,7 +77,19 @@ function formatDuration(duration?: number) {
       历史流程 {{ projection.definitionId }} v{{ projection.definitionVersion }} 已按事件顺序还原
     </p>
 
-    <ol class="stage-path">
+    <ul v-if="projection.runtimeResources?.length" class="runtime-resources" aria-label="Harness 运行资源">
+      <li
+        v-for="resource in projection.runtimeResources"
+        :key="resource.id"
+        :class="resource.status"
+      >
+        <component :is="resourceIcon(resource)" :size="14" />
+        <strong>{{ resource.label }}</strong>
+        <span :title="resource.detail">{{ resource.detail }}</span>
+      </li>
+    </ul>
+
+    <ol class="stage-path" :class="{ 'with-resources': projection.runtimeResources?.length }">
       <li
         v-for="(stage, index) in projection.stages"
         :key="stage.id"
@@ -140,6 +165,32 @@ function formatDuration(duration?: number) {
   font-size: var(--sage-font-xs);
 }
 
+.runtime-resources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin: 13px 0 0;
+  padding: 0;
+  color: var(--sage-text-muted);
+  list-style: none;
+}
+
+.runtime-resources li {
+  display: grid;
+  grid-template-columns: 16px auto minmax(0, 1fr);
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: min(100%, 360px);
+  font-size: var(--sage-font-xs);
+}
+
+.runtime-resources li > svg { color: var(--sage-success); }
+.runtime-resources li.blocked > svg { color: var(--sage-warning); }
+.runtime-resources li.failed > svg,.runtime-resources li.cancelled > svg { color: var(--sage-danger); }
+.runtime-resources strong { color: var(--sage-text-secondary); white-space: nowrap; }
+.runtime-resources span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .stage-path {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(116px, 1fr));
@@ -148,6 +199,8 @@ function formatDuration(duration?: number) {
   padding: 0;
   list-style: none;
 }
+
+.stage-path.with-resources { margin-top: 20px; }
 
 .stage-step { position: relative; min-width: 0; padding-right: 22px; }
 .stage-step:last-child { padding-right: 0; }

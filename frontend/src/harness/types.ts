@@ -120,4 +120,13 @@ export type HarnessProjection = {
   transitions: HarnessTransitionViewModel[]
   visitedPath: string[]
   lastSequence: number
+  runtimeResources?: HarnessRuntimeResource[]
+}
+
+export type HarnessRuntimeResource = {
+  id: string
+  kind: 'context' | 'mcp' | 'agent'
+  label: string
+  detail: string
+  status: HarnessStageStatus
 }
