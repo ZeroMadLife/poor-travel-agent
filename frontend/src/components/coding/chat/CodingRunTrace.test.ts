@@ -173,4 +173,50 @@ describe('CodingRunTrace', () => {
     expect(wrapper.get('summary').text()).toContain('等待确认 · run_shell')
     expect(wrapper.get('details').attributes('open')).toBeUndefined()
   })
+
+  it('does not keep a stale running summary after a completed MCP call', async () => {
+    const staleAudit: CodingRunAuditSummary = {
+      ...audit,
+      steps: [{
+        tool: 'scenic_search_scenic_spots',
+        status: 'completed',
+        action_summary: '调用 scenic_search_scenic_spots',
+        result_summary: '执行中',
+        duration_ms: 180,
+        arguments_preview: '{"city":"杭州"}',
+        result_preview: '',
+        arguments_truncated: false,
+        result_truncated: false,
+      }],
+    }
+    const wrapper = mount(CodingRunTrace, {
+      props: { runId: 'run-mcp-stale', tools: [], audit: staleAudit },
+    })
+
+    await wrapper.get('summary').trigger('click')
+
+    expect(wrapper.text()).toContain('执行完成')
+    expect(wrapper.text()).not.toContain('执行中')
+  })
+
+  it('summarizes a completed live tool with no text result as completed', async () => {
+    const wrapper = mount(CodingRunTrace, {
+      props: {
+        runId: 'run-mcp-live',
+        tools: [{
+          id: 'tool-1',
+          tool: 'scenic_search_scenic_spots',
+          args: { city: '杭州' },
+          status: 'completed',
+          result: '',
+          is_error: false,
+        }],
+      },
+    })
+
+    await wrapper.get('summary').trigger('click')
+
+    expect(wrapper.text()).toContain('执行完成')
+    expect(wrapper.text()).not.toContain('执行中')
+  })
 })

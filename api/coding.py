@@ -13,7 +13,8 @@ from typing import Any, Literal, cast
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, WebSocket
-from sage_harness import McpCatalogPort
+from langchain_core.tools import BaseTool
+from sage_harness import McpCatalogPort, McpManager, McpScope
 from starlette.requests import HTTPConnection
 from starlette.websockets import WebSocketDisconnect
 
@@ -307,11 +308,23 @@ async def _deerflow_timeline_events(
             )
             return
 
+        mcp_tools: tuple[BaseTool, ...] = ()
+        mcp_servers = None
+        if isinstance(mcp_catalog, McpManager):
+            mcp_scope = McpScope(
+                owner_id=runtime.owner_user_id or "local",
+                workspace_id=workspace_id_from_path(runtime.workspace.root),
+                thread_id=runtime.session_id,
+            )
+            mcp_snapshot = await mcp_catalog.load_tools(mcp_scope)
+            mcp_tools = mcp_snapshot.tools
+            mcp_servers = mcp_snapshot.catalog.servers
         if mcp_catalog is not None:
             yield await mcp_catalog_event(
                 mcp_catalog,
                 session_id=runtime.session_id,
                 run_id=run_id,
+                servers=mcp_servers,
             )
         workspace_id = workspace_id_from_path(runtime.workspace.root)
         tool_bundle = build_deerflow_coding_tool_bundle(
@@ -319,6 +332,7 @@ async def _deerflow_timeline_events(
             run_id=run_id,
             knowledge_port=CodingKnowledgePort(runtime),
             memory_port=CodingMemoryPort(runtime),
+            extra_deferred_tools=mcp_tools,
         )
         adapter = SageHarnessRuntimeAdapter(
             model=runtime.model,

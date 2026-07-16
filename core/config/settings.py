@@ -21,34 +21,34 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    amap_api_key: str = Field(default="", description="Amap Web Service API key")
+    amap_api_key: str = Field(default="", description="Amap Web Service API key", repr=False)
     amap_base_url: str = "https://restapi.amap.com/v3"
 
-    qweather_api_key: str = Field(default="", description="QWeather API key")
+    qweather_api_key: str = Field(default="", description="QWeather API key", repr=False)
     qweather_base_url: str = DEFAULT_QWEATHER_BASE_URL
     qweather_geo_url: str = DEFAULT_QWEATHER_GEO_URL
 
-    caiyun_api_key: str = ""
+    caiyun_api_key: str = Field(default="", repr=False)
 
     llm_provider: str = "doubao"
 
     # DeepSeek
-    deepseek_api_key: str = Field(default="", description="DeepSeek API key")
+    deepseek_api_key: str = Field(default="", description="DeepSeek API key", repr=False)
     deepseek_base_url: str = "https://api.deepseek.com/v1"
     deepseek_model: str = "deepseek-v4-flash"
 
     # 火山引擎豆包（OpenAI 兼容格式，多模态）
-    doubao_api_key: str = Field(default="", description="Volcengine Doubao API key")
+    doubao_api_key: str = Field(default="", description="Volcengine Doubao API key", repr=False)
     doubao_base_url: str = "https://ark.cn-beijing.volces.com/api/coding/v3"
     doubao_model: str = "Doubao-Seed-2.0-pro"
 
     # 180txt 中转站（OpenAI 兼容格式）
-    openai_proxy_api_key: str = Field(default="", description="180txt proxy API key")
+    openai_proxy_api_key: str = Field(default="", description="180txt proxy API key", repr=False)
     openai_proxy_base_url: str = "https://serve.wzjself.org/v1"
     openai_proxy_model: str = "gpt-5.4-mini"
 
     # OpenAI 官方
-    openai_api_key: str = ""
+    openai_api_key: str = Field(default="", repr=False)
     openai_base_url: str = "https://api.openai.com/v1"
 
     # 主模型 / 轻量模型，格式 provider:model
@@ -117,6 +117,7 @@ class Settings(BaseSettings):
     cloud_secure_cookies: bool = False
     cloud_frontend_url: str = "http://localhost:5173"
     sage_deerflow_v2_enabled: bool = False
+    sage_mcp_live_enabled: bool = False
 
     # GitHub OAuth is used for identity only. Repository authorization is
     # handled separately by a GitHub App so private repository access can be

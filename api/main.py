@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
-from sage_harness import McpCatalogPort
+from sage_harness import McpCatalogPort, McpManager
 from sage_harness.runtime.checkpoint import open_sqlite_checkpointer
 
 from agents.graph import build_graph
@@ -24,7 +24,10 @@ from core.coding.context import ModelCapabilityRegistry
 from core.coding.provider_settings import SageProviderSettings, SageProviderSettingsStore
 from core.coding.usage_store import UsageStore
 from core.config.settings import get_settings
-from core.harness.mcp_adapter import build_configured_mcp_catalog
+from core.harness.mcp_adapter import (
+    build_configured_mcp_catalog,
+    build_configured_mcp_manager,
+)
 from core.knowledge import KnowledgeSourceRoot, KnowledgeStore
 from core.knowledge.jobs import (
     KnowledgeJobRepository,
@@ -168,6 +171,7 @@ def create_app(
     coding_default_model: str | None = None,
     coding_checkpoint_anchor_key: bytes | None = None,
     coding_deerflow_v2_enabled: bool | None = None,
+    coding_mcp_live_enabled: bool | None = None,
     coding_mcp_catalog: McpCatalogPort | None = None,
     cloud_repository: CloudRepository | None = None,
     cloud_dev_login_enabled: bool | None = None,
@@ -212,6 +216,9 @@ def create_app(
             if owned_redis is not None:
                 await owned_redis.aclose()
             await app.state.coding_run_registry.shutdown()
+            mcp_manager = getattr(app.state, "coding_mcp_manager", None)
+            if isinstance(mcp_manager, McpManager):
+                await mcp_manager.aclose()
             await checkpoint_stack.aclose()
 
     app = FastAPI(title="Sage API", lifespan=lifespan)
@@ -341,9 +348,27 @@ def create_app(
         else coding_deerflow_v2_enabled
     )
     app.state.sage_harness_checkpointer = None
-    app.state.coding_mcp_catalog = coding_mcp_catalog or build_configured_mcp_catalog(
-        settings,
-        scenic_data_path=str(repo_root / "data" / "mock" / "scenic_spots.json"),
+    app.state.coding_mcp_live_enabled = (
+        settings.sage_mcp_live_enabled
+        if coding_mcp_live_enabled is None
+        else coding_mcp_live_enabled
+    )
+    scenic_data_path = str(repo_root / "data" / "mock" / "scenic_spots.json")
+    if coding_mcp_catalog is not None:
+        resolved_mcp_catalog = coding_mcp_catalog
+    elif app.state.coding_mcp_live_enabled:
+        resolved_mcp_catalog = build_configured_mcp_manager(
+            settings,
+            scenic_data_path=scenic_data_path,
+        )
+    else:
+        resolved_mcp_catalog = build_configured_mcp_catalog(
+            settings,
+            scenic_data_path=scenic_data_path,
+        )
+    app.state.coding_mcp_catalog = resolved_mcp_catalog
+    app.state.coding_mcp_manager = (
+        resolved_mcp_catalog if isinstance(resolved_mcp_catalog, McpManager) else None
     )
     app.state.coding_workspace_root = resolved_workspace_root
     app.state.coding_storage_root = Path(coding_storage_root or (repo_root / ".coding")).resolve()

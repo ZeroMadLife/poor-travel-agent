@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -57,6 +57,7 @@ def build_deerflow_coding_tool_bundle(
     run_id: str,
     knowledge_port: KnowledgePort | None = None,
     memory_port: MemoryPort | None = None,
+    extra_deferred_tools: Sequence[BaseTool] = (),
     enable_deferred_tools: bool = True,
 ) -> CodingToolBundle:
     """Build V2 tools while preserving Sage execution and approval boundaries."""
@@ -192,6 +193,8 @@ def build_deerflow_coding_tool_bundle(
                 metadata={"category": "memory", "sage_source": "memory_port"},
             )
             (deferred_tools if enable_deferred_tools else resident_tools).append(remember_tool)
+
+    deferred_tools.extend(extra_deferred_tools)
 
     graph_tools, deferred_setup = assemble_deferred_tools(
         resident_tools,

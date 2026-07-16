@@ -8,7 +8,16 @@ from typing import Literal, Protocol
 
 ToolExecutionStatus = Literal["succeeded", "failed", "rejected"]
 ApprovalAction = Literal["once", "session", "reject"]
-McpConnectionStatus = Literal["configured", "unconfigured", "connected", "error"]
+McpConnectionStatus = Literal[
+    "configured",
+    "unconfigured",
+    "connecting",
+    "connected",
+    "degraded",
+    "error",
+    "stale",
+    "closed",
+]
 
 
 @dataclass(frozen=True, slots=True)

@@ -81,7 +81,13 @@ function fallbackStep(tool: TimelineTool): CodingRunAuditStep {
       ? (tool.status === 'blocked' ? 'waiting' : 'running')
       : tool.is_error || tool.status === 'error' ? 'error' : 'completed',
     action_summary: actionSummary(tool.tool, args),
-    result_summary: tool.is_error ? '执行失败' : tool.result ? shellResultSummary(tool.result) : '执行中',
+    result_summary: tool.is_error
+      ? '执行失败'
+      : tool.status === 'completed'
+        ? (tool.result ? shellResultSummary(tool.result) : '执行完成')
+        : tool.result
+          ? shellResultSummary(tool.result)
+          : '执行中',
     duration_ms: 0,
     arguments_preview: JSON.stringify(args, null, 2),
     result_preview: tool.tool === 'read_file'
@@ -209,7 +215,12 @@ function stepActionSummary(step: CodingRunAuditStep) {
 }
 
 function stepResultSummary(step: CodingRunAuditStep) {
-  if (step.tool !== 'tool_search') return step.result_summary
+  if (step.tool !== 'tool_search') {
+    if (step.status === 'completed' && (!step.result_summary || step.result_summary === '执行中')) {
+      return '执行完成'
+    }
+    return step.result_summary
+  }
   const preview = step.result_preview.trim()
   if (!preview) return step.result_summary
   if (/no matching deferred tools found/i.test(preview)) return '无匹配工具'

@@ -37,6 +37,9 @@ _BLOCKED_TAG_PATTERN = re.compile(
 )
 _BEGIN_INPUT = "--- BEGIN USER INPUT ---"
 _END_INPUT = "--- END USER INPUT ---"
+_BEGIN_REMOTE = "--- BEGIN REMOTE TOOL CONTENT ---"
+_END_REMOTE = "--- END REMOTE TOOL CONTENT ---"
+_MAX_REMOTE_CONTENT_CHARS = 12_000
 
 
 class MissingRunContextError(RuntimeError):
@@ -66,6 +69,24 @@ def neutralize_untrusted_text(text: str) -> str:
     )
     escaped = escaped.replace(_BEGIN_INPUT, "[BEGIN USER INPUT]").replace(_END_INPUT, "[END USER INPUT]")
     return f"{_BEGIN_INPUT}\n{escaped}\n{_END_INPUT}"
+
+
+def neutralize_remote_content_text(text: str) -> tuple[str, bool]:
+    """Bound and neutralize potentially hostile content returned by MCP tools."""
+    bounded = text[:_MAX_REMOTE_CONTENT_CHARS]
+    truncated = len(text) > len(bounded)
+    escaped = _BLOCKED_TAG_PATTERN.sub(
+        lambda match: match.group(0).replace("<", "&lt;").replace(">", "&gt;"),
+        bounded,
+    )
+    escaped = (
+        escaped.replace(_BEGIN_REMOTE, "[BEGIN REMOTE TOOL CONTENT]")
+        .replace(_END_REMOTE, "[END REMOTE TOOL CONTENT]")
+        .replace(_BEGIN_INPUT, "[BEGIN USER INPUT]")
+        .replace(_END_INPUT, "[END USER INPUT]")
+    )
+    suffix = "\n[remote content truncated]" if truncated else ""
+    return f"{_BEGIN_REMOTE}\n{escaped}{suffix}\n{_END_REMOTE}", truncated
 
 
 def _sanitize_last_user_message(messages: list[AnyMessage]) -> list[AnyMessage]:
@@ -252,6 +273,76 @@ class ToolErrorMiddleware(AgentMiddleware[SageThreadState, HarnessRunContext]):
         except Exception as exc:
             return self._error_result(request, exc)
 
+
+class RemoteContentSanitizationMiddleware(
+    AgentMiddleware[SageThreadState, HarnessRunContext]
+):
+    """Neutralize only tools explicitly tagged as remote-content sources."""
+
+    state_schema = SageThreadState
+
+    @staticmethod
+    def _is_remote(request: ToolCallRequest) -> bool:
+        metadata = request.tool.metadata if request.tool is not None else None
+        return isinstance(metadata, Mapping) and metadata.get("remote_content") is True
+
+    @staticmethod
+    def _sanitize(result: ToolMessage | Command[Any]) -> ToolMessage | Command[Any]:
+        if not isinstance(result, ToolMessage):
+            return result
+        truncated = False
+        content = result.content
+        if isinstance(content, str):
+            sanitized, truncated = neutralize_remote_content_text(content)
+            content = sanitized
+        elif isinstance(content, list):
+            sanitized_blocks: list[str | dict[str, Any]] = []
+            for block in content:
+                if isinstance(block, str):
+                    sanitized, block_truncated = neutralize_remote_content_text(block)
+                    sanitized_blocks.append(sanitized)
+                    truncated = truncated or block_truncated
+                elif (
+                    isinstance(block, dict)
+                    and block.get("type") == "text"
+                    and isinstance(block.get("text"), str)
+                ):
+                    sanitized, block_truncated = neutralize_remote_content_text(block["text"])
+                    sanitized_blocks.append({**block, "text": sanitized})
+                    truncated = truncated or block_truncated
+                else:
+                    sanitized_blocks.append(block)
+            content = sanitized_blocks
+        harness_meta = result.additional_kwargs.get("sage_harness")
+        metadata = dict(harness_meta) if isinstance(harness_meta, Mapping) else {}
+        metadata.update({"remote_content": True, "truncated": truncated})
+        return result.model_copy(
+            update={
+                "content": content,
+                "additional_kwargs": {
+                    **result.additional_kwargs,
+                    "sage_harness": metadata,
+                },
+            }
+        )
+
+    @override
+    def wrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], ToolMessage | Command[Any]],
+    ) -> ToolMessage | Command[Any]:
+        result = handler(request)
+        return self._sanitize(result) if self._is_remote(request) else result
+
+    @override
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
+    ) -> ToolMessage | Command[Any]:
+        result = await handler(request)
+        return self._sanitize(result) if self._is_remote(request) else result
 
 def _message_usage(message: AIMessage) -> int:
     usage = message.usage_metadata

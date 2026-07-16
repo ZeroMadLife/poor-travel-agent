@@ -12,6 +12,7 @@ from sage_harness.config import HarnessConfig
 from sage_harness.middleware.builtin import (
     InputSanitizationMiddleware,
     ProviderErrorMiddleware,
+    RemoteContentSanitizationMiddleware,
     TerminalResponseMiddleware,
     ThreadContextMiddleware,
     TokenBudgetMiddleware,
@@ -85,6 +86,10 @@ def build_default_registry() -> MiddlewareRegistry:
             MiddlewareSpec("thread_context", lambda config: ThreadContextMiddleware()),
             MiddlewareSpec("durable_context", lambda config: DurableContextMiddleware()),
             MiddlewareSpec("provider_error", lambda config: ProviderErrorMiddleware()),
+            MiddlewareSpec(
+                "remote_content_sanitization",
+                lambda config: RemoteContentSanitizationMiddleware(),
+            ),
             MiddlewareSpec("tool_error", lambda config: ToolErrorMiddleware()),
             MiddlewareSpec(
                 "model_call_limit",

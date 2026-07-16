@@ -9,6 +9,16 @@ from sage_harness.deferred_tools import (
     assemble_deferred_tools,
     render_deferred_tool_index,
 )
+from sage_harness.mcp import (
+    McpCatalogSnapshot,
+    McpConfigSnapshot,
+    McpManager,
+    McpScope,
+    McpServerConfig,
+    McpToolDescriptor,
+    McpToolSnapshot,
+    McpTransportPort,
+)
 from sage_harness.ports import (
     ApprovalDecision,
     ApprovalPort,
@@ -69,8 +79,16 @@ __all__ = [
     "KnowledgePort",
     "KnowledgeRetrievalResult",
     "McpCatalogPort",
+    "McpCatalogSnapshot",
+    "McpConfigSnapshot",
     "McpConnectionStatus",
+    "McpManager",
+    "McpScope",
+    "McpServerConfig",
     "McpServerReference",
+    "McpToolDescriptor",
+    "McpToolSnapshot",
+    "McpTransportPort",
     "MemoryPort",
     "MemoryProposalReceipt",
     "MemoryReference",

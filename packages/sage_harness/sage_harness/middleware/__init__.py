@@ -7,10 +7,12 @@ from sage_harness.middleware.builtin import (
     MissingTerminalResponseError,
     ProviderCallError,
     ProviderErrorMiddleware,
+    RemoteContentSanitizationMiddleware,
     TerminalResponseMiddleware,
     ThreadContextMiddleware,
     TokenBudgetMiddleware,
     ToolErrorMiddleware,
+    neutralize_remote_content_text,
     neutralize_untrusted_text,
 )
 from sage_harness.middleware.durable_context import DurableContextMiddleware
@@ -30,10 +32,12 @@ __all__ = [
     "MissingTerminalResponseError",
     "ProviderCallError",
     "ProviderErrorMiddleware",
+    "RemoteContentSanitizationMiddleware",
     "TerminalResponseMiddleware",
     "ThreadContextMiddleware",
     "TokenBudgetMiddleware",
     "ToolErrorMiddleware",
     "build_default_registry",
+    "neutralize_remote_content_text",
     "neutralize_untrusted_text",
 ]
