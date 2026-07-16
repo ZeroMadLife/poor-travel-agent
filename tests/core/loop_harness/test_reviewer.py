@@ -69,6 +69,8 @@ def test_ccconnect_reviewer_uses_unique_synthetic_session_and_parses_json(tmp_pa
     message = args[args.index("--message") + 1]
     assert "shadow.patch" in message
     assert "diff --git" not in message
+    assert "PASS、REQUEST_CHANGES、BLOCK" in message
+    assert "不得使用 Markdown 代码块" in message
 
 
 def test_ccconnect_reviewer_blocks_evidence_mutation(tmp_path) -> None:
