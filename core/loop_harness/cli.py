@@ -21,6 +21,7 @@ from core.loop_harness.git import GitController
 from core.loop_harness.github import GitHubAdapter
 from core.loop_harness.logging import configure_logging
 from core.loop_harness.manifest import validate_manifest, write_manifest
+from core.loop_harness.notifier import CcConnectNotifier
 from core.loop_harness.reviewer import CcConnectReviewer
 from core.loop_harness.runner import LoopRunner
 from core.loop_harness.state import LoopState
@@ -123,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             print(json.dumps(asdict(report), ensure_ascii=False, indent=2))
         elif report.notification:
-            print(report.notification)
+            _emit(report.notification, args, config)
         return 0
 
     if args.command == "digest":
@@ -139,7 +140,7 @@ def main(argv: list[str] | None = None) -> int:
             force=args.force,
         )
         if digest_payload:
-            print(digest_payload)
+            _emit(digest_payload, args, config)
         return 0
 
     if args.command == "cleanup":
@@ -186,12 +187,30 @@ def _parser() -> argparse.ArgumentParser:
 
     run = subparsers.add_parser("run")
     run.add_argument("--json", action="store_true")
+    _add_notification_options(run)
 
     digest = subparsers.add_parser("digest")
     digest.add_argument("--date")
     digest.add_argument("--force", action="store_true")
+    _add_notification_options(digest)
     subparsers.add_parser("cleanup")
     return parser
+
+
+def _add_notification_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--notify-project", default="sage")
+    parser.add_argument("--notify-session")
+
+
+def _emit(payload: str, args: argparse.Namespace, config: LoopConfig) -> None:
+    if not args.notify_session:
+        print(payload)
+        return
+    CcConnectNotifier(cc_connect_bin=config.cc_connect_bin).send(
+        project=args.notify_project,
+        session_key=args.notify_session,
+        message=payload,
+    )
 
 
 def _write_launcher(config: LoopConfig, destination: Path) -> None:

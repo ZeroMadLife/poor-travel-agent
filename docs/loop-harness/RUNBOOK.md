@@ -38,9 +38,12 @@ GitHub。每轮使用独立 synthetic relay session，`relay.visibility=none`。
 
 ## 调度
 
-- 小时任务：`17 * * * *`，超时 40 分钟，固定执行 `sage-loopctl run`
-- 日报任务：`55 23 * * *`，固定执行 `sage-loopctl digest`
+- 小时任务：`17 * * * *`，超时 40 分钟，固定执行 `sage-loopctl run --notify-session ...`
+- 日报任务：`55 23 * * *`，固定执行 `sage-loopctl digest --notify-session ...`
 - 调度必须使用 `cc-connect cron --exec`，不能使用自由 Prompt。
+- 两个 cron 均设置 `mute=true`，防止 shell 的 `(no output)` 成功回执刷屏；Harness 只在
+  finding、Draft PR、首次阻断或日报存在时通过 `cc-connect send --stdin` 主动发送中文摘要。
+  通知正文走 stdin，不进入进程参数；目标 session 只保存在本机 cc-connect cron 配置中。
 
 ## 排障
 
