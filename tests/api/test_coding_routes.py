@@ -66,6 +66,36 @@ class DeerflowFakeModel(FakeMessagesListChatModel):
     def __init__(self) -> None:
         super().__init__(responses=[AIMessage(content="LangGraph 回答")])
 
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):  # type: ignore[no-untyped-def]
+        _ = tools, tool_choice, kwargs
+        return self
+
+
+class DeerflowToolFakeModel(FakeMessagesListChatModel):
+    """Tool-capable fake that exercises the read-only Sage tool bridge."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "list_files",
+                            "args": {"path": "."},
+                            "id": "call-list-files",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(content="文件已列出"),
+            ]
+        )
+
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):  # type: ignore[no-untyped-def]
+        _ = tools, tool_choice, kwargs
+        return self
+
 
 def test_create_coding_session(tmp_path: Path) -> None:
     """POST /api/v1/coding/session creates a coding runtime session."""
@@ -160,6 +190,36 @@ def test_enabled_deerflow_profile_streams_public_answer_and_replays_history(tmp_
         messages = client.get(f"/api/v1/coding/session/{session_id}/messages").json()["messages"]
         assert [item["role"] for item in messages] == ["user", "assistant"]
         assert messages[-1]["content"] == "LangGraph 回答"
+
+
+def test_enabled_deerflow_profile_streams_read_tool_summary(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# Sage\n", encoding="utf-8")
+    app = create_app(
+        coding_model_factory=DeerflowToolFakeModel,
+        coding_workspace_root=tmp_path,
+        coding_storage_root=tmp_path / ".coding",
+        coding_deerflow_v2_enabled=True,
+    )
+    with TestClient(app) as client:
+        session_id = client.post(
+            "/api/v1/coding/session",
+            json={"runtime_profile": "deerflow_v2"},
+        ).json()["session_id"]
+        with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
+            websocket.send_json({"content": "列出文件"})
+            events: list[dict] = []
+            while True:
+                event = websocket.receive_json()
+                events.append(event)
+                if event["kind"] == "terminal":
+                    break
+
+    payloads = [event["payload"] for event in events]
+    tool_calls = [payload for payload in payloads if payload.get("type") == "tool_call"]
+    tool_results = [payload for payload in payloads if payload.get("type") == "tool_result"]
+    assert tool_calls and tool_calls[0]["tool_calls"][0]["name"] == "list_files"
+    assert tool_results and "README.md" in tool_results[0]["content"]
+    assert any(payload.get("type") == "text_delta" for payload in payloads)
 
 
 def test_create_coding_session_accepts_approval_policy(tmp_path: Path) -> None:

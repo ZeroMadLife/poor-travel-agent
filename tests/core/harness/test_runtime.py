@@ -12,6 +12,15 @@ from sage_harness.runtime.events import HarnessStreamItem
 
 from core.harness.event_adapter import HarnessEventAdapter
 from core.harness.runtime_adapter import SageHarnessRuntimeAdapter
+from core.harness.tools_adapter import build_deerflow_read_tools
+
+
+class BindableFakeMessagesListChatModel(FakeMessagesListChatModel):
+    """Small tool-capable fake for the graph adapter contract."""
+
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):  # type: ignore[no-untyped-def]
+        _ = tools, tool_choice, kwargs
+        return self
 
 
 def test_event_adapter_exposes_ai_delta_and_tool_result_without_private_state() -> None:
@@ -65,4 +74,69 @@ def test_runtime_adapter_streams_a_real_langgraph_message(tmp_path: Path) -> Non
             return [event.payload for event in events]
 
     payloads = asyncio.run(run())
+    assert any(item.get("type") == "text_delta" for item in payloads)
+
+
+def test_deerflow_tools_reuse_sage_workspace_registry(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("hello", encoding="utf-8")
+    from core.coding.runtime import CodingRuntime
+
+    runtime = CodingRuntime(
+        session_id="s1",
+        workspace_root=tmp_path,
+        model=object(),
+        storage_root=tmp_path / ".coding",
+    )
+    tools = build_deerflow_read_tools(runtime)
+    assert {tool.name for tool in tools} == {"list_files", "read_file", "search"}
+    listing = next(tool for tool in tools if tool.name == "list_files")
+    assert "README.md" in str(listing.invoke({"path": "."}))
+
+
+def test_runtime_adapter_streams_read_tool_result(tmp_path: Path) -> None:
+    async def run() -> list[dict[str, object]]:
+        async with open_sqlite_checkpointer(tmp_path / "checkpoints.sqlite3") as saver:
+            from core.coding.runtime import CodingRuntime
+
+            runtime = CodingRuntime(
+                session_id="s1",
+                workspace_root=tmp_path,
+                model=object(),
+                storage_root=tmp_path / ".coding",
+            )
+            model = BindableFakeMessagesListChatModel(
+                responses=[
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "list_files",
+                                "args": {"path": "."},
+                                "id": "call-1",
+                                "type": "tool_call",
+                            }
+                        ],
+                    ),
+                    AIMessage(content="done"),
+                ]
+            )
+            adapter = SageHarnessRuntimeAdapter(
+                model=model,
+                checkpointer=saver,
+                tools=build_deerflow_read_tools(runtime),
+            )
+            events = [
+                event
+                async for event in adapter.stream_turn(
+                    session_id="s1",
+                    run_id="r1",
+                    workspace_id="w1",
+                    workspace_path=str(tmp_path),
+                    content="list files",
+                )
+            ]
+            return [event.payload for event in events]
+
+    payloads = asyncio.run(run())
+    assert any(item.get("type") == "tool_result" for item in payloads)
     assert any(item.get("type") == "text_delta" for item in payloads)
