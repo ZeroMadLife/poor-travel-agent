@@ -141,6 +141,31 @@ describe('coding API client', () => {
     expect(response.next_cursor).toBe(9)
   })
 
+  it('accepts explicit Harness stage events in timeline replay', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        items: [{
+          event_id: 'event-harness-1', session_id: 'c1', run_id: 'run-1', sequence: 1,
+          kind: 'harness', status: 'running', timestamp: '2026-07-16T00:00:00Z',
+          payload: {
+            type: 'stage_started', definition_id: 'sage.coding.practice',
+            definition_version: 1, stage_id: 'plan',
+          },
+        }],
+        next_cursor: 1, has_more: false, older_cursor: null,
+        latest_cursor: 1, active_run: { run_id: 'run-1', status: 'running' },
+      }),
+    }))
+
+    const response = await fetchCodingTimeline('c1')
+
+    expect(response.items[0]).toMatchObject({
+      kind: 'harness',
+      payload: { type: 'stage_started', stage_id: 'plan' },
+    })
+  })
+
   it('rejects malformed or cross-session timeline envelopes', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,

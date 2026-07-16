@@ -71,6 +71,32 @@ describe('CodingStream', () => {
     expect(onEvent).toHaveBeenCalledWith('coding_1', envelope(1))
   })
 
+  it('forwards explicit Harness stage events to the timeline store', () => {
+    const socket = new FakeSocket()
+    const onEvent = vi.fn()
+    const stream = new CodingStream({
+      createSocket: () => socket,
+      onEvent,
+      onError: vi.fn(),
+    })
+    const event: CodingTimelineEvent = {
+      ...envelope(1),
+      kind: 'harness',
+      status: 'running',
+      payload: {
+        type: 'stage_started',
+        definition_id: 'sage.coding.practice',
+        definition_version: 1,
+        stage_id: 'plan',
+      },
+    }
+
+    stream.connect('coding_1', 'ws://local/stream')
+    socket.emit(event)
+
+    expect(onEvent).toHaveBeenCalledWith('coding_1', event)
+  })
+
   it('disconnect closes the active socket and prevents sending', () => {
     const sockets: FakeSocket[] = []
     const stream = new CodingStream({
