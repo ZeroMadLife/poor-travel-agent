@@ -122,6 +122,15 @@ def test_github_adapter_ignores_non_loop_open_pr(tmp_path) -> None:
     adapter.require_pr_capacity()
 
 
+def test_github_adapter_ignores_human_loop_design_pr(tmp_path) -> None:
+    adapter = FakeGitHub(
+        tmp_path,
+        [_completed('[{"number": 6, "headRefName": "codex/feat-loop-harness"}]')],
+    )
+
+    adapter.require_pr_capacity()
+
+
 def test_github_adapter_sanitizes_mentions_and_html_from_worker_text(tmp_path) -> None:
     adapter = FakeGitHub(
         tmp_path,

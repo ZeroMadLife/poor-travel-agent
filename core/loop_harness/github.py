@@ -60,7 +60,7 @@ class GitHubAdapter:
         payload = _json_list(result, "BLOCKED_GITHUB")
         if any(
             isinstance(row, dict)
-            and str(row.get("headRefName", "")).startswith("codex/loop-")
+            and _LOOP_BRANCH.fullmatch(str(row.get("headRefName", ""))) is not None
             for row in payload
         ):
             raise LoopBlockedError("SKIPPED_PR_CAPACITY", "an open Loop PR already exists")
