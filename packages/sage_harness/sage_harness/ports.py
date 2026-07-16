@@ -8,6 +8,7 @@ from typing import Literal, Protocol
 
 ToolExecutionStatus = Literal["succeeded", "failed", "rejected"]
 ApprovalAction = Literal["once", "session", "reject"]
+McpConnectionStatus = Literal["configured", "unconfigured", "connected", "error"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +93,16 @@ class MemoryReference:
     metadata: Mapping[str, object] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class McpServerReference:
+    """Sanitized MCP server metadata safe to expose to the agent runtime."""
+
+    name: str
+    transport: str
+    status: McpConnectionStatus
+    tool_names: tuple[str, ...] = ()
+
+
 class HarnessEventSink(Protocol):
     """Persist harness events before an application streams them."""
 
@@ -146,3 +157,9 @@ class MemoryPort(Protocol):
         run_id: str,
         content: str,
     ) -> str: ...
+
+
+class McpCatalogPort(Protocol):
+    """List sanitized MCP capabilities without exposing connection secrets."""
+
+    async def list_servers(self) -> Sequence[McpServerReference]: ...

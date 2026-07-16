@@ -23,6 +23,7 @@ def test_harness_is_an_independent_python_312_package() -> None:
         "langchain==1.2.15",
         "langchain-core==1.4.9",
         "langgraph==1.1.9",
+        "langgraph-checkpoint-sqlite==3.1.0",
     ]
     assert version("sage-harness") == project["version"]
     assert sage_harness.__name__ == "sage_harness"

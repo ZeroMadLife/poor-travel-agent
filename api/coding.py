@@ -13,6 +13,7 @@ from typing import Any, Literal, cast
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, WebSocket
+from sage_harness import McpCatalogPort
 from starlette.requests import HTTPConnection
 from starlette.websockets import WebSocketDisconnect
 
@@ -90,6 +91,7 @@ from core.coding.run_coordinator import ActiveRunConflictError, RunEvent
 from core.coding.runtime import CodingRuntime
 from core.harness import RuntimeProfile, normalize_runtime_profile
 from core.harness.context_adapter import build_deerflow_system_prompt, context_status_event
+from core.harness.mcp_adapter import mcp_catalog_event
 from core.harness.runtime_adapter import SageHarnessRuntimeAdapter
 from core.harness.tools_adapter import build_deerflow_coding_tools
 
@@ -157,6 +159,7 @@ async def _runtime_timeline_events(
     run_id: str,
     surface_context: Mapping[str, Any] | None,
     harness_checkpointer: Any | None = None,
+    mcp_catalog: McpCatalogPort | None = None,
 ) -> AsyncGenerator[RunEvent, None]:
     """Project a complete runtime generator into durable nonterminal events."""
     if runtime.runtime_profile == "deerflow_v2":
@@ -168,6 +171,7 @@ async def _runtime_timeline_events(
             run_id=run_id,
             surface_context=surface_context,
             checkpointer=harness_checkpointer,
+            mcp_catalog=mcp_catalog,
         ):
             yield graph_event
         return
@@ -234,6 +238,7 @@ async def _deerflow_timeline_events(
     run_id: str,
     surface_context: Mapping[str, Any] | None,
     checkpointer: Any,
+    mcp_catalog: McpCatalogPort | None,
 ) -> AsyncGenerator[RunEvent, None]:
     """Run the explicit DeerFlow-compatible graph and project public output."""
     workspace_id = workspace_id_from_path(runtime.workspace.root)
@@ -253,6 +258,12 @@ async def _deerflow_timeline_events(
     context_event = context_status_event(runtime, run_id)
     if context_event is not None:
         yield context_event
+    if mcp_catalog is not None:
+        yield await mcp_catalog_event(
+            mcp_catalog,
+            session_id=runtime.session_id,
+            run_id=run_id,
+        )
     response_parts: list[str] = []
     async for event in adapter.stream_turn(
         session_id=runtime.session_id,
@@ -721,6 +732,7 @@ async def coding_stream(websocket: WebSocket, session_id: str) -> None:
                 run_id=run_id,
                 surface_context=surface_context,
                 harness_checkpointer=getattr(websocket.app.state, "sage_harness_checkpointer", None),
+                mcp_catalog=getattr(websocket.app.state, "coding_mcp_catalog", None),
             )
             try:
                 task = await coordinator.start_run(
@@ -1307,15 +1319,11 @@ async def get_coding_skill(name: str, request: Request) -> CodingSkillDetailResp
 @router.get("/api/v1/coding/mcp/servers", response_model=CodingMcpServersResponse)
 async def list_coding_mcp_servers(request: Request) -> CodingMcpServersResponse:
     """Return MCP server config (read-only, no live connection check)."""
-    from mcp_servers.registry import build_mcp_config
-
-    config = build_mcp_config(
-        amap_api_key="",
-        qweather_api_key="",
-    )
+    catalog: McpCatalogPort = request.app.state.coding_mcp_catalog
+    configured = await catalog.list_servers()
     servers = [
-        CodingMcpServer(name=name, transport=spec.get("transport", "stdio"), status="configured")
-        for name, spec in config.items()
+        CodingMcpServer(name=server.name, transport=server.transport, status=server.status)
+        for server in configured
     ]
     return CodingMcpServersResponse(servers=servers)
 

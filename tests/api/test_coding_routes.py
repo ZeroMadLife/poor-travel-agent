@@ -241,6 +241,14 @@ def test_enabled_deerflow_profile_streams_public_answer_and_replays_history(tmp_
                     break
 
         payloads = [event["payload"] for event in events]
+        catalog = next(payload for payload in payloads if payload.get("type") == "mcp_catalog_updated")
+        assert {server["name"] for server in catalog["servers"]} == {
+            "amap",
+            "weather",
+            "scenic",
+        }
+        assert "test-amap-key" not in repr(catalog)
+        assert "test-weather-key" not in repr(catalog)
         assert any(payload.get("type") == "text_delta" for payload in payloads)
         assert any(payload.get("type") == "final" for payload in payloads)
         assert events[-1]["status"] == "completed"
