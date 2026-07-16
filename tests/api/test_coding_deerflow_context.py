@@ -191,14 +191,18 @@ def _runtime(
 class RecordingAdapter:
     runtime: ClassVar[CodingRuntime]
     durable_contexts: ClassVar[list[dict[str, object]]]
+    graph_compactions: ClassVar[list[dict[str, object]]]
 
     def __init__(self, **kwargs: Any) -> None:
         del kwargs
         type(self).durable_contexts = []
+        type(self).graph_compactions = []
 
     async def stream_turn(self, **kwargs: Any):  # type: ignore[no-untyped-def]
         assert type(self).runtime.active_run_id == kwargs["run_id"]
         type(self).durable_contexts.append(dict(kwargs["durable_context"]))
+        if kwargs.get("graph_compaction") is not None:
+            type(self).graph_compactions.append(dict(kwargs["graph_compaction"]))
         yield RunEvent(
             kind="assistant",
             status="running",
@@ -233,6 +237,12 @@ async def test_v2_compacts_before_graph_and_injects_new_summary(
     assert "continue the migrated harness" in str(
         RecordingAdapter.durable_contexts[0]["summary_text"]
     )
+    assert RecordingAdapter.graph_compactions == [
+        {
+            "compaction_id": "compact-v2",
+            "summary_text": RecordingAdapter.durable_contexts[0]["summary_text"],
+        }
+    ]
     assert runtime.session["context_state"]["checkpoint_id"] == "compact-v2"
     assert runtime.active_run_id is None
     assert runtime.context_snapshot()["context_operation_active"] is False

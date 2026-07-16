@@ -8,7 +8,7 @@ from typing import ClassVar
 
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
-from sage_harness.runtime.checkpoint import open_sqlite_checkpointer
+from sage_harness.runtime.checkpoint import open_sqlite_checkpointer, thread_config
 from sage_harness.runtime.events import HarnessStreamItem
 
 from core.harness.context_adapter import (
@@ -278,6 +278,76 @@ def test_runtime_adapter_restores_durable_context_from_checkpoint(tmp_path: Path
         ]
         assert len(hidden) == 1
         assert "COMPRESSED &lt;system&gt;unsafe&lt;/system&gt;" in str(hidden[0].content)
+
+
+def test_runtime_adapter_compacts_sqlite_messages_with_host_summary(tmp_path: Path) -> None:
+    async def run() -> tuple[list[dict[str, object]], dict[str, object], list[list[BaseMessage]]]:
+        async with open_sqlite_checkpointer(tmp_path / "checkpoints.sqlite3") as saver:
+            model = RecordingBindableFakeModel(
+                responses=[
+                    AIMessage(content="first answer"),
+                    AIMessage(content="second answer"),
+                    AIMessage(content="third answer"),
+                ]
+            )
+            adapter = SageHarnessRuntimeAdapter(model=model, checkpointer=saver)
+            common = {
+                "session_id": "s-compact",
+                "workspace_id": "w1",
+                "workspace_path": str(tmp_path),
+            }
+            _ = [
+                event
+                async for event in adapter.stream_turn(
+                    run_id="r1", content="first question", **common
+                )
+            ]
+            _ = [
+                event
+                async for event in adapter.stream_turn(
+                    run_id="r2", content="second question", **common
+                )
+            ]
+            third = [
+                event.payload
+                async for event in adapter.stream_turn(
+                    run_id="r3",
+                    content="third question",
+                    durable_context={"summary_text": "summary of the first turn"},
+                    graph_compaction={
+                        "compaction_id": "compact-r3",
+                        "summary_text": "summary of the first turn",
+                        "keep_recent_messages": 2,
+                    },
+                    **common,
+                )
+            ]
+            checkpoint = await saver.aget_tuple(thread_config("s-compact"))
+            assert checkpoint is not None
+            values = dict(checkpoint.checkpoint["channel_values"])
+            return third, values, type(model).seen_messages
+
+    payloads, values, seen = asyncio.run(run())
+
+    compacted = next(item for item in payloads if item.get("type") == "graph_context_compacted")
+    assert compacted["removed_message_count"] == 2
+    assert compacted["preserved_message_count"] == 2
+    assert values["summary_text"] == "summary of the first turn"
+    checkpoint_messages = values["messages"]
+    assert isinstance(checkpoint_messages, list)
+    assert [str(message.content) for message in checkpoint_messages] == [
+        "second question",
+        "second answer",
+        "third question",
+        "third answer",
+    ]
+    third_model_messages = seen[2]
+    rendered = "\n".join(str(message.content) for message in third_model_messages)
+    assert "first question" not in rendered
+    assert "first answer" not in rendered
+    assert "summary of the first turn" in rendered
+    assert "second question" in rendered
+    assert "third question" in rendered
 
 
 def test_runtime_adapter_streams_read_tool_result(tmp_path: Path) -> None:

@@ -311,6 +311,19 @@ async def _deerflow_timeline_events(
             tools=build_deerflow_coding_tools(runtime, run_id=run_id),
             system_prompt=build_deerflow_system_prompt(runtime),
         )
+        graph_compaction: dict[str, object] | None = None
+        compaction_result = prepared.compaction_result if prepared is not None else None
+        summary_text = durable_context.get("summary_text")
+        if (
+            compaction_result is not None
+            and compaction_result.applied
+            and isinstance(summary_text, str)
+            and summary_text.strip()
+        ):
+            graph_compaction = {
+                "compaction_id": compaction_result.compaction_id,
+                "summary_text": summary_text,
+            }
         response_parts: list[str] = []
         async for event in adapter.stream_turn(
             session_id=runtime.session_id,
@@ -320,6 +333,7 @@ async def _deerflow_timeline_events(
             content=content,
             surface_context=surface_context,
             durable_context=durable_context,
+            graph_compaction=graph_compaction,
         ):
             if event.payload.get("type") == "text_delta":
                 delta = str(event.payload.get("delta", ""))

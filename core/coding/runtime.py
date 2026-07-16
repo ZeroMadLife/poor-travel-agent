@@ -706,7 +706,7 @@ class CodingRuntime:
         if self.active_run_id is not None:
             raise ContextBusyError("active run")
         await self._acquire_context_operation()
-        if self.active_run_id is not None:
+        if self._has_active_run():
             self._context_operation_lock.release()
             raise ContextBusyError("active run")
         self.stop_requested = False
@@ -899,6 +899,10 @@ class CodingRuntime:
         if self._context_operation_lock.locked():
             raise ContextBusyError("context operation is active")
         await self._context_operation_lock.acquire()
+
+    def _has_active_run(self) -> bool:
+        """Re-read the active lease after an await without static narrowing."""
+        return self.active_run_id is not None
 
     def _active_transcript_range(self) -> tuple[int, int] | None:
         sequences = [
