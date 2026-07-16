@@ -77,4 +77,16 @@ describe('ChatHarnessLayout', () => {
     expect(wrapper.find('[data-testid="details"]').exists()).toBe(true)
     wrapper.unmount()
   })
+
+  it('lets a surface reveal mobile details without remounting the layout', async () => {
+    const wrapper = mountLayout()
+
+    ;(wrapper.vm as unknown as { selectTab: (tab: 'chat' | 'details') => void }).selectTab('details')
+    await nextTick()
+
+    expect(wrapper.attributes('data-active-tab')).toBe('details')
+    expect(wrapper.attributes('data-mobile-pane')).toBe('details')
+    expect(wrapper.find('[data-testid="canvas"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
 })

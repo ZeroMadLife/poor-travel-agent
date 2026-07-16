@@ -132,6 +132,11 @@ function handleResizeKeydown(event: KeyboardEvent) {
 }
 
 onBeforeUnmount(stopResize)
+
+defineExpose({
+  selectTab,
+  showCanvas,
+})
 </script>
 
 <template>

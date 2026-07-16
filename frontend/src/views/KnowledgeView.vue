@@ -73,6 +73,9 @@ import type {
 } from '../types/api'
 
 type WorkspaceMode = 'graph' | 'wiki' | 'activity' | 'attention'
+type ChatHarnessLayoutHandle = {
+  selectTab: (tab: 'chat' | 'details') => void
+}
 
 const summary = ref<KnowledgeWorkspaceSummary | null>(null)
 const graph = ref<KnowledgeGraph | null>(null)
@@ -106,6 +109,7 @@ const notice = ref('')
 const busy = ref<Record<string, boolean>>({})
 const importOpen = ref(false)
 const libraryOpen = ref(false)
+const harnessLayout = ref<ChatHarnessLayoutHandle | null>(null)
 const viewportWidth = ref(window.innerWidth)
 const jobsAvailable = ref(true)
 let pollTimer: ReturnType<typeof setInterval> | null = null
@@ -239,6 +243,7 @@ async function selectNode(nodeId: string | null) {
   selectedNodeId.value = nodeId
   neighborhood.value = null
   if (!nodeId) return
+  if (viewportWidth.value < 768) harnessLayout.value?.selectTab('details')
   const requestId = ++nodeRequest
   nodeLoading.value = true
   try {
@@ -617,7 +622,7 @@ onBeforeUnmount(() => {
         </button>
       </aside>
 
-      <ChatHarnessLayout class="knowledge-harness" surface-label="Knowledge">
+      <ChatHarnessLayout ref="harnessLayout" class="knowledge-harness" surface-label="Knowledge">
         <template #canvas>
           <main class="knowledge-stage">
         <header class="stage-toolbar">

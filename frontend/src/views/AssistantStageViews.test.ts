@@ -248,7 +248,21 @@ it('loads revision-bound evidence when a graph node is selected', async () => {
 
   expect(fetchKnowledgeGraphNeighborhood).toHaveBeenCalledWith('node-page')
   expect(wrapper.get('[aria-label="当前对话上下文"]').text()).toContain('Agent Harness')
+  expect(wrapper.get('.knowledge-harness').attributes('data-active-tab')).toBe('chat')
   await wrapper.findAll('.workbench-dock [role="tab"]')[1].trigger('click')
+  expect(wrapper.get('.inspector-stub').text()).toContain('Agent Harness')
+  wrapper.unmount()
+})
+
+it('opens node details after selecting a graph node on mobile', async () => {
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 })
+  const wrapper = await mountKnowledge()
+
+  await wrapper.get('.graph-stub').trigger('click')
+  await flushPromises()
+
+  expect(wrapper.get('.knowledge-harness').attributes('data-mobile-pane')).toBe('details')
+  expect(wrapper.get('.knowledge-harness').attributes('data-active-tab')).toBe('details')
   expect(wrapper.get('.inspector-stub').text()).toContain('Agent Harness')
   wrapper.unmount()
 })
