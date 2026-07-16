@@ -80,7 +80,9 @@ function formatDuration(duration?: number) {
           <span class="stage-copy">
             <strong>{{ stage.label }}</strong>
             <small v-if="stage.detail" :title="stage.detail">{{ stage.detail }}</small>
-            <small v-else-if="stage.operationRef">{{ stage.operationRef.kind }} · {{ stage.operationRef.id }}</small>
+            <small v-else-if="stage.operationRef?.kind === 'knowledge_job'">
+              {{ stage.operationRef.kind }} · {{ stage.operationRef.id }}
+            </small>
           </span>
           <span v-if="stage.visitCount > 1" class="visit-count"><RotateCcw :size="11" />{{ stage.visitCount }}</span>
           <span v-if="stage.durationMs !== undefined" class="stage-duration"><Clock3 :size="11" />{{ formatDuration(stage.durationMs) }}</span>

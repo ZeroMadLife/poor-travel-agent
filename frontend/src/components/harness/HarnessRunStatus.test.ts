@@ -51,4 +51,20 @@ describe('HarnessRunStatus', () => {
 
     expect(wrapper.get('.definition-fallback').text()).toContain('legacy.flow v7')
   })
+
+  it('does not repeat an internal coding run id in the visible stage copy', () => {
+    const wrapper = mount(HarnessRunStatus, {
+      props: {
+        projection: projection({
+          stages: [{
+            id: 'context', label: '组装上下文', status: 'completed',
+            visitCount: 1, lastSequence: 2,
+            operationRef: { kind: 'coding_run', id: 'run-internal' },
+          }],
+        }),
+      },
+    })
+
+    expect(wrapper.text()).not.toContain('run-internal')
+  })
 })
