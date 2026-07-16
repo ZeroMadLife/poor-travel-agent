@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any, cast
 
 from langchain_core.language_models import BaseChatModel
@@ -43,6 +43,7 @@ class SageHarnessRuntimeAdapter:
         workspace_path: str,
         content: str,
         surface: str = "coding",
+        surface_context: Mapping[str, Any] | None = None,
     ) -> AsyncIterator[RunEvent]:
         """Yield only public graph events; the host adds the terminal event."""
         context = HarnessRunContext(
@@ -51,6 +52,7 @@ class SageHarnessRuntimeAdapter:
             workspace_id=workspace_id,
             workspace_path=workspace_path,
             surface=surface,
+            metadata=dict(surface_context or {}),
         )
         request = HarnessRunRequest(
             thread_id=session_id,

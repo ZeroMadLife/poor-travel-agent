@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import ClassVar
 
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from sage_harness.runtime.checkpoint import open_sqlite_checkpointer
 from sage_harness.runtime.events import HarnessStreamItem
 
@@ -21,6 +22,20 @@ class BindableFakeMessagesListChatModel(FakeMessagesListChatModel):
     def bind_tools(self, tools, *, tool_choice=None, **kwargs):  # type: ignore[no-untyped-def]
         _ = tools, tool_choice, kwargs
         return self
+
+
+class RecordingBindableFakeModel(BindableFakeMessagesListChatModel):
+    """Tool-capable fake that records the graph input for checkpoint assertions."""
+
+    seen_messages: ClassVar[list[list[BaseMessage]]]
+
+    def __init__(self, responses):  # type: ignore[no-untyped-def]
+        super().__init__(responses=responses)
+        type(self).seen_messages = []
+
+    def _generate(self, messages, *args, **kwargs):  # type: ignore[no-untyped-def]
+        type(self).seen_messages.append(list(messages))
+        return super()._generate(messages, *args, **kwargs)
 
 
 def test_event_adapter_exposes_ai_delta_and_tool_result_without_private_state() -> None:
@@ -75,6 +90,42 @@ def test_runtime_adapter_streams_a_real_langgraph_message(tmp_path: Path) -> Non
 
     payloads = asyncio.run(run())
     assert any(item.get("type") == "text_delta" for item in payloads)
+
+
+def test_runtime_adapter_reuses_sqlite_checkpoint_across_turns(tmp_path: Path) -> None:
+    async def run() -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        async with open_sqlite_checkpointer(tmp_path / "checkpoints.sqlite3") as saver:
+            model = RecordingBindableFakeModel(
+                responses=[AIMessage(content="first"), AIMessage(content="second")]
+            )
+            adapter = SageHarnessRuntimeAdapter(
+                model=model,
+                checkpointer=saver,
+            )
+            common = {
+                "session_id": "s1",
+                "workspace_id": "w1",
+                "workspace_path": str(tmp_path),
+                "surface_context": {"source": "coding", "workspace_id": "w1"},
+            }
+            first = [
+                event.payload
+                async for event in adapter.stream_turn(run_id="r1", content="first", **common)
+            ]
+            second = [
+                event.payload
+                async for event in adapter.stream_turn(run_id="r2", content="second", **common)
+            ]
+            assert len(type(model).seen_messages) == 2
+            assert any(
+                getattr(message, "content", "") == "first"
+                for message in type(model).seen_messages[1]
+            )
+            return first, second
+
+    first, second = asyncio.run(run())
+    assert any(item.get("type") == "text_delta" and item.get("delta") == "first" for item in first)
+    assert any(item.get("type") == "text_delta" and item.get("delta") == "second" for item in second)
 
 
 def test_deerflow_tools_reuse_sage_workspace_registry(tmp_path: Path) -> None:

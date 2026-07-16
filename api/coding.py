@@ -255,6 +255,7 @@ async def _deerflow_timeline_events(
         workspace_id=workspace_id,
         workspace_path=str(runtime.workspace.root),
         content=content,
+        surface_context=surface_context,
     ):
         if event.payload.get("type") == "text_delta":
             delta = str(event.payload.get("delta", ""))
