@@ -21,6 +21,7 @@ def test_harness_is_an_independent_python_312_package() -> None:
     assert project["requires-python"] == ">=3.12"
     assert project["dependencies"] == [
         "langchain==1.2.15",
+        "langchain-core==1.4.9",
         "langgraph==1.1.9",
     ]
     assert version("sage-harness") == project["version"]

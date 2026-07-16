@@ -336,6 +336,8 @@ class SageThreadState(AgentState):
     memory_refs: Annotated[NotRequired[list[MemoryRef] | None], merge_memory_refs]
     approval_context: Annotated[NotRequired[ApprovalContext | None], merge_approval_context]
     summary_text: NotRequired[str | None]
+    budget_run_id: NotRequired[str]
+    run_token_usage: NotRequired[int]
 
 
 __all__ = [

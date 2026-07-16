@@ -5,6 +5,7 @@ description = "Reusable agent harness contracts for Sage"
 requires-python = ">=3.12"
 dependencies = [
     "langchain==1.2.15",
+    "langchain-core==1.4.9",
     "langgraph==1.1.9",
 ]
 

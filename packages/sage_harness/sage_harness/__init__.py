@@ -1,5 +1,7 @@
 """Reusable, application-neutral agent harness contracts."""
 
+from sage_harness.agents import create_sage_agent
+from sage_harness.config import HarnessConfig, HarnessRunContext
 from sage_harness.ports import (
     ApprovalDecision,
     ApprovalPort,
@@ -24,8 +26,10 @@ __all__ = [
     "ApprovalRequest",
     "CheckpointPort",
     "HarnessCheckpoint",
+    "HarnessConfig",
     "HarnessEvent",
     "HarnessEventSink",
+    "HarnessRunContext",
     "KnowledgeEvidence",
     "KnowledgePort",
     "MemoryPort",
@@ -34,4 +38,5 @@ __all__ = [
     "ToolCallRequest",
     "ToolExecutionPort",
     "ToolExecutionResult",
+    "create_sage_agent",
 ]
