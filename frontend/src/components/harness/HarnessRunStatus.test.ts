@@ -1,0 +1,54 @@
+import { mount } from '@vue/test-utils'
+import { describe, expect, it } from 'vitest'
+import type { HarnessProjection } from '../../harness/types'
+import HarnessRunStatus from './HarnessRunStatus.vue'
+
+function projection(overrides: Partial<HarnessProjection> = {}): HarnessProjection {
+  return {
+    definitionId: 'sage.coding.practice',
+    definitionVersion: 1,
+    definitionMissing: false,
+    runId: 'run-a',
+    status: 'running',
+    activeStageId: 'act',
+    stages: [
+      { id: 'plan', label: '规划', status: 'completed', visitCount: 2, lastSequence: 2, durationMs: 1_200 },
+      {
+        id: 'act', label: '调用工具', status: 'running', visitCount: 1, lastSequence: 3,
+        detail: 'run_shell · npm test', operationRef: { kind: 'coding_run', id: 'run-a' },
+      },
+    ],
+    transitions: [
+      { id: 'plan-act', from: 'plan', to: 'act', takenCount: 1, lastSequence: 3, active: true },
+    ],
+    visitedPath: ['plan', 'act'],
+    lastSequence: 3,
+    ...overrides,
+  }
+}
+
+describe('HarnessRunStatus', () => {
+  it('renders the active path, repeated visits, duration and tool summary', () => {
+    const wrapper = mount(HarnessRunStatus, { props: { projection: projection() } })
+
+    expect(wrapper.get('[aria-current="step"]').text()).toContain('调用工具')
+    expect(wrapper.get('[data-stage-id="plan"]').text()).toContain('1.2s')
+    expect(wrapper.get('[data-stage-id="plan"]').text()).toContain('2')
+    expect(wrapper.get('[data-stage-id="act"]').text()).toContain('run_shell · npm test')
+    expect(wrapper.get('.stage-edge').classes()).toContain('taken')
+  })
+
+  it('shows an ordered replay notice when the historical definition is missing', () => {
+    const wrapper = mount(HarnessRunStatus, {
+      props: {
+        projection: projection({
+          definitionId: 'legacy.flow',
+          definitionVersion: 7,
+          definitionMissing: true,
+        }),
+      },
+    })
+
+    expect(wrapper.get('.definition-fallback').text()).toContain('legacy.flow v7')
+  })
+})
