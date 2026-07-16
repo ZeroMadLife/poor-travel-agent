@@ -97,6 +97,7 @@ from core.harness.context_adapter import (
     context_status_event,
 )
 from core.harness.knowledge_adapter import CodingKnowledgePort
+from core.harness.local_sandbox import LocalWorkspaceSandbox
 from core.harness.mcp_adapter import mcp_catalog_event
 from core.harness.memory_adapter import CodingMemoryPort
 from core.harness.runtime_adapter import SageHarnessRuntimeAdapter
@@ -110,6 +111,12 @@ def _require_enabled_runtime_profile(value: object, request: Request) -> Runtime
     profile = normalize_runtime_profile(value)
     if profile == "deerflow_v2" and not bool(request.app.state.coding_deerflow_v2_enabled):
         raise HTTPException(status_code=422, detail="deerflow_v2 runtime profile is disabled")
+    app_env = str(getattr(request.app.state, "cloud_app_env", "development")).lower()
+    if profile == "deerflow_v2" and app_env not in {"development", "test"}:
+        raise HTTPException(
+            status_code=422,
+            detail="deerflow_v2 requires an isolated sandbox outside development/test",
+        )
     return profile
 
 
@@ -174,6 +181,7 @@ async def _runtime_timeline_events(
     surface_context: Mapping[str, Any] | None,
     harness_checkpointer: Any | None = None,
     mcp_catalog: McpCatalogPort | None = None,
+    app_env: str = "development",
 ) -> AsyncGenerator[RunEvent, None]:
     """Project a complete runtime generator into durable nonterminal events."""
     if runtime.runtime_profile == "deerflow_v2":
@@ -186,6 +194,7 @@ async def _runtime_timeline_events(
             surface_context=surface_context,
             checkpointer=harness_checkpointer,
             mcp_catalog=mcp_catalog,
+            app_env=app_env,
         ):
             yield graph_event
         return
@@ -253,6 +262,7 @@ async def _deerflow_timeline_events(
     surface_context: Mapping[str, Any] | None,
     checkpointer: Any,
     mcp_catalog: McpCatalogPort | None,
+    app_env: str = "development",
 ) -> AsyncGenerator[RunEvent, None]:
     """Run the explicit DeerFlow-compatible graph and project public output."""
     async with runtime.harness_turn(run_id):
@@ -327,48 +337,60 @@ async def _deerflow_timeline_events(
                 servers=mcp_servers,
             )
         workspace_id = workspace_id_from_path(runtime.workspace.root)
-        tool_bundle = build_deerflow_coding_tool_bundle(
-            runtime,
-            run_id=run_id,
-            knowledge_port=CodingKnowledgePort(runtime),
-            memory_port=CodingMemoryPort(runtime),
-            extra_deferred_tools=mcp_tools,
+        sandbox = LocalWorkspaceSandbox(
+            runtime.workspace,
+            thread_id=runtime.session_id,
+            app_env=app_env,
+            allow_host_shell=True,
+            allow_writes=True,
         )
-        adapter = SageHarnessRuntimeAdapter(
-            model=runtime.model,
-            checkpointer=checkpointer,
-            tools=tool_bundle.tools,
-            system_prompt=build_deerflow_system_prompt(runtime),
-            deferred_setup=tool_bundle.deferred_setup,
-        )
-        graph_compaction: dict[str, object] | None = None
-        compaction_result = prepared.compaction_result if prepared is not None else None
-        summary_text = durable_context.get("summary_text")
-        if (
-            compaction_result is not None
-            and compaction_result.applied
-            and isinstance(summary_text, str)
-            and summary_text.strip()
-        ):
-            graph_compaction = {
-                "compaction_id": compaction_result.compaction_id,
-                "summary_text": summary_text,
-            }
-        response_parts: list[str] = []
-        async for event in adapter.stream_turn(
-            session_id=runtime.session_id,
-            run_id=run_id,
-            workspace_id=workspace_id,
-            workspace_path=str(runtime.workspace.root),
-            content=content,
-            surface_context=surface_context,
-            durable_context=durable_context,
-            graph_compaction=graph_compaction,
-        ):
-            if event.payload.get("type") == "text_delta":
-                delta = str(event.payload.get("delta", ""))
-                response_parts.append(delta)
-            yield event
+        try:
+            tool_bundle = build_deerflow_coding_tool_bundle(
+                runtime,
+                run_id=run_id,
+                knowledge_port=CodingKnowledgePort(runtime),
+                memory_port=CodingMemoryPort(runtime),
+                sandbox=sandbox,
+                extra_deferred_tools=mcp_tools,
+            )
+            adapter = SageHarnessRuntimeAdapter(
+                model=runtime.model,
+                checkpointer=checkpointer,
+                tools=tool_bundle.tools,
+                system_prompt=build_deerflow_system_prompt(runtime),
+                deferred_setup=tool_bundle.deferred_setup,
+            )
+            graph_compaction: dict[str, object] | None = None
+            compaction_result = prepared.compaction_result if prepared is not None else None
+            summary_text = durable_context.get("summary_text")
+            if (
+                compaction_result is not None
+                and compaction_result.applied
+                and isinstance(summary_text, str)
+                and summary_text.strip()
+            ):
+                graph_compaction = {
+                    "compaction_id": compaction_result.compaction_id,
+                    "summary_text": summary_text,
+                }
+            response_parts: list[str] = []
+            async for event in adapter.stream_turn(
+                session_id=runtime.session_id,
+                run_id=run_id,
+                workspace_id=workspace_id,
+                workspace_path=str(runtime.workspace.root),
+                content=content,
+                surface_context=surface_context,
+                durable_context=durable_context,
+                graph_compaction=graph_compaction,
+                sandbox=sandbox.descriptor,
+            ):
+                if event.payload.get("type") == "text_delta":
+                    delta = str(event.payload.get("delta", ""))
+                    response_parts.append(delta)
+                yield event
+        finally:
+            await sandbox.aclose()
         answer = "".join(response_parts).strip()
         if not answer:
             raise RuntimeError("deerflow_v2 graph completed without a public assistant response")
@@ -842,6 +864,7 @@ async def coding_stream(websocket: WebSocket, session_id: str) -> None:
                 surface_context=surface_context,
                 harness_checkpointer=getattr(websocket.app.state, "sage_harness_checkpointer", None),
                 mcp_catalog=getattr(websocket.app.state, "coding_mcp_catalog", None),
+                app_env=str(getattr(websocket.app.state, "cloud_app_env", "development")),
             )
             try:
                 task = await coordinator.start_run(

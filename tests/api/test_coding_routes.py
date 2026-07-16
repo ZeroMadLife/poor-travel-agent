@@ -236,6 +236,25 @@ def test_enabled_deerflow_profile_is_persisted_and_resumed(tmp_path: Path) -> No
     assert app.state.coding_sessions[session_id].runtime_profile == "deerflow_v2"
 
 
+def test_deerflow_profile_refuses_host_local_sandbox_in_production(tmp_path: Path) -> None:
+    app = create_app(
+        coding_model_factory=FakeModel,
+        coding_workspace_root=tmp_path,
+        coding_storage_root=tmp_path / ".coding",
+        coding_deerflow_v2_enabled=True,
+        cloud_app_env="production",
+        cloud_repository=object(),
+    )
+
+    response = TestClient(app).post(
+        "/api/v1/coding/session",
+        json={"runtime_profile": "deerflow_v2"},
+    )
+
+    assert response.status_code == 422
+    assert "isolated sandbox" in response.json()["detail"]
+
+
 def test_enabled_deerflow_profile_streams_public_answer_and_replays_history(tmp_path: Path) -> None:
     app = create_app(
         coding_model_factory=DeerflowFakeModel,

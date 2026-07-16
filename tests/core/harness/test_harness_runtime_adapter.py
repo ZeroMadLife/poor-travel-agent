@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, Tool
 from sage_harness.runtime.checkpoint import open_sqlite_checkpointer, thread_config
 from sage_harness.runtime.events import HarnessStreamItem
 
+from core.coding.context import WorkspaceContext
 from core.coding.runtime import CodingRuntime
 from core.harness.context_adapter import (
     build_deerflow_durable_context,
@@ -21,6 +22,7 @@ from core.harness.context_adapter import (
 )
 from core.harness.event_adapter import HarnessEventAdapter
 from core.harness.knowledge_adapter import CodingKnowledgePort
+from core.harness.local_sandbox import LocalWorkspaceSandbox
 from core.harness.memory_adapter import CodingMemoryPort
 from core.harness.runtime_adapter import SageHarnessRuntimeAdapter
 from core.harness.tools_adapter import (
@@ -207,6 +209,41 @@ def test_runtime_adapter_streams_a_real_langgraph_message(tmp_path: Path) -> Non
 
     payloads = asyncio.run(run())
     assert any(item.get("type") == "text_delta" for item in payloads)
+
+
+def test_runtime_adapter_persists_scoped_sandbox_identity(tmp_path: Path) -> None:
+    async def run() -> dict[str, object]:
+        async with open_sqlite_checkpointer(tmp_path / "sandbox-checkpoints.sqlite3") as saver:
+            sandbox = LocalWorkspaceSandbox(
+                WorkspaceContext(tmp_path),
+                thread_id="s-sandbox",
+            )
+            adapter = SageHarnessRuntimeAdapter(
+                model=FakeMessagesListChatModel(responses=[AIMessage(content="ok")]),
+                checkpointer=saver,
+            )
+            _ = [
+                event
+                async for event in adapter.stream_turn(
+                    session_id="s-sandbox",
+                    run_id="r-sandbox",
+                    workspace_id=sandbox.descriptor.workspace_id,
+                    workspace_path=str(tmp_path),
+                    content="hello",
+                    sandbox=sandbox.descriptor,
+                )
+            ]
+            checkpoint = await saver.aget_tuple(thread_config("s-sandbox"))
+            assert checkpoint is not None
+            return dict(checkpoint.checkpoint["channel_values"])
+
+    state = asyncio.run(run())
+
+    sandbox_state = state["sandbox"]
+    assert isinstance(sandbox_state, dict)
+    assert set(sandbox_state) == {"sandbox_id"}
+    assert str(sandbox_state["sandbox_id"]).startswith("local:")
+    assert state["thread_data"] == {"workspace_path": str(tmp_path)}
 
 
 def test_runtime_adapter_reuses_sqlite_checkpoint_across_turns(tmp_path: Path) -> None:

@@ -12,6 +12,7 @@ from sage_harness import (
     DeferredToolSetup,
     KnowledgePort,
     MemoryPort,
+    SandboxPort,
     assemble_deferred_tools,
 )
 
@@ -38,6 +39,7 @@ def build_deerflow_coding_tools(
     run_id: str,
     knowledge_port: KnowledgePort | None = None,
     memory_port: MemoryPort | None = None,
+    sandbox: SandboxPort | None = None,
 ) -> list[BaseTool]:
     """Build the established resident tool slice without deferred discovery."""
     return list(
@@ -46,6 +48,7 @@ def build_deerflow_coding_tools(
             run_id=run_id,
             knowledge_port=knowledge_port,
             memory_port=memory_port,
+            sandbox=sandbox,
             enable_deferred_tools=False,
         ).tools
     )
@@ -57,6 +60,7 @@ def build_deerflow_coding_tool_bundle(
     run_id: str,
     knowledge_port: KnowledgePort | None = None,
     memory_port: MemoryPort | None = None,
+    sandbox: SandboxPort | None = None,
     extra_deferred_tools: Sequence[BaseTool] = (),
     enable_deferred_tools: bool = True,
 ) -> CodingToolBundle:
@@ -87,6 +91,7 @@ def build_deerflow_coding_tool_bundle(
             run_id=run_id,
             name=name,
             args_schema=definition.schema_model,
+            sandbox=sandbox,
         )
         target = (
             deferred_tools
@@ -210,6 +215,7 @@ def _build_runtime_tool(
     run_id: str,
     name: str,
     args_schema: Any,
+    sandbox: SandboxPort | None,
 ) -> BaseTool:
     registered = runtime.tools[name]
 
@@ -223,6 +229,7 @@ def _build_runtime_tool(
             session_id=runtime.session_id,
             should_stop=lambda: runtime.stop_requested,
             run_id=run_id,
+            sandbox=sandbox,
         )
         result = ""
         writer = _stream_writer()

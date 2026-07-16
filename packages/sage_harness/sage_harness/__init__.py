@@ -54,6 +54,14 @@ from sage_harness.runtime import (
     open_sqlite_checkpointer,
     thread_config,
 )
+from sage_harness.sandbox import (
+    SandboxCapabilities,
+    SandboxDescriptor,
+    SandboxOperation,
+    SandboxPolicyError,
+    SandboxPort,
+    SandboxResult,
+)
 from sage_harness.state import SageThreadState
 
 __all__ = [
@@ -93,6 +101,12 @@ __all__ = [
     "MemoryProposalReceipt",
     "MemoryReference",
     "SageThreadState",
+    "SandboxCapabilities",
+    "SandboxDescriptor",
+    "SandboxOperation",
+    "SandboxPolicyError",
+    "SandboxPort",
+    "SandboxResult",
     "ToolCallRequest",
     "ToolExecutionPort",
     "ToolExecutionResult",

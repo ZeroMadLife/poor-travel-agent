@@ -15,6 +15,7 @@ from sage_harness import (
     HarnessRunContext,
     HarnessRunManager,
     HarnessRunRequest,
+    SandboxDescriptor,
     create_sage_agent,
     load_graph_message_compaction_plan,
     render_deferred_tool_index,
@@ -80,6 +81,7 @@ class SageHarnessRuntimeAdapter:
         surface_context: Mapping[str, Any] | None = None,
         durable_context: Mapping[str, Any] | None = None,
         graph_compaction: Mapping[str, Any] | None = None,
+        sandbox: SandboxDescriptor | None = None,
     ) -> AsyncIterator[RunEvent]:
         """Yield only public graph events; the host adds the terminal event."""
         context = HarnessRunContext(
@@ -93,7 +95,16 @@ class SageHarnessRuntimeAdapter:
                 "durable_context": dict(durable_context or {}),
             },
         )
-        state_update: Mapping[str, object] = {}
+        if sandbox is not None and sandbox.workspace_id != workspace_id:
+            raise ValueError("sandbox workspace_id does not match run context")
+        state_update: dict[str, object] = {}
+        if sandbox is not None:
+            state_update.update(
+                {
+                    "thread_data": {"workspace_path": workspace_path},
+                    "sandbox": {"sandbox_id": sandbox.sandbox_id},
+                }
+            )
         compaction_event: RunEvent | None = None
         if graph_compaction is not None:
             compaction_request = GraphMessageCompactionRequest(
@@ -106,7 +117,7 @@ class SageHarnessRuntimeAdapter:
                 thread_id=session_id,
                 request=compaction_request,
             )
-            state_update = plan.state_update()
+            state_update.update(plan.state_update())
             compaction_event = RunEvent(
                 kind="context",
                 status="completed",

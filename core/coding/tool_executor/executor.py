@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
-from typing import Any
+from typing import Any, cast
+
+from sage_harness import SandboxOperation, SandboxPolicyError, SandboxPort
 
 from core.coding.context import WorkspaceContext
 from core.coding.engine.events import (
@@ -22,6 +25,11 @@ from core.coding.tool_executor.policy import ToolPolicyChecker
 from core.coding.tools.base import RegisteredTool, ToolResult
 from core.coding.tools.registry import validate_tool
 
+_SANDBOX_OPERATIONS = frozenset(
+    {"list_files", "read_file", "search", "write_file", "patch_file", "run_shell"}
+)
+logger = logging.getLogger(__name__)
+
 
 class ToolExecutor:
     """Execute one normalized tool payload and yield typed runtime events."""
@@ -36,6 +44,7 @@ class ToolExecutor:
         session_id: str = "",
         should_stop: Callable[[], bool] | None = None,
         run_id: str = "",
+        sandbox: SandboxPort | None = None,
     ) -> None:
         self.tools = tools
         self.workspace = workspace
@@ -45,6 +54,7 @@ class ToolExecutor:
         self.session_id = session_id
         self.should_stop = should_stop or (lambda: False)
         self.run_id = run_id
+        self.sandbox = sandbox
 
     async def execute(self, payload: Any) -> AsyncIterator[RunEventBase]:
         """Yield typed events for a single tool execution request."""
@@ -120,7 +130,23 @@ class ToolExecutor:
                 return
 
         yield ToolCallEvent(run_id=self.run_id, tool=name, args=args)
-        result = tool.execute(args)
+        if self.sandbox is not None and name in _SANDBOX_OPERATIONS:
+            try:
+                sandbox_result = await self.sandbox.invoke(
+                    cast(SandboxOperation, name),
+                    args,
+                )
+                result = ToolResult(
+                    content=sandbox_result.content,
+                    is_error=sandbox_result.is_error,
+                )
+            except SandboxPolicyError as exc:
+                result = ToolResult(content=str(exc), is_error=True)
+            except Exception as exc:
+                logger.warning("Sandbox operation failed (%s)", type(exc).__name__)
+                result = ToolResult(content="sandbox operation failed", is_error=True)
+        else:
+            result = tool.execute(args)
         if self.should_stop():
             yield self._cancelled_event()
             return
