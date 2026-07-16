@@ -92,6 +92,22 @@ it('degrades the graph to a searchable node list on mobile', async () => {
   wrapper.unmount()
 })
 
+it('waits for a measurable desktop container before mounting Sigma', async () => {
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 })
+  const wrapper = mount(KnowledgeGraphCanvas, {
+    props: {
+      graph, communities, selectedNodeId: null, colorMode: 'community',
+      visibleKinds: ['page', 'source'], query: '',
+    },
+  })
+
+  await flushPromises()
+  expect(wrapper.find('.graph-error').exists()).toBe(false)
+  expect(wrapper.find('.mobile-node-list').exists()).toBe(false)
+  expect(wrapper.get('.sigma-container').attributes('aria-label')).toBe('本地知识图谱')
+  wrapper.unmount()
+})
+
 it('shows revision evidence and one-hop relations in the inspector', async () => {
   const neighborhood: KnowledgeGraphNeighborhood = {
     snapshot, center: pageNode, nodes: [pageNode, sourceNode], edges: [edge],

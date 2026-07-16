@@ -24,6 +24,7 @@ const emit = defineEmits<{
   select: [nodeId: string | null]
 }>()
 
+const surface = ref<HTMLElement | null>(null)
 const container = ref<HTMLElement | null>(null)
 const mobile = ref(window.innerWidth < 680)
 const rendererError = ref('')
@@ -31,7 +32,10 @@ const themeRevision = ref(0)
 let renderer: Sigma | null = null
 let sigmaGraph: Graph | null = null
 let themeObserver: MutationObserver | null = null
+let resizeObserver: ResizeObserver | null = null
 let renderRequest = 0
+let rendererPending = false
+let rendererDirty = true
 
 const typeColors: Record<KnowledgeGraphNodeKind, string> = {
   page: '#3b82f6',
@@ -125,16 +129,22 @@ function savePositions(graph: Graph) {
   }
 }
 
-async function mountRenderer() {
-  const requestId = ++renderRequest
-  renderer?.kill()
-  renderer = null
-  sigmaGraph = null
+function hasRenderableArea() {
+  if (!container.value) return false
+  const bounds = container.value.getBoundingClientRect()
+  return bounds.width >= 2 && bounds.height >= 2
+}
+
+async function mountRenderer(requestId: number) {
   rendererError.value = ''
   if (mobile.value || !container.value) return
   await nextTick()
+  if (requestId !== renderRequest || !hasRenderableArea()) return
   const { default: SigmaRenderer } = await import('sigma')
-  if (requestId !== renderRequest || !container.value) return
+  if (requestId !== renderRequest || !container.value || !hasRenderableArea()) return
+  renderer?.kill()
+  renderer = null
+  sigmaGraph = null
   const graph = new Graph({ multi: true, type: 'undirected', allowSelfLoops: false })
   const positions = cachedPositions()
   const rootStyles = getComputedStyle(document.documentElement)
@@ -196,15 +206,44 @@ async function mountRenderer() {
     sigmaGraph = graph
     renderer.on('clickNode', ({ node }) => emit('select', node))
     renderer.on('clickStage', () => emit('select', null))
+    rendererDirty = false
   } catch (reason) {
+    rendererDirty = false
     rendererError.value = reason instanceof Error ? reason.message : '当前浏览器无法渲染图谱'
   }
 }
 
+function scheduleRenderer() {
+  if (rendererPending) return
+  const requestId = renderRequest
+  rendererPending = true
+  void mountRenderer(requestId)
+    .catch((reason: unknown) => {
+      rendererDirty = false
+      rendererError.value = reason instanceof Error ? reason.message : '当前浏览器无法渲染图谱'
+    })
+    .finally(() => {
+      rendererPending = false
+      if (rendererDirty && requestId !== renderRequest && hasRenderableArea()) {
+        scheduleRenderer()
+      }
+    })
+}
+
 function requestRenderer() {
-  void mountRenderer().catch((reason: unknown) => {
-    rendererError.value = reason instanceof Error ? reason.message : '当前浏览器无法渲染图谱'
-  })
+  renderRequest += 1
+  rendererDirty = true
+  scheduleRenderer()
+}
+
+function updateRendererSize() {
+  if (mobile.value || !hasRenderableArea()) return
+  if (!renderer || rendererDirty) {
+    scheduleRenderer()
+    return
+  }
+  renderer.resize()
+  renderer.refresh()
 }
 
 function updateSelection() {
@@ -234,9 +273,12 @@ function resetCamera() {
 
 function updateViewport() {
   const next = window.innerWidth < 680
-  if (next === mobile.value) return
-  mobile.value = next
-  requestRenderer()
+  if (next !== mobile.value) {
+    mobile.value = next
+    requestRenderer()
+    return
+  }
+  updateRendererSize()
 }
 
 watch(
@@ -254,6 +296,10 @@ watch(() => props.selectedNodeId, updateSelection)
 
 onMounted(() => {
   window.addEventListener('resize', updateViewport)
+  if (typeof ResizeObserver !== 'undefined') {
+    resizeObserver = new ResizeObserver(updateRendererSize)
+    if (surface.value) resizeObserver.observe(surface.value)
+  }
   themeObserver = new MutationObserver(() => {
     themeRevision.value += 1
   })
@@ -263,13 +309,14 @@ onMounted(() => {
 onBeforeUnmount(() => {
   renderRequest += 1
   window.removeEventListener('resize', updateViewport)
+  resizeObserver?.disconnect()
   themeObserver?.disconnect()
   renderer?.kill()
 })
 </script>
 
 <template>
-  <div class="graph-surface">
+  <div ref="surface" class="graph-surface">
     <div v-if="!mobile" ref="container" class="sigma-container" aria-label="本地知识图谱"></div>
     <div v-if="!mobile" class="graph-controls" aria-label="图谱缩放">
       <button type="button" title="放大" aria-label="放大图谱" @click="zoom('in')"><Plus :size="17" /></button>
