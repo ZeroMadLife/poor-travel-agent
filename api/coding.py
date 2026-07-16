@@ -348,6 +348,9 @@ async def _deerflow_timeline_events(
             provider=str(getattr(runtime, "sandbox_provider", "local_workspace")),
             allow_host_shell=True,
             allow_writes=True,
+            container_image=str(
+                getattr(runtime, "sandbox_image", "python:3.11-slim")
+            ),
         )
         try:
             subagent_executor = CodingSubagentExecutor(runtime)
@@ -523,6 +526,9 @@ async def create_coding_session(
         sandbox_provider=str(
             getattr(request.app.state, "coding_sandbox_provider", "local_workspace")
         ),
+        sandbox_image=str(
+            getattr(request.app.state, "coding_sandbox_image", "python:3.11-slim")
+        ),
     )
     sessions: dict[str, CodingRuntime] = request.app.state.coding_sessions
     sessions[session_id] = runtime
@@ -682,6 +688,12 @@ async def resume_coding_session(
             persisted.get(
                 "sandbox_provider",
                 getattr(request.app.state, "coding_sandbox_provider", "local_workspace"),
+            )
+        ),
+        sandbox_image=str(
+            persisted.get(
+                "sandbox_image",
+                getattr(request.app.state, "coding_sandbox_image", "python:3.11-slim"),
             )
         ),
     )

@@ -45,3 +45,20 @@ def test_resume_preserves_profile_and_rejects_a_mismatched_override(tmp_path: Pa
             storage,
             runtime_profile="legacy",
         )
+
+
+def test_resume_preserves_sandbox_provider_and_image(tmp_path: Path) -> None:
+    storage = tmp_path / ".coding"
+    CodingRuntime(
+        session_id="sandbox-session",
+        workspace_root=tmp_path,
+        model=object(),
+        storage_root=storage,
+        sandbox_provider="container",
+        sandbox_image="python:3.12-slim",
+    )
+
+    resumed = CodingRuntime.resume("sandbox-session", object(), storage)
+
+    assert resumed.sandbox_provider == "container"
+    assert resumed.sandbox_image == "python:3.12-slim"

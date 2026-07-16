@@ -7,6 +7,7 @@ from typing import Literal
 from sage_harness import SandboxPolicyError, SandboxPort
 
 from core.coding.context import WorkspaceContext
+from core.harness.container_sandbox import ContainerWorkspaceSandbox
 from core.harness.local_sandbox import LocalWorkspaceSandbox
 
 SandboxProviderName = Literal["local_workspace", "container"]
@@ -20,12 +21,13 @@ def create_coding_sandbox(
     provider: str = "local_workspace",
     allow_host_shell: bool = True,
     allow_writes: bool = True,
+    container_image: str = "python:3.11-slim",
 ) -> SandboxPort:
     """Create the configured sandbox or fail closed before graph execution.
 
     ``local_workspace`` is intentionally limited to trusted local environments.
-    ``container`` is a reserved provider until a real isolated implementation is
-    registered; it must never silently fall back to host execution.
+    ``container`` uses the server-owned Docker adapter and must never silently
+    fall back to host execution.
     """
     normalized = provider.strip().lower() or "local_workspace"
     if normalized == "local_workspace":
@@ -37,9 +39,18 @@ def create_coding_sandbox(
             allow_writes=allow_writes,
         )
     if normalized == "container":
-        raise SandboxPolicyError(
-            "container sandbox provider is not installed; refusing host fallback"
-        )
+        try:
+            return ContainerWorkspaceSandbox(
+                workspace,
+                thread_id=thread_id,
+                image=container_image,
+                allow_host_shell=allow_host_shell,
+                allow_writes=allow_writes,
+            )
+        except (ValueError, SandboxPolicyError):
+            raise
+        except Exception as exc:
+            raise SandboxPolicyError("container sandbox provider failed to initialize") from exc
     raise SandboxPolicyError(f"unknown sandbox provider: {normalized}")
 
 

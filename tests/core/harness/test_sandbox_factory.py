@@ -6,6 +6,7 @@ import pytest
 from sage_harness import SandboxPolicyError
 
 from core.coding.context import WorkspaceContext
+from core.harness.container_sandbox import ContainerWorkspaceSandbox
 from core.harness.sandbox_factory import create_coding_sandbox
 
 
@@ -19,14 +20,31 @@ def test_local_provider_is_selected_for_trusted_development(tmp_path: Path) -> N
     assert sandbox.descriptor.provider == "local_workspace"
 
 
-def test_container_provider_never_falls_back_to_host(tmp_path: Path) -> None:
-    with pytest.raises(SandboxPolicyError, match="refusing host fallback"):
-        create_coding_sandbox(
-            WorkspaceContext(tmp_path),
-            thread_id="thread-container",
-            app_env="production",
-            provider="container",
-        )
+def test_container_provider_selects_isolated_adapter(tmp_path: Path) -> None:
+    sandbox = create_coding_sandbox(
+        WorkspaceContext(tmp_path),
+        thread_id="thread-container",
+        app_env="production",
+        provider="container",
+    )
+
+    assert isinstance(sandbox, ContainerWorkspaceSandbox)
+    assert sandbox.descriptor.provider == "container"
+    assert sandbox.descriptor.capabilities.isolated is True
+    assert sandbox.descriptor.capabilities.host_access is False
+
+
+def test_container_provider_does_not_fallback_when_docker_is_missing(tmp_path: Path) -> None:
+    sandbox = ContainerWorkspaceSandbox(
+        WorkspaceContext(tmp_path),
+        thread_id="thread-container-missing",
+        docker_binary="sage-docker-does-not-exist",
+    )
+
+    with pytest.raises(SandboxPolicyError, match="docker executable"):
+        import asyncio
+
+        asyncio.run(sandbox.invoke("list_files", {"path": "."}))
 
 
 def test_unknown_provider_fails_closed(tmp_path: Path) -> None:

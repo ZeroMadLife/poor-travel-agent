@@ -172,6 +172,7 @@ def create_app(
     coding_checkpoint_anchor_key: bytes | None = None,
     coding_deerflow_v2_enabled: bool | None = None,
     coding_sandbox_provider: str | None = None,
+    coding_sandbox_image: str | None = None,
     coding_mcp_live_enabled: bool | None = None,
     coding_mcp_catalog: McpCatalogPort | None = None,
     cloud_repository: CloudRepository | None = None,
@@ -352,6 +353,11 @@ def create_app(
         os.getenv("SAGE_CODING_SANDBOX_PROVIDER", "local_workspace")
         if coding_sandbox_provider is None
         else coding_sandbox_provider
+    )
+    app.state.coding_sandbox_image = (
+        os.getenv("SAGE_CODING_SANDBOX_IMAGE", "python:3.11-slim")
+        if coding_sandbox_image is None
+        else coding_sandbox_image
     )
     app.state.sage_harness_checkpointer = None
     app.state.coding_mcp_live_enabled = (
