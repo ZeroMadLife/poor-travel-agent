@@ -498,6 +498,7 @@ Vue 继续使用：
 - DeerFlow 方向标所需的 `create_agent`、`AgentMiddleware`、`ModelRequest/ModelResponse`、`Command/interrupt` 与 `ToolCallRequest` 也能在同一基线上导入。
 - 移除遗留 Mem0 固定版本后，Python 3.12 + LangChain/LangGraph 1.x + Sage 其余核心依赖能够完成一套无冲突解析；这只是依赖可解证明，不替代全量行为测试。
 - 唯一确定性的解析阻断是 `mem0ai==0.1.50` 要求 `openai<2`，而 `langchain-openai==1.2.1` 要求 `openai>=2.26,<3`。
+- 干净核心环境中现有 Agent、Provider、Coding Engine、Coding API 的 720 个定向测试全部通过；补齐 SQLAlchemy async 所需的显式 `greenlet==3.5.3`，并仅为现有遗留 Mem0 factory 测试临时安装 Qdrant 后，后端全量结果为 1176 passed。
 
 `mem0ai==2.0.12` 虽然能与 OpenAI 2.x 共存，但不是无行为变化升级：其 `search()` 契约已经从顶层 `user_id`/`limit` 转为 `filters.user_id`/`top_k`，Sage 现有 `LongTermMemory` 不能原样复用。因此 Wave 0 采用以下边界：
 
@@ -506,6 +507,8 @@ Vue 继续使用：
 3. Wave 0 不假装完成 Mem0 2.x 迁移；若后续仍保留旧旅行 Agent 记忆演示，必须单独实现 2.x adapter 并通过真实 Qdrant/embedding smoke test。
 4. Harness 的长期记忆主线继续以 Sage Durable Memory、proposal/approval 和 Knowledge citation 为准，不让遗留 SDK 成为核心升级阻塞项。
 5. 依赖升级提交必须使用干净 Python 3.12 环境重新安装，不能从已混装的本机 Conda 环境推断兼容性。
+6. `greenlet` 作为 SQLAlchemy async 的运行依赖显式固定；不得继续依赖 Mem0 或其他无关包偶然传递安装。
+7. `qdrant_client` 当前仍在 `mem0_factory.py` 顶层强制导入，Wave 0 必须改为真正的可选导入，否则“核心安装不含 legacy memory”无法启动该模块。
 
 ## 16. 实施波次
 
