@@ -24,6 +24,7 @@ from api.cloud_model_context import (
     combined_reasoning_modes,
     load_account_model_context,
 )
+from api.harness_context import SurfaceContextValidationError, validate_surface_context
 from api.schemas import (
     CodingActiveRun,
     CodingApprovalRespondRequest,
@@ -74,6 +75,7 @@ from api.schemas import (
 )
 from core.cloud.auth.repository import CloudRepository
 from core.coding.context import ContextBusyError
+from core.coding.memory import workspace_id_from_path
 from core.coding.persistence import (
     CodingSessionStore,
     MemoryConflictError,
@@ -283,6 +285,7 @@ async def create_coding_session(
     return CodingSessionResponse(
         session_id=session_id,
         workspace_root=str(workspace_root.resolve()),
+        workspace_id=workspace_id_from_path(workspace_root),
         permission_mode=runtime.permission_mode,
     )
 
@@ -369,6 +372,7 @@ async def resume_coding_session(
         return CodingSessionResponse(
             session_id=session_id,
             workspace_root=str(active_runtime.workspace.root.resolve()),
+            workspace_id=workspace_id_from_path(active_runtime.workspace.root),
             permission_mode=active_runtime.permission_mode,
         )
     account = await load_account_model_context(request, include_credentials=True)
@@ -410,6 +414,7 @@ async def resume_coding_session(
     return CodingSessionResponse(
         session_id=session_id,
         workspace_root=str(persisted_workspace),
+        workspace_id=workspace_id_from_path(persisted_workspace),
         permission_mode=runtime.permission_mode,
     )
 
@@ -562,6 +567,28 @@ async def coding_stream(websocket: WebSocket, session_id: str) -> None:
                 )
                 continue
             content = message.content
+            surface_context: dict[str, Any] | None = None
+            if message.surface_context is not None:
+                try:
+                    canonical_context = await validate_surface_context(
+                        message.surface_context,
+                        runtime=runtime,
+                        knowledge_store=getattr(websocket.app.state, "knowledge_store", None),
+                        knowledge_job_service=getattr(
+                            websocket.app.state, "knowledge_job_service", None
+                        ),
+                        app_env=str(
+                            getattr(websocket.app.state, "cloud_app_env", "development")
+                        ),
+                    )
+                except SurfaceContextValidationError as exc:
+                    await _start_rejected_input_run(
+                        coordinator,
+                        message=f"Invalid surface context: {exc}",
+                        content=content,
+                    )
+                    continue
+                surface_context = canonical_context.model_dump(mode="json", exclude_none=True)
             expanded, command, args = runtime.resolve_slash(content)
             if command and not expanded:
                 await _start_rejected_input_run(
@@ -580,7 +607,11 @@ async def coding_stream(websocket: WebSocket, session_id: str) -> None:
                 run_id=run_id,
             )
             try:
-                task = await coordinator.start_run(run_id, stream)
+                task = await coordinator.start_run(
+                    run_id,
+                    stream,
+                    surface_context=surface_context,
+                )
                 task.add_done_callback(_observe_server_task)
             except ActiveRunConflictError:
                 await stream.aclose()

@@ -359,18 +359,26 @@ class SessionEventJournal:
                 raise
 
     def begin_run(
-        self, run_id: str, *, owner_id: str = "legacy", owner_pid: int = -1
+        self,
+        run_id: str,
+        *,
+        owner_id: str = "legacy",
+        owner_pid: int = -1,
+        surface_context: Mapping[str, Any] | None = None,
     ) -> BeginRunResult:
         """Acquire the singleton lease and persist run_started atomically."""
         validated_run = _validate_identifier("run_id", run_id)
         validated_owner = _validate_identifier("owner_id", owner_id)
         owner_process_start = _owner_process_start(owner_pid)
         acquired_at = datetime.now(UTC).isoformat()
+        payload: dict[str, Any] = {"event": "run_started"}
+        if surface_context is not None:
+            payload["surface_context"] = dict(surface_context)
         values = _validated_event_input(
             run_id=validated_run,
             kind="system",
             status="running",
-            payload={"event": "run_started"},
+            payload=payload,
             event_id=None,
             timestamp=acquired_at,
         )

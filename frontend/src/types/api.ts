@@ -112,6 +112,7 @@ export type ChatStartResponse = {
 export type CodingSessionResponse = {
   session_id: string
   workspace_root: string
+  workspace_id: string
   permission_mode: PermissionMode
 }
 

@@ -32,6 +32,7 @@ class CodingSessionResponse(BaseModel):
 
     session_id: str
     workspace_root: str
+    workspace_id: str
     permission_mode: Literal["default", "accept_edits", "auto", "plan"] = "default"
 
 
@@ -1472,10 +1473,55 @@ class ItineraryListResponse(BaseModel):
     itineraries: list[HistoryItinerary]
 
 
+class HarnessOperationRef(BaseModel):
+    """A bounded reference to a canonical operation owned by another store."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["knowledge_job", "coding_run"]
+    id: str = Field(min_length=1, max_length=128)
+
+
+class HarnessResourceContext(BaseModel):
+    """The stable resource bound to one submitted turn."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    type: Literal["knowledge_page", "knowledge_source", "coding_workspace"]
+    id: str = Field(min_length=1, max_length=512)
+    revision: str | None = Field(default=None, min_length=1, max_length=256)
+    label: str | None = Field(default=None, min_length=1, max_length=256)
+
+
+class HarnessSelectionContext(BaseModel):
+    """The stable selection inside a bound Harness resource."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    type: Literal["graph_node", "knowledge_page", "knowledge_source", "coding_file"]
+    id: str = Field(min_length=1, max_length=1024)
+    revision: str | None = Field(default=None, min_length=1, max_length=256)
+    label: str | None = Field(default=None, min_length=1, max_length=256)
+
+
+class HarnessSurfaceContext(BaseModel):
+    """Client-proposed context that must be canonicalized before a run starts."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    surface: Literal["growth", "knowledge", "coding"]
+    workspace_id: str = Field(min_length=1, max_length=128)
+    resource: HarnessResourceContext | None = None
+    selection: HarnessSelectionContext | None = None
+    graph_revision: str | None = Field(default=None, min_length=1, max_length=256)
+    operation_refs: list[HarnessOperationRef] = Field(default_factory=list, max_length=20)
+
+
 class UserMessage(BaseModel):
     """用户通过 WebSocket 发送的消息。"""
 
     content: str = Field(min_length=1, description="用户消息内容")
+    surface_context: HarnessSurfaceContext | None = None
 
 
 class ProgressEvent(BaseModel):

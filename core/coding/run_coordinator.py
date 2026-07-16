@@ -7,6 +7,7 @@ import os
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from contextlib import suppress
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -75,14 +76,21 @@ class RunCoordinator:
         self,
         run_id: str,
         event_stream: AsyncIterator[RunEvent | Mapping[str, Any]],
+        *,
+        surface_context: Mapping[str, Any] | None = None,
     ) -> asyncio.Task[None]:
         """Start consuming an event stream as the session's active run."""
+        frozen_surface_context = (
+            deepcopy(dict(surface_context)) if surface_context is not None else None
+        )
         async with self._state_lock:
             if self._active_run_id is not None:
                 raise ActiveRunConflictError(
                     f"session already has active run {self._active_run_id}"
                 )
-            begin_task = asyncio.create_task(self._begin_run(run_id))
+            begin_task = asyncio.create_task(
+                self._begin_run(run_id, surface_context=frozen_surface_context)
+            )
             try:
                 await asyncio.shield(begin_task)
             except asyncio.CancelledError:
@@ -123,14 +131,20 @@ class RunCoordinator:
             self._active_task = task
             return task
 
-    async def _begin_run(self, run_id: str) -> BeginRunResult:
+    async def _begin_run(
+        self,
+        run_id: str,
+        *,
+        surface_context: Mapping[str, Any] | None = None,
+    ) -> BeginRunResult:
         async with self._publish_lock:
-            stored = await asyncio.to_thread(
-                self.journal.begin_run,
-                run_id,
-                owner_id=self.owner_id,
-                owner_pid=self.owner_pid,
-            )
+            kwargs: dict[str, Any] = {
+                "owner_id": self.owner_id,
+                "owner_pid": self.owner_pid,
+            }
+            if surface_context is not None:
+                kwargs["surface_context"] = surface_context
+            stored = await asyncio.to_thread(self.journal.begin_run, run_id, **kwargs)
             self._broadcast(stored.event)
             return stored
 
