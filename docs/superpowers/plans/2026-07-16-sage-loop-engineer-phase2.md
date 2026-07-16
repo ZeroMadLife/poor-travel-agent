@@ -2,7 +2,7 @@
 
 > 日期：2026-07-16
 >
-> 状态：已确认设计，待执行
+> 状态：执行中；`SHADOW_WRITE` 基线已交付，PR canary 待执行
 >
 > 设计依据：`docs/superpowers/specs/2026-07-16-sage-loop-engineer-phase2-design.md`
 
@@ -11,6 +11,13 @@
 在不改变当前 Phase 1 默认行为的前提下，实现 Codex 扫描、受控前端修复、确定性验证、
 中文 Draft PR、cc-connect Claude 独立审查、去重报告和分阶段自动合并。每个任务完成后
 保持 `DRY_RUN` 可回退，直到 shadow 和 canary 门禁通过。
+
+## 当前进度（2026-07-16）
+
+- 已完成小版本 1-3：mode/SQLite 迁移、dirty path 避让、Scanner/Fixer、diff policy；
+- 小版本 4 已完成固定 Vitest/build 验证与 quota 证据，前后截图仍待补；
+- 小版本 5-8 尚未实施，当前不会 push、创建 PR、启动 Claude 或自动合并；
+- 实现分支为 `codex/loop-phase2`，基于 Phase 1 PR head 叠加，未修改根目录用户工作。
 
 ## 实施原则
 

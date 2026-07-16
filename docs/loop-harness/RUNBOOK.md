@@ -9,6 +9,9 @@ sage-loopctl run
 sage-loopctl digest
 sage-loopctl pause
 sage-loopctl enable --dry-run
+
+# Phase 2 shadow：允许隔离 worktree 生成未提交前端 diff，不会 push/提 PR/合并
+sage-loopctl enable --shadow-write
 sage-loopctl cleanup
 ```
 
@@ -29,7 +32,8 @@ sage-loopctl cleanup
 - `BLOCKED_ROOT_DIRTY`：完成或移动根目录人工改动，不得由 Harness stash/reset/clean。
 - `PAUSED_POLICY_DRIFT`：人工审查策略相关 commit 后重新执行 `install --refresh-manifest`。
 - `BLOCKED_CODEX`：检查受控 Codex 二进制路径和认证，不在日志输出凭据。
-- 连续同类基础设施错误 3 次会自动暂停；修复后手动 `enable --dry-run`。
+- 连续同类基础设施错误 3 次会自动暂停；修复后手动选择 `enable --dry-run` 或
+  `enable --shadow-write`。Phase 2 shadow 仍不会产生远程副作用。
 
 ## 磁盘与卸载
 

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import difflib
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from core.loop_harness.errors import LoopBlockedError
+from core.loop_harness.models import DiffSnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,6 +18,7 @@ class RootStatus:
     branch: str
     head_sha: str
     dirty: bool
+    dirty_paths: tuple[str, ...] = ()
 
 
 class GitController:
@@ -26,10 +30,21 @@ class GitController:
     def root_status(self) -> RootStatus:
         branch = self._run("symbolic-ref", "--quiet", "--short", "HEAD").stdout.strip()
         head_sha = self._run("rev-parse", "HEAD").stdout.strip()
-        dirty = bool(self._run("status", "--porcelain=v1", "--untracked-files=all").stdout.strip())
-        return RootStatus(branch=branch, head_sha=head_sha, dirty=dirty)
+        payload = self._run(
+            "status", "--porcelain=v1", "-z", "--untracked-files=all"
+        ).stdout
+        dirty_paths = _porcelain_paths(payload)
+        return RootStatus(
+            branch=branch,
+            head_sha=head_sha,
+            dirty=bool(dirty_paths),
+            dirty_paths=dirty_paths,
+        )
 
     def require_clean_integration_root(self) -> RootStatus:
+        return self.require_integration_root(allow_dirty=False)
+
+    def require_integration_root(self, *, allow_dirty: bool) -> RootStatus:
         try:
             status = self.root_status()
         except RuntimeError as exc:
@@ -39,7 +54,7 @@ class GitController:
                 "BLOCKED_ROOT_BRANCH",
                 f"integration root is on {status.branch}, expected {self.target_branch}",
             )
-        if status.dirty:
+        if status.dirty and not allow_dirty:
             raise LoopBlockedError(
                 "BLOCKED_ROOT_DIRTY", "integration root has uncommitted or untracked files"
             )
@@ -69,6 +84,20 @@ class GitController:
             code = "BLOCKED_ROOT_DIVERGED"
         raise LoopBlockedError(code, "integration root does not exactly match remote target")
 
+    def human_change_paths(self, status: RootStatus, remote_sha: str) -> tuple[str, ...]:
+        paths = set(status.dirty_paths)
+        if status.head_sha == remote_sha or self._is_ancestor(status.head_sha, remote_sha):
+            return tuple(sorted(paths))
+        if self._is_ancestor(remote_sha, status.head_sha):
+            comparison = f"{remote_sha}..{status.head_sha}"
+        else:
+            comparison = f"{remote_sha}...{status.head_sha}"
+        payload = self._run("diff", "--name-only", "-z", comparison, "--").stdout
+        paths.update(
+            PurePosixPath(path).as_posix() for path in payload.split("\0") if path
+        )
+        return tuple(sorted(paths))
+
     def create_detached_worktree(self, destination: Path, base_sha: str) -> None:
         if destination.exists():
             raise LoopBlockedError("BLOCKED_WORKTREE_EXISTS", "run worktree already exists")
@@ -76,19 +105,127 @@ class GitController:
         self._run("worktree", "add", "--detach", str(destination), base_sha, timeout=120)
 
     def remove_clean_worktree(self, destination: Path) -> None:
+        self.remove_managed_worktree(destination, discard_changes=False)
+
+    def diff_snapshot(self, worktree: Path, *, base_sha: str) -> DiffSnapshot:
+        head_sha = self._run_at(worktree, "rev-parse", "HEAD").stdout.strip()
+        if head_sha != base_sha:
+            raise LoopBlockedError("BLOCKED_WORKER_COMMIT", "Worker changed worktree HEAD")
+        status_payload = self._run_at(
+            worktree, "status", "--porcelain=v1", "-z", "--untracked-files=all"
+        ).stdout
+        changed_files = _porcelain_paths(status_payload)
+        numstat = self._run_at(worktree, "diff", "--numstat", "HEAD", "--").stdout
+        additions = 0
+        deletions = 0
+        binary_files: list[str] = []
+        tracked_paths: set[str] = set()
+        for line in numstat.splitlines():
+            parts = line.split("\t", 2)
+            if len(parts) != 3:
+                raise LoopBlockedError("BLOCKED_DIFF", "Git numstat output is malformed")
+            added, deleted, path = parts
+            tracked_paths.add(path)
+            if added == "-" or deleted == "-":
+                binary_files.append(path)
+                continue
+            additions += int(added)
+            deletions += int(deleted)
+
+        symlink_files: list[str] = []
+        deleted_files: list[str] = []
+        behavior_changed = False
+        for relative in changed_files:
+            file_path = worktree / relative
+            if file_path.is_symlink():
+                symlink_files.append(relative)
+            if not file_path.exists() and not file_path.is_symlink():
+                deleted_files.append(relative)
+            if relative not in tracked_paths and file_path.is_file() and not file_path.is_symlink():
+                payload = file_path.read_bytes()
+                if b"\0" in payload:
+                    binary_files.append(relative)
+                else:
+                    additions += len(payload.splitlines())
+            if relative.endswith(".vue") and relative.startswith(
+                ("frontend/src/components/", "frontend/src/views/")
+            ):
+                before = self._blob_at(base_sha, relative)
+                after = (
+                    file_path.read_bytes()
+                    if file_path.is_file() and not file_path.is_symlink()
+                    else b""
+                )
+                if _vue_behavior_signature(before) != _vue_behavior_signature(after):
+                    behavior_changed = True
+
+        return DiffSnapshot(
+            changed_files=changed_files,
+            additions=additions,
+            deletions=deletions,
+            binary_files=tuple(sorted(dict.fromkeys(binary_files))),
+            symlink_files=tuple(sorted(symlink_files)),
+            behavior_changed=behavior_changed,
+            deleted_files=tuple(sorted(deleted_files)),
+        )
+
+    def diff_patch(self, worktree: Path, *, base_sha: str) -> str:
+        head_sha = self._run_at(worktree, "rev-parse", "HEAD").stdout.strip()
+        if head_sha != base_sha:
+            raise LoopBlockedError("BLOCKED_WORKER_COMMIT", "Worker changed worktree HEAD")
+        tracked = self._run_at(
+            worktree, "diff", "--no-ext-diff", "--unified=3", "HEAD", "--"
+        ).stdout
+        untracked_payload = self._run_at(
+            worktree, "ls-files", "--others", "--exclude-standard", "-z"
+        ).stdout
+        parts = [tracked]
+        for relative in sorted(path for path in untracked_payload.split("\0") if path):
+            file_path = worktree / relative
+            try:
+                content = file_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise LoopBlockedError(
+                    "BLOCKED_DIFF", "untracked candidate file is not UTF-8 text"
+                ) from exc
+            generated = difflib.unified_diff(
+                [],
+                content.splitlines(),
+                fromfile="/dev/null",
+                tofile=f"b/{relative}",
+                lineterm="",
+            )
+            parts.append("\n".join(generated) + "\n")
+        return "".join(parts)
+
+    def remove_managed_worktree(self, destination: Path, *, discard_changes: bool) -> None:
         if not destination.exists():
             return
+        resolved = destination.resolve()
+        if resolved == self.repo_root.resolve():
+            raise LoopBlockedError("BLOCKED_WORKTREE_CLEANUP", "refusing to remove repository root")
+        top_level = Path(
+            self._run_at(destination, "rev-parse", "--show-toplevel").stdout.strip()
+        ).resolve()
+        if top_level != resolved:
+            raise LoopBlockedError(
+                "BLOCKED_WORKTREE_CLEANUP", "cleanup target is not a managed worktree root"
+            )
         result = self._run_at(
             destination,
             "status",
             "--porcelain=v1",
             "--untracked-files=all",
         )
-        if result.stdout.strip():
+        if result.stdout.strip() and not discard_changes:
             raise LoopBlockedError(
                 "BLOCKED_WORKTREE_DIRTY", "worker worktree contains unexpected changes"
             )
-        self._run("worktree", "remove", str(destination), timeout=120)
+        arguments = ["worktree", "remove"]
+        if discard_changes:
+            arguments.append("--force")
+        arguments.append(str(destination))
+        self._run(*arguments, timeout=120)
         if destination.exists():
             raise LoopBlockedError(
                 "BLOCKED_WORKTREE_CLEANUP", "Git did not remove the run worktree"
@@ -96,6 +233,20 @@ class GitController:
 
     def prune_missing_worktrees(self) -> None:
         self._run("worktree", "prune", "--expire", "now")
+
+    def _blob_at(self, sha: str, path: str) -> bytes:
+        result = subprocess.run(
+            ["git", "show", f"{sha}:{path}"],
+            cwd=self.repo_root,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            return result.stdout
+        if result.returncode == 128:
+            return b""
+        raise LoopBlockedError("BLOCKED_GIT", "could not read base file for diff policy")
 
     def _is_ancestor(self, older: str, newer: str) -> bool:
         result = subprocess.run(
@@ -128,3 +279,57 @@ class GitController:
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or "Git command failed")
         return result
+
+
+def _porcelain_paths(payload: str) -> tuple[str, ...]:
+    tokens = payload.split("\0")
+    paths: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        if not token:
+            continue
+        if len(token) < 4 or token[2] != " ":
+            raise RuntimeError("Git status output is malformed")
+        status = token[:2]
+        paths.append(PurePosixPath(token[3:]).as_posix())
+        if any(marker in status for marker in ("R", "C")):
+            if index >= len(tokens) or not tokens[index]:
+                raise RuntimeError("Git rename status is malformed")
+            paths.append(PurePosixPath(tokens[index]).as_posix())
+            index += 1
+    return tuple(sorted(dict.fromkeys(paths)))
+
+
+_SCRIPT_PATTERN = re.compile(rb"<script\b[^>]*>(.*?)</script\s*>", re.IGNORECASE | re.DOTALL)
+_TEMPLATE_PATTERN = re.compile(
+    rb"<template\b[^>]*>(.*?)</template\s*>", re.IGNORECASE | re.DOTALL
+)
+_TAG_PATTERN = re.compile(rb"<\s*(/?)\s*([A-Za-z][\w.-]*)([^>]*)>", re.DOTALL)
+_ATTRIBUTE_PATTERN = re.compile(
+    rb"([:@#]?[A-Za-z_][\w:.-]*)(?:\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+)))?"
+)
+_INTERPOLATION_PATTERN = re.compile(rb"{{(.*?)}}", re.DOTALL)
+_VISUAL_ATTRIBUTES = {b"class", b"style", b"title"}
+
+
+def _vue_script(payload: bytes) -> tuple[bytes, ...]:
+    return tuple(match.strip() for match in _SCRIPT_PATTERN.findall(payload))
+
+
+def _vue_behavior_signature(payload: bytes) -> tuple[bytes, ...]:
+    signature: list[bytes] = [b"script:" + block for block in _vue_script(payload)]
+    for template in _TEMPLATE_PATTERN.findall(payload):
+        signature.extend(b"expr:" + item.strip() for item in _INTERPOLATION_PATTERN.findall(template))
+        for closing, tag, attributes in _TAG_PATTERN.findall(template):
+            signature.append(b"tag:" + closing + tag.lower())
+            if closing:
+                continue
+            for match in _ATTRIBUTE_PATTERN.finditer(attributes):
+                name = match.group(1).lower()
+                if name in _VISUAL_ATTRIBUTES or name.startswith((b"aria-", b"data-")):
+                    continue
+                value = next((group for group in match.groups()[1:] if group is not None), b"")
+                signature.append(b"attr:" + name + b"=" + value.strip())
+    return tuple(signature)

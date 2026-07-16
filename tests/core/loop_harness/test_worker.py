@@ -5,7 +5,7 @@ import json
 import pytest
 
 from core.loop_harness.errors import LoopBlockedError
-from core.loop_harness.worker import CodexWorker
+from core.loop_harness.worker import CodexFixer, CodexWorker
 
 
 def _fake_codex(tmp_path, payload: object):
@@ -120,3 +120,74 @@ def test_worker_rejects_out_of_range_confidence(tmp_path) -> None:
             scan_scope=("core",),
             protected_paths_digest="b" * 64,
         )
+
+
+def test_scanner_accepts_frontend_candidate(tmp_path) -> None:
+    payload = _valid_payload()
+    payload.update(
+        verdict="FRONTEND_CANDIDATE",
+        changed_files=["frontend/src/views/KnowledgeView.vue"],
+        suggested_tier="A",
+    )
+    controller = tmp_path / "controller"
+    (controller / "docs/loop-harness").mkdir(parents=True)
+    (controller / "core/loop_harness").mkdir(parents=True)
+    (controller / "docs/loop-harness/PROMPT.md").write_text("rules", encoding="utf-8")
+    (controller / "core/loop_harness/worker_result.schema.json").write_text(
+        "{}", encoding="utf-8"
+    )
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    worker = CodexWorker(
+        codex_bin=_fake_codex(tmp_path, payload),
+        controller_root=controller,
+        reports_root=tmp_path / "reports",
+        timeout_seconds=10,
+    )
+
+    result = worker.run(
+        worktree=worktree,
+        run_id="loop-test",
+        base_sha="a" * 40,
+        scan_scope=("frontend/src",),
+        protected_paths_digest="b" * 64,
+        phase="SHADOW_SCAN",
+    )
+
+    assert result.verdict == "FRONTEND_CANDIDATE"
+
+
+def test_fixer_uses_workspace_write_and_parses_separate_schema(tmp_path) -> None:
+    payload = {
+        "summary": "修复知识库空状态间距",
+        "changed_files": ["frontend/src/views/KnowledgeView.vue"],
+        "tests": ["npm run test -- --run"],
+        "risk_reasons": [],
+    }
+    controller = tmp_path / "controller"
+    (controller / "docs/loop-harness").mkdir(parents=True)
+    (controller / "core/loop_harness").mkdir(parents=True)
+    (controller / "docs/loop-harness/PROMPT.md").write_text("rules", encoding="utf-8")
+    (controller / "core/loop_harness/fixer_result.schema.json").write_text(
+        "{}", encoding="utf-8"
+    )
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    fixer = CodexFixer(
+        codex_bin=_fake_codex(tmp_path, payload),
+        controller_root=controller,
+        reports_root=tmp_path / "reports",
+        timeout_seconds=10,
+    )
+
+    result = fixer.run(
+        worktree=worktree,
+        run_id="loop-test",
+        base_sha="a" * 40,
+        allowed_paths=("frontend/src/views/KnowledgeView.vue",),
+        dirty_paths=("frontend/src/views/HumanView.vue",),
+        protected_paths_digest="b" * 64,
+    )
+
+    assert result.changed_files == ("frontend/src/views/KnowledgeView.vue",)
+    assert result.summary == "修复知识库空状态间距"

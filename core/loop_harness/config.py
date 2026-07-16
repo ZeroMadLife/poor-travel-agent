@@ -22,7 +22,9 @@ class LoopConfig:
     target_branch: str = "dev/sage-v7"
     remote: str = "origin"
     lease_seconds: int = 90 * 60
-    run_timeout_seconds: int = 40 * 60
+    run_timeout_seconds: int = 55 * 60
+    scanner_timeout_seconds: int = 10 * 60
+    fixer_timeout_seconds: int = 15 * 60
     minimum_free_bytes: int = 2 * 1024 * 1024 * 1024
 
     @property
@@ -85,6 +87,10 @@ class LoopConfig:
             raise LoopConfigError("unsupported target branch")
         if self.remote != "origin":
             raise LoopConfigError("unsupported Git remote")
+        if self.scanner_timeout_seconds < 1 or self.fixer_timeout_seconds < 1:
+            raise LoopConfigError("Worker timeouts must be positive")
+        if self.scanner_timeout_seconds + self.fixer_timeout_seconds > self.run_timeout_seconds:
+            raise LoopConfigError("Worker timeouts exceed the run budget")
         if _contains(self.repo_root, self.state_root) or _contains(
             self.controller_root, self.state_root
         ):

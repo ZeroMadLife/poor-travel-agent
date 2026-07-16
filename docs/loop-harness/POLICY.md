@@ -1,9 +1,13 @@
-# Loop Policy 1.0
+# Loop Policy 2.0 Shadow
 
 ## 当前权限
 
-Phase 1 仅允许只读扫描、记录 `NO_OP/REPORT/BLOCKED`、维护本机 SQLite 状态和发送短
-摘要。代码修改、commit、push、PR 和 auto-merge 全部关闭。
+默认 Phase 1 仅允许只读扫描、记录 `NO_OP/REPORT/BLOCKED`、维护本机 SQLite 状态和发送
+短摘要。显式启用 Phase 2 `SHADOW_WRITE` 后，才允许受控前端 Fixer 在临时 worktree 生成
+未提交 diff；commit、push、PR、Claude 审查和 auto-merge 仍全部关闭。
+
+Phase 2 `SHADOW_WRITE` 只允许局部前端候选。Controller 根据真实 diff 判定 Tier A/B/C；
+Tier A/B 仍只记录本机 shadow 证据，后端、共享契约和大范围问题只生成中文报告。
 
 ## 对外输出语言
 

@@ -14,7 +14,7 @@
     "confidence"
   ],
   "properties": {
-    "verdict": {"enum": ["NO_OP", "FIX", "REPORT", "BLOCKED"]},
+    "verdict": {"enum": ["NO_OP", "FIX", "FRONTEND_CANDIDATE", "REPORT", "BLOCKED"]},
     "summary": {"type": "string", "minLength": 1, "maxLength": 500},
     "evidence": {"type": "array", "maxItems": 10, "items": {"type": "string", "maxLength": 500}},
     "reproduction": {"type": "array", "maxItems": 10, "items": {"type": "string", "maxLength": 500}},

@@ -1,6 +1,6 @@
 # Loop Review
 
-当前 Phase 1 不创建 PR。进入后续 canary 时按以下顺序审查：
+当前 Phase 1 和 Phase 2 `SHADOW_WRITE` 都不创建 PR。进入后续 canary 时按以下顺序审查：
 
 1. 先确认失败复现与预期行为独立于修复实现。
 2. 检查完整 diff、文件类型、模式、符号链接、secret 和保护路径。

@@ -6,21 +6,49 @@ from core.loop_harness.config import LoopConfig
 from core.loop_harness.errors import LoopBlockedError
 from core.loop_harness.git import RootStatus
 from core.loop_harness.manifest import write_manifest
-from core.loop_harness.models import WorkerResult
+from core.loop_harness.models import (
+    ArtifactReceipt,
+    DiffSnapshot,
+    FixerResult,
+    ValidationResult,
+    ValidationStep,
+    WorkerResult,
+)
 from core.loop_harness.runner import LoopRunner
 from core.loop_harness.state import LoopState
 
 
 class FakeGit:
-    def __init__(self, *, blocked: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        blocked: bool = False,
+        dirty_paths: tuple[str, ...] = (),
+        snapshot: DiffSnapshot | None = None,
+    ) -> None:
         self.blocked = blocked
+        self.dirty_paths = dirty_paths
+        self.snapshot = snapshot or DiffSnapshot((), 0, 0, (), (), False)
         self.created = 0
         self.removed = 0
+        self.discarded = 0
+        self.snapshot_calls = 0
 
     def require_clean_integration_root(self) -> RootStatus:
         if self.blocked:
             raise LoopBlockedError("BLOCKED_ROOT_DIRTY", "human work is present")
         return RootStatus("dev/sage-v7", "a" * 40, False)
+
+    def require_integration_root(self, *, allow_dirty: bool) -> RootStatus:
+        if self.blocked:
+            raise LoopBlockedError("BLOCKED_ROOT_DIRTY", "human work is present")
+        assert allow_dirty is True
+        return RootStatus(
+            "dev/sage-v7",
+            "a" * 40,
+            bool(self.dirty_paths),
+            self.dirty_paths,
+        )
 
     def fetch(self) -> None:
         return None
@@ -31,6 +59,10 @@ class FakeGit:
     def require_root_at_sha(self, status: RootStatus, remote_sha: str) -> None:
         assert status.head_sha == remote_sha
 
+    def human_change_paths(self, status: RootStatus, remote_sha: str) -> tuple[str, ...]:
+        assert remote_sha == "a" * 40
+        return status.dirty_paths
+
     def create_detached_worktree(self, destination, base_sha: str) -> None:
         assert base_sha == "a" * 40
         destination.mkdir(parents=True)
@@ -39,6 +71,24 @@ class FakeGit:
     def remove_clean_worktree(self, destination) -> None:
         destination.rmdir()
         self.removed += 1
+
+    def diff_snapshot(self, destination, *, base_sha: str) -> DiffSnapshot:
+        assert destination.is_dir()
+        assert base_sha == "a" * 40
+        self.snapshot_calls += 1
+        if self.snapshot_calls == 1:
+            return DiffSnapshot((), 0, 0, (), (), False)
+        return self.snapshot
+
+    def remove_managed_worktree(self, destination, *, discard_changes: bool) -> None:
+        assert discard_changes is True
+        destination.rmdir()
+        self.discarded += 1
+
+    def diff_patch(self, destination, *, base_sha: str) -> str:
+        assert destination.is_dir()
+        assert base_sha == "a" * 40
+        return "diff --git a/view.vue b/view.vue\n"
 
 
 class FakeWorker:
@@ -52,6 +102,51 @@ class FakeWorker:
     def run(self, **kwargs) -> WorkerResult:
         self.calls += 1
         return self.result
+
+
+class FakeFixer:
+    def __init__(self, result: FixerResult) -> None:
+        self.result = result
+        self.calls = 0
+
+    def run(self, **kwargs) -> FixerResult:
+        self.calls += 1
+        return self.result
+
+
+class PausingFixer(FakeFixer):
+    def __init__(self, result: FixerResult, state: LoopState) -> None:
+        super().__init__(result)
+        self.state = state
+
+    def run(self, **kwargs) -> FixerResult:
+        result = super().run(**kwargs)
+        self.state.set_enabled(False, mode="PAUSED_MANUAL")
+        return result
+
+
+class FakeValidator:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def validate(self, worktree) -> ValidationResult:
+        self.calls += 1
+        return ValidationResult(
+            passed=True,
+            steps=(ValidationStep("git-diff-check", 0, 0.01),),
+        )
+
+
+class FakeArtifactStore:
+    def __init__(self, root) -> None:
+        self.root = root
+        self.calls = 0
+
+    def save_shadow(self, *, run_id, patch, validation) -> ArtifactReceipt:
+        self.calls += 1
+        directory = self.root / run_id
+        directory.mkdir(parents=True)
+        return ArtifactReceipt(directory, "a" * 64, len(patch.encode()))
 
 
 def _git(root, *args: str) -> None:
@@ -157,3 +252,124 @@ def test_runner_pauses_after_three_root_dirty_failures(tmp_path) -> None:
     assert third.notification and "自动暂停" in third.notification
     assert state.is_enabled() is False
     assert state.status()["consecutive_error_count"] == 3
+
+
+def test_runner_shadow_writes_only_in_managed_worktree_and_discards_diff(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr("core.loop_harness.runner._SCAN_SCOPES", (("frontend/src",),))
+    config = _config(tmp_path)
+    state = LoopState(config.database_path)
+    state.initialize()
+    state.set_enabled(True, mode="SHADOW_WRITE")
+    candidate_path = "frontend/src/views/KnowledgeView.vue"
+    scanner_result = WorkerResult(
+        verdict="FRONTEND_CANDIDATE",
+        summary="修复知识库空状态间距",
+        evidence=(f"{candidate_path}:20",),
+        reproduction=("打开空知识库页面",),
+        changed_files=(candidate_path,),
+        tests=("KnowledgeView.test.ts",),
+        risk_reasons=(),
+        suggested_tier="A",
+        confidence=0.95,
+    )
+    fixer = FakeFixer(
+        FixerResult(
+            summary="已修复知识库空状态间距",
+            changed_files=(candidate_path,),
+            tests=("npm run test -- --run",),
+            risk_reasons=(),
+        )
+    )
+    git = FakeGit(
+        dirty_paths=("frontend/src/views/HumanView.vue",),
+        snapshot=DiffSnapshot((candidate_path,), 4, 2, (), (), False),
+    )
+
+    report = LoopRunner(
+        config,
+        state,
+        git=git,
+        worker=FakeWorker(scanner_result),
+        fixer=fixer,
+        validator=FakeValidator(),
+        artifact_store=FakeArtifactStore(config.reports_root),
+    ).run()
+
+    assert report.state == "SHADOW_VALIDATED"
+    assert report.notification and "shadow" in report.notification
+    assert fixer.calls == 1
+    assert git.discarded == 1
+    assert state.status()["shadow_validated_candidates"] == 1
+
+
+def test_runner_shadow_does_not_start_fixer_for_dirty_overlap(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("core.loop_harness.runner._SCAN_SCOPES", (("frontend/src",),))
+    config = _config(tmp_path)
+    state = LoopState(config.database_path)
+    state.initialize()
+    state.set_enabled(True, mode="SHADOW_WRITE")
+    candidate_path = "frontend/src/views/KnowledgeView.vue"
+    scanner_result = WorkerResult(
+        verdict="FRONTEND_CANDIDATE",
+        summary="修复知识库空状态间距",
+        evidence=(f"{candidate_path}:20",),
+        reproduction=("打开空知识库页面",),
+        changed_files=(candidate_path,),
+        tests=(),
+        risk_reasons=(),
+        suggested_tier="A",
+        confidence=0.95,
+    )
+    fixer = FakeFixer(FixerResult("不应执行", (candidate_path,), (), ()))
+
+    report = LoopRunner(
+        config,
+        state,
+        git=FakeGit(dirty_paths=(candidate_path,)),
+        worker=FakeWorker(scanner_result),
+        fixer=fixer,
+        validator=FakeValidator(),
+    ).run()
+
+    assert report.state == "REPORT"
+    assert fixer.calls == 0
+
+
+def test_runner_shadow_invalidates_fixer_result_when_paused_mid_run(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr("core.loop_harness.runner._SCAN_SCOPES", (("frontend/src",),))
+    config = _config(tmp_path)
+    state = LoopState(config.database_path)
+    state.initialize()
+    state.set_enabled(True, mode="SHADOW_WRITE")
+    candidate_path = "frontend/src/views/KnowledgeView.vue"
+    scanner_result = WorkerResult(
+        verdict="FRONTEND_CANDIDATE",
+        summary="修复知识库空状态间距",
+        evidence=(f"{candidate_path}:20",),
+        reproduction=("打开空知识库页面",),
+        changed_files=(candidate_path,),
+        tests=(),
+        risk_reasons=(),
+        suggested_tier="A",
+        confidence=0.95,
+    )
+    fixer = PausingFixer(
+        FixerResult("已修改但应失效", (candidate_path,), (), ()),
+        state,
+    )
+
+    report = LoopRunner(
+        config,
+        state,
+        git=FakeGit(snapshot=DiffSnapshot((candidate_path,), 2, 0, (), (), False)),
+        worker=FakeWorker(scanner_result),
+        fixer=fixer,
+    ).run()
+
+    assert report.state == "BLOCKED"
+    assert report.error_code == "BLOCKED_MODE_CHANGED"
+    assert state.is_enabled() is False

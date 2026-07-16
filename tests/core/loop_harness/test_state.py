@@ -204,3 +204,56 @@ def test_state_database_rejects_symlink(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="must not be a symlink"):
         LoopState(link)
+
+
+def test_shadow_write_mode_is_explicit_and_invalid_modes_fail_closed(tmp_path) -> None:
+    state = LoopState(tmp_path / "state.sqlite3")
+    state.initialize()
+
+    state.set_enabled(True, mode="SHADOW_WRITE")
+
+    assert state.status()["enabled"] is True
+    assert state.status()["mode"] == "SHADOW_WRITE"
+    with pytest.raises(ValueError, match="unsupported Loop mode"):
+        state.set_enabled(True, mode="AUTO_MERGE")
+    assert state.status()["mode"] == "SHADOW_WRITE"
+
+
+def test_initialize_migrates_existing_phase1_database(tmp_path) -> None:
+    database = tmp_path / "state.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE runs (
+                run_id TEXT PRIMARY KEY,
+                base_sha TEXT,
+                policy_version TEXT NOT NULL,
+                state TEXT NOT NULL,
+                error_code TEXT,
+                summary TEXT NOT NULL DEFAULT '',
+                started_at TEXT NOT NULL,
+                finished_at TEXT
+            );
+            CREATE TABLE candidates (
+                fingerprint TEXT PRIMARY KEY,
+                verdict TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                evidence_json TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                occurrence_count INTEGER NOT NULL,
+                cooldown_until TEXT
+            );
+            """
+        )
+
+    state = LoopState(database)
+    state.initialize()
+
+    with sqlite3.connect(database) as connection:
+        run_columns = {row[1] for row in connection.execute("PRAGMA table_info(runs)")}
+        candidate_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(candidates)")
+        }
+    assert {"mode", "target_branch"} <= run_columns
+    assert {"lifecycle_state", "changed_files_json", "diff_json"} <= candidate_columns

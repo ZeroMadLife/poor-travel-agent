@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Any
 
 from core.loop_harness.errors import LeaseBusyError, LeaseLostError
-from core.loop_harness.models import WorkerResult
+from core.loop_harness.models import ArtifactReceipt, DiffSnapshot, ValidationResult, WorkerResult
+
+_SUPPORTED_MODES = {"DRY_RUN", "SHADOW_WRITE", "PAUSED_MANUAL", "PAUSED_ERROR"}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS fence_state (
@@ -37,7 +39,9 @@ CREATE TABLE IF NOT EXISTS runs (
     error_code TEXT,
     summary TEXT NOT NULL DEFAULT '',
     started_at TEXT NOT NULL,
-    finished_at TEXT
+    finished_at TEXT,
+    mode TEXT NOT NULL DEFAULT 'DRY_RUN',
+    target_branch TEXT
 );
 CREATE INDEX IF NOT EXISTS runs_started_idx ON runs(started_at);
 CREATE TABLE IF NOT EXISTS scan_cursors (
@@ -53,7 +57,17 @@ CREATE TABLE IF NOT EXISTS candidates (
     first_seen_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
     occurrence_count INTEGER NOT NULL,
-    cooldown_until TEXT
+    cooldown_until TEXT,
+    mode TEXT NOT NULL DEFAULT 'DRY_RUN',
+    target_branch TEXT,
+    base_sha TEXT,
+    lifecycle_state TEXT NOT NULL DEFAULT 'DISCOVERED',
+    suggested_tier TEXT,
+    changed_files_json TEXT NOT NULL DEFAULT '[]',
+    tests_json TEXT NOT NULL DEFAULT '[]',
+    risk_reasons_json TEXT NOT NULL DEFAULT '[]',
+    confidence REAL,
+    diff_json TEXT
 );
 CREATE TABLE IF NOT EXISTS findings (
     finding_id TEXT PRIMARY KEY,
@@ -72,6 +86,15 @@ CREATE TABLE IF NOT EXISTS pull_requests (
     state TEXT NOT NULL,
     merged_sha TEXT,
     updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS artifacts (
+    artifact_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL UNIQUE,
+    path TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS daily_digests (
     digest_date TEXT PRIMARY KEY,
@@ -107,11 +130,20 @@ class LoopState:
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with self._connect() as connection:
             connection.executescript(_SCHEMA)
-            connection.execute("INSERT OR IGNORE INTO settings(key, value) VALUES ('enabled', '0')")
-            connection.execute(
-                "INSERT OR IGNORE INTO settings(key, value) VALUES ('mode', 'DRY_RUN')"
-            )
-            connection.commit()
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                _migrate_schema(connection)
+                connection.execute(
+                    "INSERT OR IGNORE INTO settings(key, value) VALUES ('enabled', '0')"
+                )
+                connection.execute(
+                    "INSERT OR IGNORE INTO settings(key, value) VALUES ('mode', 'DRY_RUN')"
+                )
+            except Exception:
+                connection.rollback()
+                raise
+            else:
+                connection.commit()
         os.chmod(self.path, 0o600)
 
     def acquire_lease(
@@ -172,13 +204,20 @@ class LoopState:
         if row is None:
             raise LeaseLostError(f"lease lost for {lease.run_id}")
 
-    def begin_run(self, lease: Lease, *, policy_version: str) -> None:
+    def begin_run(
+        self,
+        lease: Lease,
+        *,
+        policy_version: str,
+        mode: str = "DRY_RUN",
+        target_branch: str | None = None,
+    ) -> None:
         with self._transaction() as connection:
             self._assert_lease_row(connection, lease)
             connection.execute(
-                "INSERT INTO runs(run_id, policy_version, state, started_at) "
-                "VALUES (?, ?, 'RUNNING', ?)",
-                (lease.run_id, policy_version, _iso_now()),
+                "INSERT INTO runs(run_id, policy_version, state, started_at, mode, target_branch) "
+                "VALUES (?, ?, 'RUNNING', ?, ?, ?)",
+                (lease.run_id, policy_version, _iso_now(), mode, target_branch),
             )
 
     def set_run_base_sha(self, lease: Lease, base_sha: str) -> None:
@@ -228,17 +267,40 @@ class LoopState:
                 (lease.resource, lease.run_id, lease.owner_id, lease.fencing_token),
             )
 
-    def record_worker_result(self, lease: Lease, result: WorkerResult) -> str | None:
+    def record_worker_result(
+        self,
+        lease: Lease,
+        result: WorkerResult,
+        *,
+        mode: str = "DRY_RUN",
+        target_branch: str | None = None,
+        base_sha: str | None = None,
+    ) -> str | None:
         now = _iso_now()
         evidence_json = json.dumps(result.evidence, ensure_ascii=False)
-        fingerprint = _fingerprint(result.summary, result.evidence)
+        fingerprint = _fingerprint(
+            result.summary,
+            result.evidence,
+            changed_files=result.changed_files,
+            target_branch=target_branch,
+        )
         with self._transaction() as connection:
             self._assert_lease_row(connection, lease)
             connection.execute(
                 "INSERT INTO candidates(fingerprint, verdict, summary, evidence_json, "
-                "first_seen_at, last_seen_at, occurrence_count) VALUES (?, ?, ?, ?, ?, ?, 1) "
-                "ON CONFLICT(fingerprint) DO UPDATE SET last_seen_at = excluded.last_seen_at, "
-                "occurrence_count = candidates.occurrence_count + 1",
+                "first_seen_at, last_seen_at, occurrence_count, mode, target_branch, base_sha, "
+                "lifecycle_state, suggested_tier, changed_files_json, tests_json, "
+                "risk_reasons_json, confidence) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 'DISCOVERED', ?, ?, ?, ?, ?) "
+                "ON CONFLICT(fingerprint) DO UPDATE SET verdict = excluded.verdict, "
+                "summary = excluded.summary, evidence_json = excluded.evidence_json, "
+                "last_seen_at = excluded.last_seen_at, "
+                "occurrence_count = candidates.occurrence_count + 1, mode = excluded.mode, "
+                "target_branch = excluded.target_branch, base_sha = excluded.base_sha, "
+                "lifecycle_state = 'DISCOVERED', diff_json = NULL, "
+                "suggested_tier = excluded.suggested_tier, "
+                "changed_files_json = excluded.changed_files_json, tests_json = excluded.tests_json, "
+                "risk_reasons_json = excluded.risk_reasons_json, confidence = excluded.confidence",
                 (
                     fingerprint,
                     result.verdict,
@@ -246,9 +308,19 @@ class LoopState:
                     evidence_json,
                     now,
                     now,
+                    mode,
+                    target_branch,
+                    base_sha,
+                    result.suggested_tier,
+                    json.dumps(result.changed_files, ensure_ascii=False),
+                    json.dumps(result.tests, ensure_ascii=False),
+                    json.dumps(result.risk_reasons, ensure_ascii=False),
+                    result.confidence,
                 ),
             )
-            if result.verdict not in {"REPORT", "FIX"}:
+            if result.verdict != "REPORT" and not (
+                result.verdict == "FIX" and mode == "DRY_RUN"
+            ):
                 return None
             finding_id = f"LH-{now[:10].replace('-', '')}-{fingerprint[:6].upper()}"
             connection.execute(
@@ -269,7 +341,70 @@ class LoopState:
             ).fetchone()
             return str(row["finding_id"]) if row is not None else finding_id
 
+    def record_shadow_result(
+        self,
+        lease: Lease,
+        candidate: WorkerResult,
+        snapshot: DiffSnapshot,
+        validation: ValidationResult,
+        artifact: ArtifactReceipt,
+        *,
+        tier: str,
+        target_branch: str | None = None,
+    ) -> None:
+        fingerprint = _fingerprint(
+            candidate.summary,
+            candidate.evidence,
+            changed_files=candidate.changed_files,
+            target_branch=target_branch,
+        )
+        diff_json = json.dumps(
+            {
+                "changed_files": snapshot.changed_files,
+                "additions": snapshot.additions,
+                "deletions": snapshot.deletions,
+                "behavior_changed": snapshot.behavior_changed,
+                "validation": [
+                    {
+                        "name": step.name,
+                        "exit_code": step.exit_code,
+                        "duration_seconds": step.duration_seconds,
+                    }
+                    for step in validation.steps
+                ],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        with self._transaction() as connection:
+            self._assert_lease_row(connection, lease)
+            cursor = connection.execute(
+                "UPDATE candidates SET lifecycle_state = 'SHADOW_VALIDATED', "
+                "suggested_tier = ?, diff_json = ?, last_seen_at = ? WHERE fingerprint = ?",
+                (tier, diff_json, _iso_now(), fingerprint),
+            )
+            if cursor.rowcount != 1:
+                raise sqlite3.DatabaseError("shadow candidate was not recorded")
+            now = datetime.now(UTC)
+            connection.execute(
+                "INSERT INTO artifacts(artifact_id, run_id, path, sha256, size_bytes, "
+                "created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    f"artifact-{lease.run_id}",
+                    lease.run_id,
+                    str(artifact.directory),
+                    artifact.sha256,
+                    artifact.size_bytes,
+                    _utc_iso(now),
+                    _utc_iso(now + timedelta(days=7)),
+                ),
+            )
+
     def set_enabled(self, enabled: bool, *, mode: str = "DRY_RUN") -> None:
+        if mode not in _SUPPORTED_MODES:
+            raise ValueError(f"unsupported Loop mode: {mode}")
+        if enabled and mode.startswith("PAUSED_"):
+            raise ValueError("enabled Loop cannot use a paused mode")
         with self._transaction() as connection:
             _set_setting(connection, "enabled", "1" if enabled else "0")
             _set_setting(connection, "mode", mode)
@@ -302,6 +437,9 @@ class LoopState:
     def is_enabled(self) -> bool:
         return self.setting("enabled", "0") == "1"
 
+    def mode(self) -> str:
+        return self.setting("mode", "DRY_RUN")
+
     def setting(self, key: str, default: str = "") -> str:
         with self._connect() as connection:
             row = connection.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
@@ -326,6 +464,14 @@ class LoopState:
                     "SELECT COUNT(*) FROM findings WHERE status = 'OPEN'"
                 ).fetchone()[0]
             )
+            shadow_validated = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM candidates WHERE lifecycle_state = 'SHADOW_VALIDATED'"
+                ).fetchone()[0]
+            )
+            artifact_bytes = int(
+                connection.execute("SELECT COALESCE(SUM(size_bytes), 0) FROM artifacts").fetchone()[0]
+            )
         return {
             "enabled": settings.get("enabled", "0") == "1",
             "mode": settings.get("mode", "DRY_RUN"),
@@ -334,6 +480,8 @@ class LoopState:
             "lease": dict(lease) if lease is not None else None,
             "latest_run": dict(latest) if latest is not None else None,
             "open_findings": open_findings,
+            "shadow_validated_candidates": shadow_validated,
+            "artifact_bytes": artifact_bytes,
         }
 
     def digest(
@@ -365,12 +513,13 @@ class LoopState:
                 ).fetchone()[0]
             )
             enabled = _get_setting(connection, "enabled", "0") == "1"
+            mode = _get_setting(connection, "mode", "DRY_RUN")
             payload = (
                 f"Loop 日报 {digest_date[5:]}\n"
                 f"扫描：{len(rows)} 次，{counts.get('NO_OP', 0)} 无问题，"
                 f"{counts.get('SKIPPED', 0)} 跳过，{counts.get('BLOCKED', 0)} 异常\n"
                 f"大范围发现：{findings}\n"
-                f"状态：{'dry-run 运行中' if enabled else '已暂停'}"
+                f"状态：{mode if enabled else '已暂停'}"
             )
             payload_hash = hashlib.sha256(payload.encode()).hexdigest()
             connection.execute(
@@ -399,7 +548,25 @@ class LoopState:
             digests = connection.execute(
                 "DELETE FROM daily_digests WHERE emitted_at < ?", (closed_cutoff,)
             ).rowcount
-        return {"candidates": candidates, "runs": runs, "digests": digests}
+        return {
+            "candidates": candidates,
+            "runs": runs,
+            "digests": digests,
+        }
+
+    def expired_artifacts(self, *, now: datetime | None = None) -> tuple[tuple[str, Path], ...]:
+        reference = now or datetime.now(UTC)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT artifact_id, path FROM artifacts WHERE expires_at < ? ORDER BY expires_at",
+                (_utc_iso(reference),),
+            ).fetchall()
+        return tuple((str(row["artifact_id"]), Path(str(row["path"]))) for row in rows)
+
+    def delete_artifact_record(self, lease: Lease, artifact_id: str) -> None:
+        with self._transaction() as connection:
+            self._assert_lease_row(connection, lease)
+            connection.execute("DELETE FROM artifacts WHERE artifact_id = ?", (artifact_id,))
 
     def _assert_lease_row(self, connection: sqlite3.Connection, lease: Lease) -> None:
         row = connection.execute(
@@ -454,6 +621,35 @@ def _set_setting(connection: sqlite3.Connection, key: str, value: str) -> None:
     )
 
 
+def _migrate_schema(connection: sqlite3.Connection) -> None:
+    migrations = {
+        "runs": {
+            "mode": "TEXT NOT NULL DEFAULT 'DRY_RUN'",
+            "target_branch": "TEXT",
+        },
+        "candidates": {
+            "mode": "TEXT NOT NULL DEFAULT 'DRY_RUN'",
+            "target_branch": "TEXT",
+            "base_sha": "TEXT",
+            "lifecycle_state": "TEXT NOT NULL DEFAULT 'DISCOVERED'",
+            "suggested_tier": "TEXT",
+            "changed_files_json": "TEXT NOT NULL DEFAULT '[]'",
+            "tests_json": "TEXT NOT NULL DEFAULT '[]'",
+            "risk_reasons_json": "TEXT NOT NULL DEFAULT '[]'",
+            "confidence": "REAL",
+            "diff_json": "TEXT",
+        },
+    }
+    for table, columns in migrations.items():
+        existing = {
+            str(row["name"])
+            for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        for name, declaration in columns.items():
+            if name not in existing:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+
+
 def _get_setting(connection: sqlite3.Connection, key: str, default: str) -> str:
     row = connection.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
     return str(row["value"]) if row is not None else default
@@ -497,9 +693,20 @@ def _bounded(value: str, limit: int) -> str:
     return normalized[:limit]
 
 
-def _fingerprint(summary: str, evidence: tuple[str, ...]) -> str:
+def _fingerprint(
+    summary: str,
+    evidence: tuple[str, ...],
+    *,
+    changed_files: tuple[str, ...] = (),
+    target_branch: str | None = None,
+) -> str:
     payload = json.dumps(
-        {"summary": _bounded(summary, 500).casefold(), "evidence": evidence},
+        {
+            "summary": _bounded(summary, 500).casefold(),
+            "evidence": evidence,
+            "changed_files": changed_files,
+            "target_branch": target_branch,
+        },
         ensure_ascii=False,
         sort_keys=True,
     )

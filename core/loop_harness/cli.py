@@ -15,6 +15,7 @@ from datetime import datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from core.loop_harness.artifacts import ArtifactStore
 from core.loop_harness.config import LoopConfig
 from core.loop_harness.git import GitController
 from core.loop_harness.logging import configure_logging
@@ -55,12 +56,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "enable":
-        if not args.dry_run:
-            parser.error("Phase 1 requires --dry-run")
+        if args.dry_run == args.shadow_write:
+            parser.error("choose exactly one of --dry-run or --shadow-write")
         config.validate_static()
         validate_manifest(config.controller_root, config.manifest_path)
-        state.set_enabled(True, mode="DRY_RUN")
-        print("Loop dry-run enabled")
+        mode = "SHADOW_WRITE" if args.shadow_write else "DRY_RUN"
+        state.set_enabled(True, mode=mode)
+        print("Loop shadow-write enabled" if mode == "SHADOW_WRITE" else "Loop dry-run enabled")
         return 0
 
     if args.command == "pause":
@@ -78,18 +80,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "doctor":
         config.validate_static()
         validate_manifest(config.controller_root, config.manifest_path)
-        root = GitController(
+        git = GitController(
             config.repo_root,
             remote=config.remote,
             target_branch=config.target_branch,
-        ).require_clean_integration_root()
+        )
+        root = git.require_integration_root(allow_dirty=state.mode() == "SHADOW_WRITE")
         version = CodexWorker(
             codex_bin=config.codex_bin,
             controller_root=config.controller_root,
             reports_root=config.reports_root,
             timeout_seconds=config.run_timeout_seconds,
         ).probe()
-        print(f"doctor ok: branch={root.branch} head={root.head_sha} codex={version}")
+        print(
+            f"doctor ok: mode={state.mode()} branch={root.branch} head={root.head_sha} "
+            f"dirty_paths={len(root.dirty_paths)} codex={version}"
+        )
         return 0
 
     if args.command == "run":
@@ -125,10 +131,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         try:
             removed = _cleanup_worktrees(config)
+            artifact_store = ArtifactStore(config.reports_root)
+            removed_artifacts = 0
+            for artifact_id, directory in state.expired_artifacts():
+                artifact_store.remove(directory)
+                state.delete_artifact_record(cleanup_lease, artifact_id)
+                removed_artifacts += 1
             counts = state.cleanup()
         finally:
             state.release_lease(cleanup_lease)
         counts["worktrees"] = removed
+        counts["artifacts"] = removed_artifacts
         print(json.dumps(counts, ensure_ascii=False, sort_keys=True))
         return 0
 
@@ -145,6 +158,7 @@ def _parser() -> argparse.ArgumentParser:
 
     enable = subparsers.add_parser("enable")
     enable.add_argument("--dry-run", action="store_true")
+    enable.add_argument("--shadow-write", action="store_true")
     subparsers.add_parser("pause")
     subparsers.add_parser("status")
     subparsers.add_parser("doctor")
