@@ -146,6 +146,21 @@ def test_permission_mode_auto_keeps_dangerous_shell_behind_approval(tmp_path: Pa
     assert decision.reason == "approval_required"
 
 
+def test_permission_mode_auto_keeps_knowledge_deposit_behind_approval(tmp_path: Path) -> None:
+    """Automatic coding actions cannot implicitly approve durable learning deposits."""
+    workspace, tools = _tools(tmp_path)
+    checker = PermissionChecker(permission_mode="auto")
+
+    decision = checker.check(
+        tools["knowledge_learn"],
+        {"topic": "Harness", "citation_ids": ["kcite_1"]},
+        workspace,
+    )
+
+    assert decision.allowed is True
+    assert decision.reason == "approval_required"
+
+
 def test_permission_mode_plan_blocks_writes(tmp_path: Path) -> None:
     """plan mode denies write_file with the plan write guard."""
     workspace, tools = _tools(tmp_path)

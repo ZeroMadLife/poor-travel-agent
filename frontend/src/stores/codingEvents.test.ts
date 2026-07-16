@@ -121,6 +121,38 @@ describe('codingEvents', () => {
     expect(current.messages.value[0].tools![0].content).toBe('# Sage')
   })
 
+  it('projects knowledge citations during the live event stream', () => {
+    const current = state()
+    current.messages.value = [{
+      role: 'assistant', content: '', isThinking: true,
+      tools: [{
+        tool: 'knowledge_search', args: { query: 'Harness' }, status: 'running', content: '',
+      }],
+    }]
+
+    applyCodingEvent(current, {
+      type: 'tool_result',
+      tool: 'knowledge_search',
+      args: { query: 'Harness' },
+      content: JSON.stringify({
+        status: 'evidence_found', query: 'Harness', used_tokens: 120, token_budget: 800,
+        omitted_count: 0,
+        citations: [{
+          citation_id: 'kcite_live', rank: 1, page_revision: 'krev_live',
+          source_revision: 'source_live', source_kind: 'obsidian',
+          source_relative_path: 'harness.md', title: 'Harness', heading_path: [],
+          block_id: 'block_live', excerpt: 'live evidence', truncated: false,
+        }],
+      }),
+      is_error: false,
+    })
+
+    expect(current.messages.value[0].tools![0].retrieval).toMatchObject({
+      status: 'evidence_found',
+      citations: [{ citationId: 'kcite_live', pageRevision: 'krev_live' }],
+    })
+  })
+
   it('finalizes assistant thinking message on final events without triggering terminal refresh', () => {
     const current = state()
     current.messages.value = [{ role: 'assistant', content: '', tools: [], isThinking: true }]

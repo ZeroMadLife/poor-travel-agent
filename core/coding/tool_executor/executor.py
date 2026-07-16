@@ -141,7 +141,9 @@ class ToolExecutor:
 
         description = f"{tool.name} requires approval."
         pattern_key = f"tool:{tool.name}"
-        if tool.name == "run_shell":
+        if tool.name == "knowledge_learn":
+            description = "保存本轮引用证据到知识库前需要确认。"
+        elif tool.name == "run_shell":
             dangerous, command_description, command_pattern = check_dangerous_command(
                 str(args.get("command", ""))
             )

@@ -113,6 +113,24 @@ async def test_auto_approval_path_executes_tool(tmp_path: Path) -> None:
     assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "approved"
 
 
+async def test_knowledge_learning_requires_explicit_user_approval(tmp_path: Path) -> None:
+    """Knowledge deposition pauses before execution even when citations are model-selected."""
+    manager = ApprovalManager()
+    executor = _executor(tmp_path, approval_manager=manager)
+    stream = executor.execute(
+        {
+            "name": "knowledge_learn",
+            "args": {"topic": "Harness lessons", "citation_ids": ["kcite_123"]},
+        }
+    )
+
+    first = await anext(stream)
+
+    assert isinstance(first, ApprovalRequiredEvent)
+    assert first.tool == "knowledge_learn"
+    await stream.aclose()
+
+
 async def test_invalid_write_arguments_fail_before_approval(tmp_path: Path) -> None:
     """An incomplete write request never reaches the user approval queue."""
     manager = ApprovalManager()

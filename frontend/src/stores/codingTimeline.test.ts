@@ -94,6 +94,37 @@ describe('coding timeline projection', () => {
     })
   })
 
+  it('projects knowledge citations identically during timeline replay', () => {
+    const content = JSON.stringify({
+      status: 'evidence_found', query: 'Harness', used_tokens: 120, token_budget: 800,
+      omitted_count: 0,
+      citations: [{
+        citation_id: 'kcite_1', rank: 1, page_revision: 'krev_page_1',
+        source_revision: 'krev_source_1', source_kind: 'obsidian',
+        source_relative_path: 'harness.md', title: 'Harness', heading_path: [],
+        block_id: 'block_1', excerpt: 'durable evidence', truncated: false,
+      }],
+    })
+    const projection = createTimelineProjection([
+      event(1, 'tool', {
+        type: 'tool_call', tool: 'knowledge_search', args: { query: 'Harness' },
+      }, { status: 'running' }),
+      event(2, 'tool', {
+        type: 'tool_result', tool: 'knowledge_search', args: { query: 'Harness' },
+        content, is_error: false,
+      }),
+    ])
+
+    expect(projection.turns[0].tools[0].retrieval).toMatchObject({
+      status: 'evidence_found',
+      citations: [{
+        citationId: 'kcite_1',
+        pageRevision: 'krev_page_1',
+        sourceRevision: 'krev_source_1',
+      }],
+    })
+  })
+
   it('settles the original approval when approval_granted arrives', () => {
     const projection = createTimelineProjection([
       event(1, 'approval', {

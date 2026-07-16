@@ -590,6 +590,7 @@ export const useCodingStore = defineStore('coding', () => {
               ? 'running'
               : tool.is_error || tool.status === 'error' ? 'error' : 'done',
             content: tool.result,
+            retrieval: tool.retrieval,
           })),
           activities: turn.model.map((item) => ({
             kind: 'model' as const,

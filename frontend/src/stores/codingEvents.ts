@@ -13,6 +13,7 @@ import type {
   ToolActivityViewModel,
 } from '../harness/chatTypes'
 import type { Ref } from 'vue'
+import { parseKnowledgeRetrieval } from '../harness/knowledgeRetrieval'
 
 export type ToolActivity = ToolActivityViewModel
 export type ExecutionActivity = ExecutionActivityViewModel
@@ -349,6 +350,9 @@ function updateToolActivity(messages: ChatMessage[], event: CodingToolResultEven
   if (target) {
     target.status = event.is_error ? 'error' : 'done'
     target.content = event.content
+    target.retrieval = event.tool === 'knowledge_search'
+      ? parseKnowledgeRetrieval(event.content) ?? undefined
+      : undefined
     return
   }
   appendSettledToolActivity(messages, event)
@@ -372,6 +376,9 @@ function appendSettledToolActivity(messages: ChatMessage[], event: CodingToolRes
     args: event.args,
     status: event.is_error ? 'error' : 'done',
     content: event.content,
+    retrieval: event.tool === 'knowledge_search'
+      ? parseKnowledgeRetrieval(event.content) ?? undefined
+      : undefined,
   })
 }
 

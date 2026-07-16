@@ -7,6 +7,7 @@ import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 from fastapi.testclient import TestClient
@@ -23,11 +24,13 @@ from db.migrations import init_db
 
 
 class FinalModel:
+    prompts: ClassVar[list[str]] = []
+
     def __init__(self, *args, **kwargs) -> None:
         del args, kwargs
 
     async def complete(self, prompt: str) -> str:
-        del prompt
+        self.prompts.append(prompt)
         return "<final>完成。</final>"
 
 
@@ -41,6 +44,7 @@ def _receive_until_terminal(websocket) -> list[dict]:
 
 
 def _coding_app(tmp_path: Path):
+    FinalModel.prompts.clear()
     workspace = tmp_path / "coding"
     workspace.mkdir()
     (workspace / "README.md").write_text("# Sage\n", encoding="utf-8")
@@ -144,6 +148,11 @@ def test_coding_context_is_canonicalized_frozen_and_replayable(tmp_path: Path) -
     assert next(
         item for item in replayed if item["event_id"] == started["event_id"]
     ) == started
+    assert len(FinalModel.prompts) == 1
+    assert '"label":"coding"' in FinalModel.prompts[0]
+    assert '"label":"README.md"' in FinalModel.prompts[0]
+    assert "forged workspace label" not in FinalModel.prompts[0]
+    assert "forged file label" not in FinalModel.prompts[0]
 
 
 def test_forged_coding_workspace_and_escaping_file_are_rejected_before_model(

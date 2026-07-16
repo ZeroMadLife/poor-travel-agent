@@ -122,7 +122,11 @@ class Engine:
         self.model_usage_sink = model_usage_sink
 
     async def run_turn(
-        self, user_message: str, skill_prompt: str | None = None, memory_block: str | None = None
+        self,
+        user_message: str,
+        skill_prompt: str | None = None,
+        memory_block: str | None = None,
+        surface_context: Mapping[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Run one coding turn and yield streamable events.
 
@@ -132,6 +136,9 @@ class Engine:
         ``memory_block`` is a rendered memory context (working + durable memory)
         injected into the LLM prompt for this turn only; it is never written to
         ``self.history``.
+
+        ``surface_context`` is the server-validated run binding. It is injected
+        as data for this turn and is never written to ``self.history``.
         """
         if self.append_user:
             self._append_history({"role": "user", "content": user_message, "created_at": now()})
@@ -182,6 +189,7 @@ class Engine:
                 workspace_reminders=self.workspace_reminders,
                 deferred_tools=self._deferred_tool_names(),
                 skill_prompt=skill_prompt,
+                surface_context=surface_context,
                 memory_block=memory_block,
                 include_current_request=self.current_message_id is None,
             )

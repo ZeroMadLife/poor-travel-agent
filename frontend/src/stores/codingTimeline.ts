@@ -2,6 +2,8 @@ import type {
   CodingTimelineEvent,
   CodingTimelineStatus,
 } from '../types/api'
+import { parseKnowledgeRetrieval } from '../harness/knowledgeRetrieval'
+import type { KnowledgeRetrievalViewModel } from '../harness/knowledgeRetrieval'
 
 export type TimelineMessage = {
   content: string
@@ -19,6 +21,7 @@ export type TimelineTool = {
   is_error: boolean
   policy_reason?: string
   security_event_type?: string
+  retrieval?: KnowledgeRetrievalViewModel
 }
 
 export type TimelineApproval = {
@@ -218,6 +221,9 @@ function projectTool(turn: TimelineTurn, event: CodingTimelineEvent, type: strin
     turn.tools.push(target)
   }
   target.result = stringValue(event.payload.content)
+  target.retrieval = toolName === 'knowledge_search'
+    ? parseKnowledgeRetrieval(target.result) ?? undefined
+    : undefined
   target.is_error = event.payload.is_error === true
   target.status = target.is_error ? 'error' : event.status
   const policyReason = optionalString(event.payload.policy_reason)

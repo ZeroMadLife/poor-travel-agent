@@ -907,6 +907,7 @@ class CodingRuntime:
         self,
         user_message: str,
         skill_prompt: str | None = None,
+        surface_context: Mapping[str, Any] | None = None,
         *,
         run_id: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
@@ -914,6 +915,9 @@ class CodingRuntime:
 
         ``skill_prompt`` is an expanded skill instruction injected into the LLM
         prompt for this turn only; it is never persisted to session history.
+
+        ``surface_context`` is validated by the API boundary and deep-copied for
+        this run so caller mutations cannot change the model's resource binding.
 
         An active-run lease prevents two concurrent turns on the same session:
         if ``active_run_id`` is already set the call short-circuits with an
@@ -946,6 +950,7 @@ class CodingRuntime:
 
         self.stop_requested = False
         run_id = run_id or f"run_{uuid.uuid4().hex[:12]}"
+        frozen_surface_context = deepcopy(dict(surface_context)) if surface_context else None
         self._turn_id = f"turn_{uuid.uuid4().hex[:12]}"
         self.active_run_id = run_id
         run_start_time = time.monotonic()
@@ -1036,7 +1041,10 @@ class CodingRuntime:
                 model_usage_sink=self._record_model_usage,
             )
             engine_stream = engine.run_turn(
-                user_message, skill_prompt=skill_prompt, memory_block=memory_block
+                user_message,
+                skill_prompt=skill_prompt,
+                memory_block=memory_block,
+                surface_context=frozen_surface_context,
             )
         except Exception:
             failure_events = self._record_run_failure(

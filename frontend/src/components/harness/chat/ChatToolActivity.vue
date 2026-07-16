@@ -8,6 +8,8 @@ import {
   ChevronRight,
   Circle,
   Clipboard,
+  FileText,
+  Search,
   Terminal,
   Wrench,
   XCircle,
@@ -23,6 +25,7 @@ const props = defineProps<{
 
 const expandedTools = ref<Set<number>>(new Set())
 const expandedResults = ref<Set<number>>(new Set())
+const expandedCitations = ref<Set<string>>(new Set())
 const copiedPanel = ref('')
 let copyTimer: ReturnType<typeof setTimeout> | undefined
 
@@ -48,6 +51,18 @@ function toggleResult(index: number) {
   expandedResults.value = next
 }
 
+function citationKey(index: number, citationId: string) {
+  return `${index}:${citationId}`
+}
+
+function toggleCitation(index: number, citationId: string) {
+  const key = citationKey(index, citationId)
+  const next = new Set(expandedCitations.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  expandedCitations.value = next
+}
+
 function iconFor(tool: ToolActivityViewModel) {
   if (tool.status === 'running') return Circle
   if (tool.status === 'error') return XCircle
@@ -71,6 +86,12 @@ function toolSummary(tool: ToolActivityViewModel) {
   if (tool.tool === 'patch_file') return `修改 ${path || '文件'}`
   if (tool.tool === 'run_shell') return stringArg(tool.args, 'command') || '执行 shell 命令'
   if (tool.tool === 'agent') return stringArg(tool.args, 'task') || '启动子智能体'
+  if (tool.tool === 'knowledge_search') {
+    if (!tool.retrieval) return `搜索知识 · ${stringArg(tool.args, 'query') || '知识库'}`
+    if (tool.retrieval.status === 'unavailable') return '知识库不可用'
+    if (!tool.retrieval.citations.length) return '搜索知识 · 无证据'
+    return `搜索知识 · ${tool.retrieval.citations.length} 条证据`
+  }
   return tool.tool.replaceAll('_', ' ')
 }
 
@@ -138,6 +159,7 @@ async function copyPanel(key: string, content: string) {
           </span>
           <component :is="expandedTools.has(index) ? ChevronDown : ChevronRight" :size="14" />
           <Terminal v-if="tool.tool === 'run_shell'" :size="13" />
+          <Search v-else-if="tool.tool === 'knowledge_search'" :size="13" />
           <span class="tool-name">{{ tool.tool }}</span>
           <span class="tool-summary">{{ toolSummary(tool) }}</span>
           <span class="tool-status">{{ statusLabel(tool.status) }}</span>
@@ -154,7 +176,48 @@ async function copyPanel(key: string, content: string) {
             <pre class="hljs"><code v-html="panelContent(JSON.stringify(tool.args, null, 2), 'args').html"></code></pre>
           </section>
 
-          <section v-if="tool.content" class="code-panel result-panel" :class="{ failed: tool.status === 'error' }">
+          <section v-if="tool.retrieval" class="retrieval-panel" aria-label="知识检索证据">
+            <header class="retrieval-header">
+              <span>知识证据 · {{ tool.retrieval.citations.length }} 条</span>
+              <span>{{ tool.retrieval.usedTokens }} / {{ tool.retrieval.tokenBudget }} tokens</span>
+            </header>
+            <p v-if="!tool.retrieval.citations.length" class="empty-evidence">
+              {{ tool.retrieval.status === 'unavailable' ? '知识库当前不可用' : '本轮没有检索到可引用证据' }}
+            </p>
+            <div v-else class="citation-list">
+              <article v-for="citation in tool.retrieval.citations" :key="citation.citationId" class="citation-row">
+                <button
+                  type="button"
+                  class="citation-summary"
+                  :aria-label="`${expandedCitations.has(citationKey(index, citation.citationId)) ? '收起' : '展开'}引用 ${citation.title}`"
+                  :aria-expanded="expandedCitations.has(citationKey(index, citation.citationId))"
+                  @click="toggleCitation(index, citation.citationId)"
+                >
+                  <FileText :size="14" />
+                  <span class="citation-title">{{ citation.title }}</span>
+                  <span class="citation-path">{{ citation.sourceRelativePath || citation.sourceKind || 'Sage Knowledge' }}</span>
+                  <component :is="expandedCitations.has(citationKey(index, citation.citationId)) ? ChevronDown : ChevronRight" :size="14" />
+                </button>
+                <div v-if="expandedCitations.has(citationKey(index, citation.citationId))" class="citation-detail">
+                  <div class="citation-meta">
+                    <code>{{ citation.citationId }}</code>
+                    <span>页面 {{ citation.pageRevision }}</span>
+                    <span v-if="citation.sourceRevision">来源 {{ citation.sourceRevision }}</span>
+                  </div>
+                  <p>{{ citation.excerpt }}<span v-if="citation.truncated">...</span></p>
+                </div>
+              </article>
+            </div>
+          </section>
+
+          <details v-if="tool.retrieval && tool.content" class="raw-result">
+            <summary>查看原始检索结果</summary>
+            <section class="code-panel result-panel" :class="{ failed: tool.status === 'error' }">
+              <pre class="hljs"><code v-html="panelContent(tool.content, 'result', expandedResults.has(index)).html"></code></pre>
+            </section>
+          </details>
+
+          <section v-else-if="tool.content" class="code-panel result-panel" :class="{ failed: tool.status === 'error' }">
             <header class="code-panel-header">
               <span>结果 · {{ panelContent(tool.content, 'result', expandedResults.has(index)).language.toUpperCase() }}</span>
               <button type="button" title="复制结果" aria-label="复制结果" @click="copyPanel(`result:${index}`, tool.content)">
@@ -195,6 +258,16 @@ async function copyPanel(key: string, content: string) {
 .code-panel pre { max-height:280px; margin:0; padding:11px 13px; overflow:auto; border-radius:0; background:var(--sage-code-bg); color:var(--sage-code-text); font-family:var(--sage-font-mono); font-size:11.5px; line-height:1.55; white-space:pre-wrap; word-break:break-word; }
 .show-more { width:100%; min-height:30px; border:0; border-top:1px solid var(--sage-border); color:var(--sage-code-muted); background:var(--sage-code-bg); font-size:var(--sage-font-xs); }.show-more:hover { color:var(--sage-code-text); }
 .code-panel :deep(.hljs-keyword),.code-panel :deep(.hljs-literal) { color:#c678dd; }.code-panel :deep(.hljs-string),.code-panel :deep(.hljs-attr) { color:#98c379; }.code-panel :deep(.hljs-number) { color:#d19a66; }
+.retrieval-panel { overflow:hidden; border:1px solid var(--sage-border); border-radius:var(--sage-radius); background:var(--sage-surface); }
+.retrieval-header { display:flex; align-items:center; justify-content:space-between; min-height:32px; padding:0 10px; border-bottom:1px solid var(--sage-border); color:var(--sage-text-muted); font-size:var(--sage-font-xs); font-weight:650; }
+.empty-evidence { margin:0; padding:12px; color:var(--sage-text-muted); font-size:var(--sage-font-sm); }
+.citation-list { display:grid; }
+.citation-row + .citation-row { border-top:1px solid var(--sage-border); }
+.citation-summary { display:grid; grid-template-columns:16px minmax(120px,auto) minmax(0,1fr) 16px; align-items:center; gap:8px; width:100%; min-height:38px; padding:5px 10px; border:0; color:var(--sage-text-secondary); background:transparent; text-align:left; }
+.citation-summary:hover { color:var(--sage-text); background:var(--sage-surface-raised); }
+.citation-title,.citation-path { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.citation-title { font-size:var(--sage-font-sm); font-weight:650; }.citation-path { color:var(--sage-text-muted); font-family:var(--sage-font-mono); font-size:var(--sage-font-xs); }
+.citation-detail { padding:0 12px 12px 34px; color:var(--sage-text-secondary); font-size:var(--sage-font-sm); }.citation-detail p { margin:8px 0 0; line-height:1.65; white-space:pre-wrap; }.citation-meta { display:flex; flex-wrap:wrap; gap:8px 12px; color:var(--sage-text-muted); font-size:var(--sage-font-xs); }.citation-meta code { color:var(--sage-accent); }
+.raw-result { color:var(--sage-text-muted); font-size:var(--sage-font-xs); }.raw-result > summary { cursor:pointer; padding:4px 2px; }.raw-result[open] > summary { margin-bottom:7px; }
 @keyframes spin { to { transform:rotate(360deg); } }
 @media (max-width:640px) { .tool-row { grid-template-columns:18px 14px auto minmax(0,1fr) auto; }.tool-row > svg:nth-of-type(2) { display:none; }.tool-detail { margin-left:22px; }.tool-summary { font-size:var(--sage-font-xs); } }
 @media (prefers-reduced-motion:reduce) { .tool-spinner { animation:none; } }

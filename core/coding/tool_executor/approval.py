@@ -103,6 +103,8 @@ class ApprovalManager:
             entry = self._find_entry_locked(session_id, approval_id)
             if entry is None:
                 return False
+            if entry.tool == "knowledge_learn" and choice in {"session", "always"}:
+                choice = "once"
             entry.result = choice
             if choice in {"session", "always"}:
                 self._session_approved.setdefault(session_id, set()).add(entry.pattern_key)

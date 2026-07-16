@@ -86,6 +86,11 @@ class PermissionChecker:
         if self.approval_policy == "never":
             return PermissionDecision.deny("approval_denied", "approval_denied")
 
+        # Knowledge deposition changes durable user-owned state. Unlike ordinary
+        # coding edits, automatic mode must never treat it as implicitly approved.
+        if tool.name == "knowledge_learn":
+            return PermissionDecision.allow("approval_required")
+
         # Mode-specific decisions for risky tools (write_file, patch_file, run_shell).
         if self.permission_mode == "auto":
             if tool.name == "run_shell":

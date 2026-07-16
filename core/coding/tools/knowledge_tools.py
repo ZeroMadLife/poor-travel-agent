@@ -60,8 +60,9 @@ def knowledge_search(
         "omitted_count": bundle.omitted_count,
         "instruction": (
             "Use only the cited excerpts for knowledge-base claims. After a useful "
-            "investigation, knowledge_learn can deposit these citation IDs as an "
-            "extractive, reversible learning note."
+            "investigation, ask the user whether these citation IDs should be persisted. "
+            "Call knowledge_learn only after the user explicitly confirms; the deposit "
+            "is extractive and reversible."
             if bundle.evidence
             else "The knowledge base has no evidence for this query. Say so explicitly."
         ),
@@ -89,13 +90,14 @@ def knowledge_search(
     name="knowledge_learn",
     description=(
         "Persist a reversible evidence snapshot from citation IDs returned by "
-        "knowledge_search. Freeform factual content is not accepted."
+        "knowledge_search after explicit user confirmation. Freeform factual content "
+        "is not accepted."
     ),
     schema={"topic": "str", "citation_ids": "list[str](1..8)"},
     schema_model=KnowledgeLearnArgs,
-    risky=False,
+    risky=True,
     category="knowledge",
-    requires_approval=False,
+    requires_approval=True,
     timeout=30.0,
     deferred=False,
 )

@@ -142,6 +142,7 @@ async def _runtime_timeline_events(
     command: str,
     arguments: str,
     run_id: str,
+    surface_context: Mapping[str, Any] | None,
 ) -> AsyncGenerator[RunEvent, None]:
     """Project a complete runtime generator into durable nonterminal events."""
     terminal_status = "completed"
@@ -156,7 +157,12 @@ async def _runtime_timeline_events(
             status="completed",
             payload={"type": "skill_invoked", "skill": command, "arguments": arguments},
         )
-    async for event in runtime.run_turn(content, skill_prompt=skill_prompt, run_id=run_id):
+    async for event in runtime.run_turn(
+        content,
+        skill_prompt=skill_prompt,
+        surface_context=surface_context,
+        run_id=run_id,
+    ):
         event_type = str(event.get("type", ""))
         if event_type == "run_finished":
             candidate = str(event.get("status", "completed"))
@@ -605,6 +611,7 @@ async def coding_stream(websocket: WebSocket, session_id: str) -> None:
                 command=command,
                 arguments=args,
                 run_id=run_id,
+                surface_context=surface_context,
             )
             try:
                 task = await coordinator.start_run(

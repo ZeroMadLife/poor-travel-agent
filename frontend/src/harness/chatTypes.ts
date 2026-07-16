@@ -1,9 +1,12 @@
+import type { KnowledgeRetrievalViewModel } from './knowledgeRetrieval'
+
 export type ToolActivityViewModel = {
   tool: string
   args: Record<string, unknown>
   status: 'running' | 'done' | 'error'
   content: string
   durationMs?: number
+  retrieval?: KnowledgeRetrievalViewModel
 }
 
 export type ExecutionActivityViewModel = {

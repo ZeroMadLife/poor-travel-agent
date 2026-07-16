@@ -31,6 +31,22 @@ def test_approval_manager_tracks_session_approval() -> None:
     assert manager.is_session_approved("s1", "shell:sudo") is True
 
 
+def test_knowledge_learning_cannot_be_approved_for_the_whole_session() -> None:
+    """Every durable knowledge deposit keeps its own explicit confirmation boundary."""
+    manager = ApprovalManager()
+    entry = manager.submit(
+        "s1",
+        "knowledge_learn",
+        {"topic": "Harness", "citation_ids": ["kcite_1"]},
+        "Persist cited evidence.",
+        "tool:knowledge_learn",
+    )
+
+    assert manager.resolve("s1", entry.approval_id, "session") is True
+    assert entry.result == "once"
+    assert manager.is_session_approved("s1", "tool:knowledge_learn") is False
+
+
 def test_approval_manager_cancel_session_denies_pending_entries() -> None:
     """Cancelling a session wakes pending approvals as denied."""
     manager = ApprovalManager()

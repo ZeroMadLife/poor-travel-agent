@@ -165,7 +165,8 @@ def test_tool_registry_discovers_decorated_tools_with_stable_metadata(tmp_path: 
     assert tools["get_weather"].category == "travel"
     assert tools["knowledge_search"].category == "knowledge"
     assert tools["knowledge_search"].requires_approval is False
-    assert tools["knowledge_learn"].requires_approval is False
+    assert tools["knowledge_learn"].risky is True
+    assert tools["knowledge_learn"].requires_approval is True
 
 
 def test_knowledge_search_returns_revision_bound_evidence(tmp_path: Path) -> None:

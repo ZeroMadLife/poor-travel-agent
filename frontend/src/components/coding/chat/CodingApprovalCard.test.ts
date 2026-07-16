@@ -50,6 +50,26 @@ it('renders diff preview when provided', () => {
   expect(wrapper.find('.diff-add').exists()).toBe(true)
 })
 
+it('requires a one-time decision for every knowledge learning deposit', () => {
+  const wrapper = mount(CodingApprovalCard, {
+    props: {
+      approval: {
+        approval_id: 'appr_knowledge',
+        session_id: 'c1',
+        tool: 'knowledge_learn',
+        args: { topic: 'Harness 2.0', citation_ids: ['kcite_1', 'kcite_2'] },
+        description: '保存本轮引用证据到知识库前需要确认。',
+        pattern_key: 'tool:knowledge_learn',
+      },
+    },
+  })
+
+  expect(wrapper.text()).toContain('将“Harness 2.0”与 2 条引用证据保存到知识库')
+  expect(wrapper.find('button.session').exists()).toBe(false)
+  expect(wrapper.find('button.allow').exists()).toBe(true)
+  expect(wrapper.find('button.deny').exists()).toBe(true)
+})
+
 it('summarizes write content instead of rendering the full payload', () => {
   const content = 'def two_sum():\n    return [0, 1]\n'
   const wrapper = mount(CodingApprovalCard, {

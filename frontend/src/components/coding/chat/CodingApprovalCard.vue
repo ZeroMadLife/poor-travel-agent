@@ -13,6 +13,7 @@ const emit = defineEmits<{
 }>()
 
 const showFullDiff = ref(false)
+const allowsSessionApproval = computed(() => props.approval.tool !== 'knowledge_learn')
 const diffPath = computed(() => {
   const path = props.approval.args.path
   return typeof path === 'string' && path.trim() ? path : props.approval.tool
@@ -26,6 +27,15 @@ const approvalSummary = computed(() => {
   const command = props.approval.args.command
   if (props.approval.tool === 'run_shell' && typeof command === 'string') {
     return command
+  }
+  if (props.approval.tool === 'knowledge_learn') {
+    const topic = typeof props.approval.args.topic === 'string'
+      ? props.approval.args.topic
+      : '本轮学习'
+    const citations = Array.isArray(props.approval.args.citation_ids)
+      ? props.approval.args.citation_ids.length
+      : 0
+    return `将“${topic}”与 ${citations} 条引用证据保存到知识库`
   }
   return JSON.stringify(compactArgs(props.approval.args), null, 2)
 })
@@ -68,7 +78,7 @@ function compactArgs(args: Record<string, unknown>) {
     </div>
     <div class="actions">
       <button class="deny" :disabled="busy" @click="emit('respond', 'deny')">拒绝</button>
-      <button class="session" :disabled="busy" @click="emit('respond', 'session')">
+      <button v-if="allowsSessionApproval" class="session" :disabled="busy" @click="emit('respond', 'session')">
         本会话允许
       </button>
       <button class="allow" :disabled="busy" @click="emit('respond', 'once')">允许一次</button>
