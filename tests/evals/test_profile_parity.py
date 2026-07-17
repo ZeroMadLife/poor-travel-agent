@@ -259,11 +259,97 @@ def _run_fresh_read_edit_scenario(
                     return events, target
 
 
+class BindableFakeMessagesListChatModel(FakeMessagesListChatModel):
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):  # type: ignore[no-untyped-def]
+        _ = tools, tool_choice, kwargs
+        return self
+
+
+def _native_tool_call(
+    name: str,
+    args: dict[str, object],
+    tool_call_id: str,
+) -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": name,
+                "args": args,
+                "id": tool_call_id,
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
+def _run_scripted_approval_scenario(
+    tmp_path: Path,
+    *,
+    scenario: str,
+    profile: str,
+    workspace_files: dict[str, str],
+    legacy_responses: list[str],
+    v2_responses: list[AIMessage],
+    prompt: str,
+    approval_choice: str,
+) -> tuple[list[dict[str, object]], Path]:
+    workspace = tmp_path / f"{scenario}-{profile}"
+    workspace.mkdir()
+    for relative_path, content in workspace_files.items():
+        target = workspace / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+    def model_factory():  # type: ignore[no-untyped-def]
+        if profile == "legacy":
+            return ScriptedApiClient(list(legacy_responses))
+        return BindableFakeMessagesListChatModel(responses=list(v2_responses))
+
+    app = create_app(
+        coding_model_factory=model_factory,
+        coding_workspace_root=workspace,
+        coding_storage_root=workspace / ".coding",
+        coding_deerflow_v2_enabled=True,
+    )
+    with TestClient(app) as client:
+        session_id = client.post(
+            "/api/v1/coding/session",
+            json={"runtime_profile": profile, "approval_policy": "ask"},
+        ).json()["session_id"]
+        with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
+            websocket.send_json({"content": prompt})
+            events: list[dict[str, object]] = []
+            while True:
+                event = websocket.receive_json()
+                events.append(event)
+                payload = event.get("payload")
+                if isinstance(payload, dict) and payload.get("type") == "approval_required":
+                    response = client.post(
+                        f"/api/v1/coding/{session_id}/approval/respond",
+                        json={
+                            "approval_id": payload["approval_id"],
+                            "choice": approval_choice,
+                        },
+                    )
+                    assert response.status_code == 200
+                if event["kind"] == "terminal":
+                    return events, workspace
+
+
 def _final_contains(events: list[dict[str, object]], expected: str) -> bool:
     return any(
         isinstance(payload := event.get("payload"), dict)
         and payload.get("type") == "final"
         and expected in str(payload.get("content", ""))
+        for event in events
+    )
+
+
+def _event_count(events: list[dict[str, object]], event_type: str) -> int:
+    return sum(
+        isinstance(payload := event.get("payload"), dict)
+        and payload.get("type") == event_type
         for event in events
     )
 
@@ -439,6 +525,164 @@ def test_legacy_and_v2_enforce_fresh_read_before_approved_edit(tmp_path: Path) -
     assert approvals == [1, 1]
     assert report.metrics("legacy").tool_call_success_rate == 2 / 3
     assert report.metrics("deerflow_v2").tool_call_success_rate == 2 / 3
+
+
+def test_legacy_and_v2_approval_denial_preserves_the_file(tmp_path: Path) -> None:
+    legacy_responses = [
+        '<tool>{"name":"read_file","args":{"path":"app.py"}}</tool>',
+        (
+            '<tool>{"name":"patch_file","args":{"path":"app.py",'
+            '"old_text":"value = 1","new_text":"value = 2"}}</tool>'
+        ),
+        "<final>修改被拒绝，文件保持 value = 1。</final>",
+    ]
+    v2_responses = [
+        _native_tool_call("read_file", {"path": "app.py"}, "call-deny-read"),
+        _native_tool_call(
+            "patch_file",
+            {
+                "path": "app.py",
+                "old_text": "value = 1",
+                "new_text": "value = 2",
+            },
+            "call-deny-patch",
+        ),
+        AIMessage(content="修改被拒绝，文件保持 value = 1。"),
+    ]
+    legacy_events, legacy_workspace = _run_scripted_approval_scenario(
+        tmp_path,
+        scenario="approval-deny",
+        profile="legacy",
+        workspace_files={"app.py": "value = 1\n"},
+        legacy_responses=legacy_responses,
+        v2_responses=v2_responses,
+        prompt="读取 app.py 后尝试修改，但遵守我的拒绝",
+        approval_choice="deny",
+    )
+    v2_events, v2_workspace = _run_scripted_approval_scenario(
+        tmp_path,
+        scenario="approval-deny",
+        profile="deerflow_v2",
+        workspace_files={"app.py": "value = 1\n"},
+        legacy_responses=legacy_responses,
+        v2_responses=v2_responses,
+        prompt="读取 app.py 后尝试修改，但遵守我的拒绝",
+        approval_choice="deny",
+    )
+    report = ProfileParityReport(
+        results=[
+            project_profile_timeline(
+                "approval-deny",
+                "legacy",
+                legacy_events,
+                assertions_passed=(
+                    (legacy_workspace / "app.py").read_text(encoding="utf-8")
+                    == "value = 1\n"
+                    and _final_contains(legacy_events, "修改被拒绝")
+                ),
+            ),
+            project_profile_timeline(
+                "approval-deny",
+                "deerflow_v2",
+                v2_events,
+                assertions_passed=(
+                    (v2_workspace / "app.py").read_text(encoding="utf-8")
+                    == "value = 1\n"
+                    and _final_contains(v2_events, "修改被拒绝")
+                ),
+            ),
+        ]
+    )
+
+    assert report.regressions() == ()
+    assert all(result.passed for result in report.results), report.to_dict()
+    assert all(result.tool_calls == 2 for result in report.results)
+    assert all(result.tool_errors == 1 for result in report.results)
+    assert [_event_count(events, "approval_required") for events in (legacy_events, v2_events)] == [1, 1]
+    assert report.metrics("legacy").tool_call_success_rate == 0.5
+    assert report.metrics("deerflow_v2").tool_call_success_rate == 0.5
+
+
+def test_legacy_and_v2_session_approval_is_reused_for_two_edits(tmp_path: Path) -> None:
+    legacy_responses = [
+        '<tool>{"name":"read_file","args":{"path":"first.py"}}</tool>',
+        (
+            '<tool>{"name":"patch_file","args":{"path":"first.py",'
+            '"old_text":"value = 1","new_text":"value = 2"}}</tool>'
+        ),
+        '<tool>{"name":"read_file","args":{"path":"second.py"}}</tool>',
+        (
+            '<tool>{"name":"patch_file","args":{"path":"second.py",'
+            '"old_text":"value = 1","new_text":"value = 2"}}</tool>'
+        ),
+        "<final>会话授权已复用，两处 value 均更新为 2。</final>",
+    ]
+    v2_responses = [
+        _native_tool_call("read_file", {"path": "first.py"}, "call-session-read-first"),
+        _native_tool_call(
+            "patch_file",
+            {
+                "path": "first.py",
+                "old_text": "value = 1",
+                "new_text": "value = 2",
+            },
+            "call-session-patch-first",
+        ),
+        _native_tool_call("read_file", {"path": "second.py"}, "call-session-read-second"),
+        _native_tool_call(
+            "patch_file",
+            {
+                "path": "second.py",
+                "old_text": "value = 1",
+                "new_text": "value = 2",
+            },
+            "call-session-patch-second",
+        ),
+        AIMessage(content="会话授权已复用，两处 value 均更新为 2。"),
+    ]
+    workspaces: list[Path] = []
+    timelines: list[list[dict[str, object]]] = []
+    for profile in ("legacy", "deerflow_v2"):
+        events, workspace = _run_scripted_approval_scenario(
+            tmp_path,
+            scenario="approval-session",
+            profile=profile,
+            workspace_files={"first.py": "value = 1\n", "second.py": "value = 1\n"},
+            legacy_responses=legacy_responses,
+            v2_responses=v2_responses,
+            prompt="把两个文件中的 value 都改为 2",
+            approval_choice="session",
+        )
+        timelines.append(events)
+        workspaces.append(workspace)
+
+    results = []
+    for profile, events, workspace in zip(
+        ("legacy", "deerflow_v2"), timelines, workspaces, strict=True
+    ):
+        files_updated = all(
+            (workspace / filename).read_text(encoding="utf-8") == "value = 2\n"
+            for filename in ("first.py", "second.py")
+        )
+        results.append(
+            project_profile_timeline(
+                "approval-session",
+                profile,
+                events,
+                assertions_passed=(
+                    files_updated and _final_contains(events, "两处 value 均更新为 2")
+                ),
+            )
+        )
+    report = ProfileParityReport(results=results)
+
+    assert report.regressions() == ()
+    assert all(result.passed for result in report.results), report.to_dict()
+    assert all(result.tool_calls == 4 for result in report.results)
+    assert all(result.tool_errors == 0 for result in report.results)
+    assert [_event_count(events, "approval_required") for events in timelines] == [1, 1]
+    assert report.metrics("legacy").tool_call_success_rate == 1.0
+    assert report.metrics("deerflow_v2").tool_call_success_rate == 1.0
 
 
 def test_report_surfaces_a_v2_regression_without_hiding_legacy_success() -> None:
