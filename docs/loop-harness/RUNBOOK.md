@@ -48,6 +48,26 @@ GitHub。每轮使用独立 synthetic relay session，`relay.visibility=none`。
   finding、Draft PR、首次阻断或日报存在时通过 `cc-connect send --stdin` 主动发送中文摘要。
   通知正文走 stdin，不进入进程参数；目标 session 只保存在本机 cc-connect cron 配置中。
 
+## 飞书网关 watchdog
+
+watchdog 独立于 cc-connect 内部 cron，由 macOS `launchd` 每 5 分钟运行一次。安装时从
+现有 Loop cron 读取通知目标，不需要把飞书 session 写进命令历史：
+
+```bash
+python scripts/cc_connect_watchdog.py install \
+  --source-cron-id <小时任务 ID> \
+  --expected-cron-id <小时任务 ID> \
+  --expected-cron-id <日报任务 ID>
+
+sage-cc-connect-watchdog doctor
+sage-cc-connect-watchdog status
+```
+
+`doctor` 只检查不重启；`status` 读取最近一次状态。正常检查静默，daemon/socket 异常时
+限频重启，cron 缺失时只发一次告警，恢复后只发一条中文消息。若需卸载，执行
+`sage-cc-connect-watchdog uninstall`；默认保留
+`~/.local/state/sage-cc-connect-watchdog/` 中的审计状态。
+
 ## 排障
 
 - `BLOCKED_ROOT_DIRTY`：完成或移动根目录人工改动，不得由 Harness stash/reset/clean。
@@ -57,6 +77,11 @@ GitHub。每轮使用独立 synthetic relay session，`relay.visibility=none`。
   失败，重新执行 `sage-loopctl install --refresh-manifest`，确保 launcher 显式传递 `HOME`，
   再人工执行 `sage-loopctl enable --pr-canary`。
 - `BLOCKED_REVIEWER`：检查 cc-connect daemon、`sage-loop-review` 和 synthetic relay binding。
+- watchdog 显示 `cron_jobs=false`：核对 `cc-connect cron list` 中的 Loop 小时任务与日报
+  任务 ID；任务重建后重新运行 install，刷新本机私有配置。
+- watchdog 反复 `UNHEALTHY`：先执行 `sage-cc-connect-watchdog doctor` 定位 daemon、
+  `api_socket` 或 `cron_jobs`，再检查 `~/.cc-connect/logs/cc-connect.log`。15 分钟冷却期内
+  不会重复重启。
 - `BLOCKED_GITHUB_CHECKS`：CI 未全绿，保留 PR，不得人工绕过后让 Loop 继续合并。
 - `BLOCKED_BASE_DRIFT` / `BLOCKED_PR_HEAD_DRIFT`：开发分支或 PR head 已变化，原验证失效，
   PR 转人工处理。
