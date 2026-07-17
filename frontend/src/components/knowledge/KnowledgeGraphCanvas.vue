@@ -14,6 +14,7 @@ import {
   communitySeedPositions,
   featuredNodeIds,
   graphFocus,
+  graphLegendItems,
 } from './knowledgeGraphPresentation'
 
 const props = defineProps<{
@@ -106,8 +107,8 @@ const communityColor = computed(() => {
 })
 const visibleSet = computed(() => new Set(props.visibleKinds))
 const normalizedQuery = computed(() => props.query.trim().toLocaleLowerCase())
-const featuredLabels = computed(() => featuredNodeIds(props.graph, props.communities))
-const focus = computed(() => graphFocus(props.graph, props.selectedNodeId))
+const featuredLabels = computed(() => featuredNodeIds(props.graph, props.communities, 1))
+const focus = computed(() => graphFocus(props.graph, props.selectedNodeId, 2))
 const selectedNode = computed(() => props.graph.nodes.find(
   (node) => node.node_id === props.selectedNodeId,
 ) ?? null)
@@ -118,6 +119,12 @@ const selectedCommunity = computed(() => props.communities?.communities.find(
   (item) => item.community_id === selectedMetric.value?.community_id,
 ) ?? null)
 const sourceCount = computed(() => props.graph.nodes.filter((node) => node.kind === 'source').length)
+const legendItems = computed(() => graphLegendItems(
+  props.graph,
+  props.communities,
+  props.colorMode,
+  { type: typeColors, community: communityColor.value },
+))
 const mobileNodes = computed(() => props.graph.nodes
   .filter(isNodeVisible)
   .sort((left, right) => {
@@ -141,7 +148,12 @@ function nodeColor(node: KnowledgeGraphNode) {
 
 function layoutCacheKey() {
   const analysisRevision = props.communities?.analysis.analysis_revision ?? 'unclustered'
-  return `sage.knowledge.graph.layout.v4.${props.graph.snapshot.graph_revision}.${analysisRevision}`
+  return `sage.knowledge.graph.layout.v7.${props.graph.snapshot.graph_revision}.${analysisRevision}`
+}
+
+function canvasLabel(label: string) {
+  const normalized = label.replace(/\s+/g, ' ').trim()
+  return normalized.length > 20 ? `${normalized.slice(0, 19)}…` : normalized
 }
 
 function cachedPositions() {
@@ -171,11 +183,14 @@ function savePositions(graph: Graph) {
 
 function applyPresentation() {
   if (!sigmaGraph) return
-  const selectedNodeId = props.selectedNodeId
-  const focusValue = focus.value
+  const focusNodeId = props.selectedNodeId ?? hoveredNodeId
+  const focusValue = focusNodeId === props.selectedNodeId
+    ? focus.value
+    : graphFocus(props.graph, focusNodeId, 2)
 
   sigmaGraph.forEachNode((nodeId, attributes) => {
-    const selected = nodeId === selectedNodeId
+    const selected = nodeId === props.selectedNodeId
+    const focused = nodeId === focusNodeId
     const connected = focusValue.connectedNodeIds.has(nodeId)
     const hovered = nodeId === hoveredNodeId
     const baseColor = String(attributes.baseColor)
@@ -183,22 +198,22 @@ function applyPresentation() {
     sigmaGraph?.setNodeAttribute(
       nodeId,
       'color',
-      selectedNodeId && !selected && !connected ? dimNodeColor : baseColor,
+      focusNodeId && !focused && !connected ? dimNodeColor : baseColor,
     )
     sigmaGraph?.setNodeAttribute(
       nodeId,
       'size',
-      selected ? baseSize * 1.35 : connected || hovered ? baseSize * 1.08 : baseSize,
+      selected ? baseSize * 1.38 : focused ? baseSize * 1.22 : connected || hovered ? baseSize * 1.08 : baseSize,
     )
     sigmaGraph?.setNodeAttribute(
       nodeId,
       'forceLabel',
-      hovered || (selectedNodeId
+      hovered || (focusNodeId
         ? focusValue.labelNodeIds.has(nodeId)
         : featuredLabels.value.has(nodeId)),
     )
     sigmaGraph?.setNodeAttribute(nodeId, 'highlighted', false)
-    sigmaGraph?.setNodeAttribute(nodeId, 'zIndex', selected ? 5 : connected || hovered ? 3 : 1)
+    sigmaGraph?.setNodeAttribute(nodeId, 'zIndex', selected ? 6 : focused ? 5 : connected || hovered ? 3 : 1)
   })
 
   sigmaGraph.forEachEdge((edgeId, attributes) => {
@@ -206,21 +221,21 @@ function applyPresentation() {
     sigmaGraph?.setEdgeAttribute(
       edgeId,
       'hidden',
-      Boolean(attributes.baseHidden) || Boolean(selectedNodeId && !focused),
+      Boolean(focusNodeId ? !focused : attributes.globalHidden),
     )
     sigmaGraph?.setEdgeAttribute(
       edgeId,
       'color',
-      selectedNodeId ? (focused ? focusEdgeColor : dimEdgeColor) : String(attributes.baseColor),
+      focusNodeId ? (focused ? focusEdgeColor : dimEdgeColor) : String(attributes.baseColor),
     )
     sigmaGraph?.setEdgeAttribute(
       edgeId,
       'size',
-      selectedNodeId && focused
+      focusNodeId && focused
         ? Math.max(1.35, Number(attributes.baseSize) * 1.45)
         : Number(attributes.baseSize),
     )
-    sigmaGraph?.setEdgeAttribute(edgeId, 'zIndex', selectedNodeId && focused ? 2 : 0)
+    sigmaGraph?.setEdgeAttribute(edgeId, 'zIndex', focusNodeId && focused ? 2 : 0)
   })
   renderer?.refresh()
 }
@@ -257,12 +272,12 @@ async function mountRenderer(requestId: number) {
   const labelFont = rootStyles.getPropertyValue('--sage-font-sans').trim() || 'sans-serif'
   const brandColor = rootStyles.getPropertyValue('--sage-brand').trim() || '#58c78b'
   const darkTheme = document.documentElement.dataset.theme === 'dark'
-  const mutedEdgeColor = darkTheme ? 'rgba(139, 148, 163, 0.11)' : 'rgba(113, 122, 137, 0.12)'
-  const linkedEdgeColor = darkTheme ? 'rgba(111, 148, 205, 0.28)' : 'rgba(72, 114, 177, 0.27)'
+  const mutedEdgeColor = darkTheme ? 'rgba(139, 148, 163, 0.035)' : 'rgba(113, 122, 137, 0.04)'
+  const linkedEdgeColor = darkTheme ? 'rgba(111, 148, 205, 0.055)' : 'rgba(72, 114, 177, 0.06)'
   dimNodeColor = darkTheme ? 'rgba(139, 148, 163, 0.2)' : 'rgba(113, 122, 137, 0.2)'
   dimEdgeColor = darkTheme ? 'rgba(139, 148, 163, 0.08)' : 'rgba(113, 122, 137, 0.08)'
   focusEdgeColor = brandColor
-  props.graph.nodes.forEach((node, index) => {
+  props.graph.nodes.filter(isNodeVisible).forEach((node, index) => {
     const position = positions.get(node.node_id)
       ?? seedPositions.get(node.node_id)
       ?? { x: index, y: 0 }
@@ -274,12 +289,12 @@ async function mountRenderer(requestId: number) {
       : Math.min(9.5, 3.2 + Math.sqrt(weightedDegree) * 1.05)
     graph.addNode(node.node_id, {
       ...position,
-      label: node.label,
+      label: canvasLabel(node.label),
       color: baseColor,
       baseColor,
       size: baseSize,
       baseSize,
-      hidden: !isNodeVisible(node),
+      hidden: false,
       forceLabel: false,
       zIndex: 1,
     })
@@ -288,36 +303,36 @@ async function mountRenderer(requestId: number) {
     if (!graph.hasNode(edge.source_node_id) || !graph.hasNode(edge.target_node_id)) continue
     const baseColor = edge.kind === 'WIKILINK' ? linkedEdgeColor : mutedEdgeColor
     const baseSize = edge.kind === 'WIKILINK'
-      ? Math.min(1.35, 0.8 + edge.weight * 0.13)
-      : Math.min(0.9, 0.5 + edge.confidence * 0.25)
-    const baseHidden = graph.getNodeAttribute(edge.source_node_id, 'hidden')
-      || graph.getNodeAttribute(edge.target_node_id, 'hidden')
+      ? Math.min(0.72, 0.34 + edge.weight * 0.08)
+      : Math.min(0.5, 0.24 + edge.confidence * 0.12)
+    const globalHidden = edge.kind === 'EVIDENCED_BY'
     graph.addEdgeWithKey(edge.edge_id, edge.source_node_id, edge.target_node_id, {
       color: baseColor,
       baseColor,
       size: baseSize,
       baseSize,
-      hidden: baseHidden,
-      baseHidden,
+      hidden: globalHidden,
+      globalHidden,
+      weight: edge.kind === 'WIKILINK' ? Math.max(0.5, edge.weight) : 0.06,
       type: 'line',
       zIndex: 0,
     })
   }
   if (
-    positions.size !== props.graph.nodes.length
+    positions.size !== graph.order
     && graph.order > 1
     && graph.size > 0
     && !props.communities?.communities.length
   ) {
     forceAtlas2.assign(graph, {
-      iterations: Math.min(260, 90 + graph.order),
+      iterations: Math.min(360, 150 + graph.order),
       settings: {
-        edgeWeightInfluence: 0.7,
-        gravity: 0.12,
+        edgeWeightInfluence: 0.55,
+        gravity: 0.08,
         linLogMode: true,
-        scalingRatio: 28,
+        scalingRatio: 36,
         strongGravityMode: false,
-        slowDown: 12,
+        slowDown: 16,
         barnesHutOptimize: graph.order > 100,
         barnesHutTheta: 0.7,
       },
@@ -330,11 +345,14 @@ async function mountRenderer(requestId: number) {
       defaultEdgeColor: mutedEdgeColor,
       defaultEdgeType: 'line',
       labelColor: { color: labelColor },
-      labelDensity: 0.06,
+      labelDensity: 0.05,
       labelFont,
-      labelGridCellSize: 130,
-      labelRenderedSizeThreshold: 12,
+      labelGridCellSize: 140,
+      labelRenderedSizeThreshold: 100,
+      labelSize: 12,
+      labelWeight: '500',
       renderEdgeLabels: false,
+      stagePadding: 52,
       zIndex: true,
     })
     sigmaGraph = graph
@@ -344,10 +362,12 @@ async function mountRenderer(requestId: number) {
     renderer.on('clickStage', () => emit('select', null))
     renderer.on('enterNode', ({ node }) => {
       hoveredNodeId = node
+      if (container.value) container.value.style.cursor = 'pointer'
       applyPresentation()
     })
     renderer.on('leaveNode', () => {
       hoveredNodeId = null
+      if (container.value) container.value.style.cursor = 'default'
       applyPresentation()
     })
     rendererDirty = false
@@ -480,7 +500,15 @@ onBeforeUnmount(() => {
       </button>
     </div>
     <div v-else-if="!mobile" class="graph-global-summary">
-      {{ communities?.analysis.community_count ?? 0 }} 个社区 · {{ sourceCount }} 个来源文件
+      <strong>全局图谱</strong>
+      <span>{{ communities?.analysis.community_count ?? 0 }} 个社区 · {{ sourceCount }} 个来源文件</span>
+    </div>
+    <div v-if="!mobile" class="graph-legend-panel" :data-mode="colorMode" aria-label="图谱图例">
+      <span v-for="item in legendItems" :key="item.id" :title="`${item.label} · ${item.count}`">
+        <i :style="{ background: item.color }"></i>
+        <b>{{ item.label }}</b>
+        <small>{{ item.count }}</small>
+      </span>
     </div>
     <div v-if="!mobile" class="graph-controls" aria-label="图谱缩放">
       <button type="button" title="放大" aria-label="放大图谱" @click="zoom('in')"><Plus :size="17" /></button>
@@ -508,7 +536,8 @@ onBeforeUnmount(() => {
 .graph-surface { position:relative; min-width:0; min-height:0; height:100%; overflow:hidden; background:var(--sage-surface); }
 .sigma-container { position:absolute; inset:0; }.graph-controls { position:absolute; right:16px; bottom:16px; display:flex; flex-direction:column; overflow:hidden; border:1px solid var(--sage-border); border-radius:var(--sage-radius); background:color-mix(in srgb,var(--sage-surface) 92%,transparent); box-shadow:var(--sage-shadow-sm); backdrop-filter:blur(10px); }.graph-controls button { display:grid; place-items:center; width:36px; height:36px; padding:0; border:0; border-bottom:1px solid var(--sage-border); color:var(--sage-text-secondary); background:transparent; }.graph-controls button:last-child { border-bottom:0; }.graph-controls button:hover { color:var(--sage-text); background:var(--sage-surface-muted); }.graph-error { position:absolute; top:16px; left:50%; margin:0; padding:8px 11px; border:1px solid var(--sage-border); border-radius:var(--sage-radius); color:var(--sage-danger); background:var(--sage-surface); transform:translateX(-50%); }
 .graph-focus-summary { position:absolute; left:16px; bottom:16px; display:grid; grid-template-columns:10px minmax(0,1fr) 28px; align-items:center; gap:10px; width:min(390px,calc(100% - 82px)); min-height:54px; padding:8px 8px 8px 12px; border:1px solid var(--sage-border); border-radius:var(--sage-radius-lg); color:var(--sage-text); background:color-mix(in srgb,var(--sage-surface) 92%,transparent); box-shadow:var(--sage-shadow-sm); backdrop-filter:blur(12px); }.graph-focus-summary>i { width:9px; height:9px; border-radius:50%; box-shadow:0 0 0 4px color-mix(in srgb,currentColor 12%,transparent); }.graph-focus-summary span,.graph-focus-summary strong,.graph-focus-summary small { display:block; min-width:0; }.graph-focus-summary strong { overflow:hidden; font-size:var(--sage-font-sm); text-overflow:ellipsis; white-space:nowrap; }.graph-focus-summary small { overflow:hidden; margin-top:3px; color:var(--sage-text-muted); font-size:11px; text-overflow:ellipsis; white-space:nowrap; }.graph-focus-summary button { display:grid; place-items:center; width:28px; height:28px; padding:0; border:0; border-radius:var(--sage-radius); color:var(--sage-text-muted); background:transparent; }.graph-focus-summary button:hover { color:var(--sage-text); background:var(--sage-surface-muted); }
-.graph-global-summary { position:absolute; left:16px; bottom:16px; padding:7px 9px; border:1px solid var(--sage-border); border-radius:var(--sage-radius); color:var(--sage-text-muted); background:color-mix(in srgb,var(--sage-surface) 90%,transparent); font-size:11px; backdrop-filter:blur(8px); }
+.graph-global-summary { position:absolute; left:16px; bottom:16px; display:flex; align-items:center; gap:7px; padding:7px 9px; border:1px solid var(--sage-border); border-radius:var(--sage-radius); color:var(--sage-text-muted); background:color-mix(in srgb,var(--sage-surface) 90%,transparent); font-size:11px; backdrop-filter:blur(8px); }.graph-global-summary strong { color:var(--sage-text-secondary); font-size:11px; }
+.graph-legend-panel { position:absolute; top:14px; left:14px; display:flex; flex-wrap:wrap; gap:5px; width:min(520px,calc(100% - 100px)); pointer-events:none; }.graph-legend-panel span { display:grid; grid-template-columns:8px minmax(0,auto) auto; align-items:center; gap:5px; min-width:0; height:26px; padding:0 7px; border:1px solid color-mix(in srgb,var(--sage-border) 76%,transparent); border-radius:var(--sage-radius-sm); color:var(--sage-text-secondary); background:color-mix(in srgb,var(--sage-surface) 84%,transparent); font-size:10px; backdrop-filter:blur(8px); }.graph-legend-panel i { width:7px; height:7px; border-radius:50%; }.graph-legend-panel b { max-width:105px; overflow:hidden; font-weight:600; text-overflow:ellipsis; white-space:nowrap; }.graph-legend-panel small { color:var(--sage-text-muted); font-size:9px; }
 .mobile-node-list { height:100%; overflow:auto; padding:8px 14px 24px; }.mobile-node-list button { display:grid; grid-template-columns:10px minmax(0,1fr); align-items:center; gap:11px; width:100%; min-height:58px; padding:8px 4px; border:0; border-bottom:1px solid var(--sage-border); text-align:left; color:var(--sage-text); background:transparent; }.mobile-node-list button.active { background:var(--sage-source-bg); }.mobile-node-list i { width:9px; height:9px; border-radius:50%; }.mobile-node-list span,.mobile-node-list strong,.mobile-node-list small { display:block; min-width:0; }.mobile-node-list strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:var(--sage-font-md); }.mobile-node-list small { margin-top:3px; color:var(--sage-text-muted); font-size:var(--sage-font-xs); }.mobile-node-list>p { color:var(--sage-text-muted); text-align:center; }
 @media (prefers-reduced-motion:reduce) { .graph-controls button { transition:none; } }
 </style>

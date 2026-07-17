@@ -4,6 +4,7 @@ import {
   communitySeedPositions,
   featuredNodeIds,
   graphFocus,
+  graphLegendItems,
 } from './knowledgeGraphPresentation'
 
 const nodes = [
@@ -64,4 +65,26 @@ it('creates deterministic community-separated seed positions', () => {
 
   expect(first).toEqual(second)
   expect(first.get('isolated')).not.toEqual(first.get('center'))
+})
+
+it('builds a real legend for the active graph color mode', () => {
+  const analyzed = {
+    ...communities,
+    communities: [
+      { community_id: 'community-a', label: 'Harness', node_count: 3, edge_count: 2, cohesion: 0.7, properties: {} },
+      { community_id: 'community-b', label: '孤立知识', node_count: 1, edge_count: 0, cohesion: 0, properties: {} },
+    ],
+  }
+  const colors = {
+    type: { page: '#00f', source: '#f90', concept: '#80f' },
+    community: new Map([['community-a', '#0aa'], ['community-b', '#a0a']]),
+  }
+
+  expect(graphLegendItems(graph, analyzed, 'community', colors, 1)).toEqual([{
+    id: 'community-a', label: 'Harness', count: 3, color: '#0aa',
+  }])
+  expect(graphLegendItems(graph, analyzed, 'type', colors, 2)).toEqual([
+    { id: 'page', label: '页面', count: 2, color: '#00f' },
+    { id: 'concept', label: '概念', count: 1, color: '#80f' },
+  ])
 })

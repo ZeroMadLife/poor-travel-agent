@@ -17,14 +17,14 @@ import KnowledgeView from './KnowledgeView.vue'
 
 vi.mock('../components/knowledge', () => ({
   KnowledgeGraphCanvas: {
-    props: ['graph', 'selectedNodeId'],
+    props: ['graph', 'selectedNodeId', 'visibleKinds'],
     emits: ['select'],
-    template: '<button class="graph-stub" type="button" @click="$emit(\'select\', \'node-page\')">真实图谱 {{ graph.nodes.length }}</button>',
+    template: '<button class="graph-stub" type="button" @click="$emit(\'select\', \'node-page\')">真实图谱 {{ graph.nodes.length }} {{ visibleKinds.join(\',\') }}</button>',
   },
   KnowledgeInspector: {
     props: ['node', 'goal', 'alignments'],
     emits: ['close', 'select'],
-    template: '<aside class="inspector-stub">{{ node?.label || goal?.title }} · 能力 {{ alignments.length }}</aside>',
+    template: '<aside class="inspector-stub">{{ node?.label || goal?.title }} · 能力 {{ alignments.length }}<button class="select-source" type="button" @click="$emit(\'select\', \'node-source\')">查看来源</button></aside>',
   },
 }))
 
@@ -254,10 +254,26 @@ it('loads revision-bound evidence when a graph node is selected', async () => {
   wrapper.unmount()
 })
 
+it('reveals a source node when evidence navigation selects a hidden kind', async () => {
+  const wrapper = await mountKnowledge()
+
+  expect(wrapper.get('.graph-stub').text()).not.toContain('source')
+  await wrapper.get('.graph-stub').trigger('click')
+  await flushPromises()
+  await wrapper.findAll('.workbench-dock [role="tab"]')[1].trigger('click')
+  await wrapper.get('.select-source').trigger('click')
+  await flushPromises()
+
+  expect(wrapper.get('.graph-stub').text()).toContain('source')
+  expect(fetchKnowledgeGraphNeighborhood).toHaveBeenCalledWith('node-source')
+  wrapper.unmount()
+})
+
 it('opens node details after selecting a graph node on mobile', async () => {
   Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 })
   const wrapper = await mountKnowledge()
 
+  expect(wrapper.get('.knowledge-harness').attributes('data-mobile-pane')).toBe('canvas')
   await wrapper.get('.graph-stub').trigger('click')
   await flushPromises()
 

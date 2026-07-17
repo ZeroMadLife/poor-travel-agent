@@ -10,6 +10,13 @@ export type KnowledgeGraphFocus = {
   labelNodeIds: Set<string>
 }
 
+export type KnowledgeGraphLegendItem = {
+  id: string
+  label: string
+  count: number
+  color: string
+}
+
 function stableFraction(value: string) {
   let hash = 2166136261
   for (let index = 0; index < value.length; index += 1) {
@@ -121,6 +128,44 @@ export function graphFocus(
         .map((item) => item.neighborId),
     ]),
   }
+}
+
+export function graphLegendItems(
+  graph: KnowledgeGraph,
+  communities: KnowledgeGraphCommunities | null,
+  colorMode: 'type' | 'community',
+  colors: { type: Record<string, string>; community: Map<string, string> },
+  limit = 6,
+): KnowledgeGraphLegendItem[] {
+  if (colorMode === 'community' && communities?.communities.length) {
+    return communities.communities
+      .slice()
+      .sort((left, right) => (
+        right.node_count - left.node_count || left.label.localeCompare(right.label, 'zh-CN')
+      ))
+      .slice(0, limit)
+      .map((community) => ({
+        id: community.community_id,
+        label: community.label.split(' / ')[0]?.trim() || community.label,
+        count: community.node_count,
+        color: colors.community.get(community.community_id) ?? '#8b5cf6',
+      }))
+  }
+
+  const counts = new Map<string, number>()
+  for (const node of graph.nodes) counts.set(node.kind, (counts.get(node.kind) ?? 0) + 1)
+  const labels: Record<string, string> = {
+    page: '页面', source: '来源', project: '项目', concept: '概念', decision: '决策', tool: '工具',
+  }
+  return [...counts.entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .slice(0, limit)
+    .map(([kind, count]) => ({
+      id: kind,
+      label: labels[kind] ?? kind,
+      count,
+      color: colors.type[kind] ?? '#829356',
+    }))
 }
 
 export function communitySeedPositions(

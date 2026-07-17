@@ -144,6 +144,8 @@ it('summarizes the selected neighborhood without exposing every graph label', ()
   expect(wrapper.get('.graph-focus-summary').text()).toContain('Agent Harness')
   expect(wrapper.get('.graph-focus-summary').text()).toContain('1 条直接连接')
   expect(wrapper.find('.graph-global-summary').exists()).toBe(false)
+  expect(wrapper.get('.graph-legend-panel').attributes('data-mode')).toBe('community')
+  expect(wrapper.get('.graph-legend-panel').text()).toContain('Harness2')
   wrapper.unmount()
 })
 
