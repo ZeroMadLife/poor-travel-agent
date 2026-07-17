@@ -74,6 +74,26 @@ import {
 
 export type { ChatMessage, ToolActivity } from './codingEvents'
 
+const NEW_SESSION_RUNTIME_PROFILE_KEY = 'sage.coding.newRuntimeProfile'
+
+function storedNewSessionRuntimeProfile(): CodingRuntimeProfile {
+  try {
+    return window.localStorage.getItem(NEW_SESSION_RUNTIME_PROFILE_KEY) === 'deerflow_v2'
+      ? 'deerflow_v2'
+      : 'legacy'
+  } catch {
+    return 'legacy'
+  }
+}
+
+function persistNewSessionRuntimeProfile(profile: CodingRuntimeProfile) {
+  try {
+    window.localStorage.setItem(NEW_SESSION_RUNTIME_PROFILE_KEY, profile)
+  } catch {
+    // Storage can be unavailable in hardened browser contexts; the in-memory choice still works.
+  }
+}
+
 export type CodingSessionUiState = {
   workspaceRoot: string
   permissionMode: PermissionMode
@@ -305,6 +325,8 @@ export const useCodingStore = defineStore('coding', () => {
   const skills = ref<CodingSkillSummary[]>([])
   const mcpServers = ref<CodingMcpServer[]>([])
   const models = ref<CodingModel[]>([])
+  const availableRuntimeProfiles = ref<CodingRuntimeProfile[]>(['legacy'])
+  const newSessionRuntimeProfile = ref<CodingRuntimeProfile>('legacy')
   const providerSettings = ref<CodingProviderSettings | null>(null)
   const accountProviders = ref<CloudModelProvider[]>([])
   const accountDefaultModel = ref<string | null>(null)
@@ -710,8 +732,11 @@ export const useCodingStore = defineStore('coding', () => {
 
   async function initialize() {
     if (sessionId.value) return
+    if (storedNewSessionRuntimeProfile() === 'deerflow_v2') {
+      await bootstrapModelCatalog()
+    }
     const selection = ++selectionGeneration
-    const session = await startCodingSession()
+    const session = await startCodingSession(undefined, 'ask', newSessionRuntimeProfile.value)
     if (selection !== selectionGeneration) return
     sessionId.value = session.session_id
     ensureSession(session.session_id)
@@ -1023,6 +1048,7 @@ export const useCodingStore = defineStore('coding', () => {
       const res = await fetchCodingModels(targetSessionId || undefined)
       if (generation !== modelRequestGeneration) return false
       models.value = res.models
+      reconcileRuntimeProfiles(res.runtime_profiles)
       if (res.current) currentModelId.value = res.current
       else if (res.models.length > 0) currentModelId.value = res.models[0].id
       reasoningMode.value = res.reasoning_mode || 'off'
@@ -1031,6 +1057,31 @@ export const useCodingStore = defineStore('coding', () => {
       if (generation === modelRequestGeneration) models.value = []
       return false
     }
+  }
+
+  function reconcileRuntimeProfiles(profiles: unknown) {
+    const advertised = Array.isArray(profiles)
+      ? profiles.filter((profile): profile is CodingRuntimeProfile =>
+          profile === 'legacy' || profile === 'deerflow_v2')
+      : []
+    availableRuntimeProfiles.value = [
+      'legacy',
+      ...(advertised.includes('deerflow_v2') ? ['deerflow_v2' as const] : []),
+    ]
+    const preferred = storedNewSessionRuntimeProfile()
+    newSessionRuntimeProfile.value = availableRuntimeProfiles.value.includes(preferred)
+      ? preferred
+      : 'legacy'
+    if (preferred !== newSessionRuntimeProfile.value) {
+      persistNewSessionRuntimeProfile('legacy')
+    }
+  }
+
+  function setNewSessionRuntimeProfile(profile: CodingRuntimeProfile): boolean {
+    if (!availableRuntimeProfiles.value.includes(profile)) return false
+    newSessionRuntimeProfile.value = profile
+    persistNewSessionRuntimeProfile(profile)
+    return true
   }
 
   async function bootstrapModelCatalog(force = false) {
@@ -1272,8 +1323,14 @@ export const useCodingStore = defineStore('coding', () => {
   }
 
   async function createNewSession(initialPrompt = ''): Promise<string> {
+    if (
+      newSessionRuntimeProfile.value === 'deerflow_v2'
+      || storedNewSessionRuntimeProfile() === 'deerflow_v2'
+    ) {
+      await bootstrapModelCatalog()
+    }
     const selection = ++selectionGeneration
-    const session = await startCodingSession()
+    const session = await startCodingSession(undefined, 'ask', newSessionRuntimeProfile.value)
     if (selection !== selectionGeneration) return ''
     stopSessionTransport()
     sessionId.value = session.session_id
@@ -1301,8 +1358,8 @@ export const useCodingStore = defineStore('coding', () => {
     return session.session_id
   }
 
-  async function startNewSession() {
-    await createNewSession()
+  function startNewSession(): Promise<string> {
+    return createNewSession()
   }
 
   async function startSessionWithPrompt(content: string): Promise<string> {
@@ -1589,6 +1646,8 @@ export const useCodingStore = defineStore('coding', () => {
     skills,
     mcpServers,
     models,
+    availableRuntimeProfiles,
+    newSessionRuntimeProfile,
     providerSettings,
     accountProviders,
     accountDefaultModel,
@@ -1628,6 +1687,7 @@ export const useCodingStore = defineStore('coding', () => {
     loadMcpServers,
     loadModels,
     bootstrapModelCatalog,
+    setNewSessionRuntimeProfile,
     loadProviderSettings,
     loadModelProviderSettings,
     loadUsage,

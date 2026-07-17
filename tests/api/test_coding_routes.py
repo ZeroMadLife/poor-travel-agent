@@ -1440,6 +1440,36 @@ def test_list_coding_models_returns_providers(tmp_path: Path) -> None:
     assert all(m["context_window_tokens"] == 1_000_000 for m in models)
     assert all(m["reasoning_modes"] == [] for m in models)
     assert data["current"] == "deepseek:deepseek-v4-flash"
+    assert data["runtime_profiles"] == ["legacy"]
+
+
+def test_list_coding_models_advertises_only_safe_runtime_profiles(tmp_path: Path) -> None:
+    development = TestClient(
+        create_app(
+            coding_model_factory=FakeModel,
+            coding_workspace_root=tmp_path,
+            coding_storage_root=tmp_path / ".coding-dev",
+            coding_deerflow_v2_enabled=True,
+        )
+    )
+    production = TestClient(
+        create_app(
+            coding_model_factory=FakeModel,
+            coding_workspace_root=tmp_path,
+            coding_storage_root=tmp_path / ".coding-prod",
+            coding_deerflow_v2_enabled=True,
+            cloud_app_env="production",
+            cloud_repository=object(),
+        )
+    )
+
+    assert development.get("/api/v1/coding/models").json()["runtime_profiles"] == [
+        "legacy",
+        "deerflow_v2",
+    ]
+    assert production.get("/api/v1/coding/models").json()["runtime_profiles"] == [
+        "legacy"
+    ]
 
 
 def test_list_coding_skills_returns_bundled_skills(tmp_path: Path) -> None:

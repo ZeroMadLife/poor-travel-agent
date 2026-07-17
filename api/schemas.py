@@ -7,6 +7,10 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from models.itinerary import Itinerary
 
 
+def _default_coding_runtime_profiles() -> list[Literal["legacy", "deerflow_v2"]]:
+    return ["legacy"]
+
+
 class ChatRequest(BaseModel):
     """Request body for starting or continuing a chat session."""
 
@@ -910,6 +914,9 @@ class CodingModelsResponse(BaseModel):
     models: list[CodingModel]
     current: str | None = None
     reasoning_mode: Literal["off", "low", "medium", "high"] = "off"
+    runtime_profiles: list[Literal["legacy", "deerflow_v2"]] = Field(
+        default_factory=_default_coding_runtime_profiles
+    )
 
 
 class CodingModelSwitchRequest(BaseModel):

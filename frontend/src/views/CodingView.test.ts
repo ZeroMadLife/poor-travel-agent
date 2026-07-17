@@ -197,11 +197,42 @@ describe('CodingView chat route lifecycle', () => {
     root.unmount()
   })
 
+  it('routes only after the sidebar receives a newly created session id', async () => {
+    const store = useCodingStore()
+    store.sessionId = 'session-a'
+    store.startNewSession = vi.fn().mockResolvedValue('session-new')
+    const { router, root, wrapper } = await mountChat('/coding/session/session-a')
+
+    await wrapper().get('button[aria-label="打开会话"]').trigger('click')
+    await wrapper().findComponent({ name: 'CodingSidebar' }).vm.$emit('newSession')
+
+    await vi.waitFor(() => expect(router.currentRoute.value.fullPath).toBe('/coding/session/session-new'))
+    expect(localStorage.getItem('sage.coding.recentSessionId')).toBe('session-new')
+    root.unmount()
+  })
+
+  it('keeps the current route when new session creation is superseded', async () => {
+    const store = useCodingStore()
+    store.sessionId = 'session-a'
+    store.startNewSession = vi.fn().mockResolvedValue('')
+    const { router, root, wrapper } = await mountChat('/coding/session/session-a')
+
+    await wrapper().get('button[aria-label="打开会话"]').trigger('click')
+    await wrapper().findComponent({ name: 'CodingSidebar' }).vm.$emit('newSession')
+
+    await vi.waitFor(() => expect(store.startNewSession).toHaveBeenCalledTimes(1))
+    expect(router.currentRoute.value.fullPath).toBe('/coding/session/session-a')
+    root.unmount()
+  })
+
   it('archives the active session through the chat view and replaces its URL', async () => {
     const store = useCodingStore()
     store.sessionId = 'session-a'
     store.setSessionArchived = vi.fn()
-    store.startNewSession = vi.fn(async () => { store.sessionId = 'session-new' })
+    store.startNewSession = vi.fn(async () => {
+      store.sessionId = 'session-new'
+      return 'session-new'
+    })
     const { router, root, wrapper } = await mountChat('/coding/session/session-a')
 
     await wrapper().get('button[aria-label="打开会话"]').trigger('click')

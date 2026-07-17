@@ -39,6 +39,7 @@ function memoryProposal(proposalId: string, revision: number): MemoryProposal {
 describe('coding store', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
+    localStorage.removeItem('sage.coding.newRuntimeProfile')
   })
 
   afterEach(() => {
@@ -110,6 +111,76 @@ describe('coding store', () => {
     await forced
 
     expect(store.currentModelId).toBe('account:p1:model-new')
+  })
+
+  it('uses only server-advertised runtime profiles for new sessions', async () => {
+    localStorage.setItem('sage.coding.newRuntimeProfile', 'deerflow_v2')
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        models: [], current: null, reasoning_mode: 'off', runtime_profiles: ['legacy'],
+      }),
+    }))
+    const store = useCodingStore()
+
+    await store.bootstrapModelCatalog()
+
+    expect(store.availableRuntimeProfiles).toEqual(['legacy'])
+    expect(store.newSessionRuntimeProfile).toBe('legacy')
+    expect(localStorage.getItem('sage.coding.newRuntimeProfile')).toBe('legacy')
+    expect(store.setNewSessionRuntimeProfile('deerflow_v2')).toBe(false)
+  })
+
+  it('creates initial and subsequent sessions with the opted-in Harness 2.0 profile', async () => {
+    localStorage.setItem('sage.coding.newRuntimeProfile', 'deerflow_v2')
+    class FakeSocket {
+      readyState = 0
+      onopen: (() => void) | null = null
+      onmessage: ((event: MessageEvent) => void) | null = null
+      onerror: (() => void) | null = null
+      onclose: (() => void) | null = null
+      send = vi.fn()
+      close = vi.fn()
+    }
+    const empty = {
+      items: [], next_cursor: 0, has_more: false, older_cursor: null,
+      latest_cursor: 0, active_run: null, models: [], current: null,
+      reasoning_mode: 'off', runtime_profiles: ['legacy', 'deerflow_v2'],
+      entries: [], path: '.', is_git: false, branch: '', dirty_count: 0,
+      changed_files: [], sessions: [], runs: [], configured: false, used_tokens: 0,
+    }
+    const fetchMock = vi.fn((input: URL | string, init?: RequestInit) => {
+      const url = input instanceof URL ? input : new URL(input, window.location.origin)
+      if (init?.method === 'POST' && url.pathname.endsWith('/coding/session')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            session_id: 'v2-session', workspace_root: '/tmp/repo', workspace_id: 'w1',
+            permission_mode: 'default', runtime_profile: 'deerflow_v2',
+          }),
+        })
+      }
+      return Promise.resolve({ ok: true, json: async () => empty })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('WebSocket', FakeSocket)
+    const store = useCodingStore()
+
+    await store.initialize()
+    await store.startNewSession()
+
+    const creations = fetchMock.mock.calls.filter(([input, init]) => {
+      const url = input instanceof URL ? input : new URL(input, window.location.origin)
+      return init?.method === 'POST' && url.pathname.endsWith('/coding/session')
+    })
+    expect(creations).toHaveLength(2)
+    for (const creation of creations) {
+      expect(JSON.parse(String(creation[1]?.body))).toMatchObject({
+        runtime_profile: 'deerflow_v2',
+      })
+    }
+    expect(store.runtimeProfile).toBe('deerflow_v2')
+    store.disconnect()
   })
 
   it('keeps the latest usage range when responses finish out of order', async () => {

@@ -237,11 +237,11 @@ async function startNewSession() {
   clearDeepLinkError()
   drawerError.value = ''
   try {
-    await store.startNewSession()
-    if (!store.sessionId) return
-    rememberSession(store.sessionId)
-    lastResolvedSessionId.value = store.sessionId
-    await router.push(`/coding/session/${encodeURIComponent(store.sessionId)}`)
+    const sessionId = await store.startNewSession()
+    if (!sessionId) return
+    rememberSession(sessionId)
+    lastResolvedSessionId.value = sessionId
+    await router.push(`/coding/session/${encodeURIComponent(sessionId)}`)
     closeLeftSheet()
   } catch (error) {
     if (leftOpen.value) showDrawerError(error, '新建会话')
@@ -254,11 +254,11 @@ async function archiveCurrentSession(sessionId: string) {
   drawerError.value = ''
   try {
     await store.setSessionArchived(sessionId, true)
-    await store.startNewSession()
-    if (!store.sessionId) return
-    rememberSession(store.sessionId)
-    lastResolvedSessionId.value = store.sessionId
-    await router.replace(`/coding/session/${encodeURIComponent(store.sessionId)}`)
+    const replacementSessionId = await store.startNewSession()
+    if (!replacementSessionId) return
+    rememberSession(replacementSessionId)
+    lastResolvedSessionId.value = replacementSessionId
+    await router.replace(`/coding/session/${encodeURIComponent(replacementSessionId)}`)
     closeLeftSheet()
   } catch (error) {
     if (leftOpen.value) showDrawerError(error, '归档会话')

@@ -124,6 +124,20 @@ def _require_enabled_runtime_profile(value: object, request: Request) -> Runtime
     return profile
 
 
+def _available_runtime_profiles(request: Request) -> list[RuntimeProfile]:
+    """Advertise only runtime profiles that this deployment can safely create."""
+    profiles: list[RuntimeProfile] = ["legacy"]
+    if not bool(getattr(request.app.state, "coding_deerflow_v2_enabled", False)):
+        return profiles
+    app_env = str(getattr(request.app.state, "cloud_app_env", "development")).lower()
+    sandbox_provider = str(
+        getattr(request.app.state, "coding_sandbox_provider", "local_workspace")
+    ).strip().lower()
+    if app_env in {"development", "test"} or sandbox_provider != "local_workspace":
+        profiles.append("deerflow_v2")
+    return profiles
+
+
 async def _enforce_coding_session_owner(connection: HTTPConnection) -> None:
     session_id = str(
         connection.path_params.get("session_id", "")
@@ -1446,6 +1460,7 @@ async def list_coding_models(
         models=models,
         current=current,
         reasoning_mode=cast(Literal["off", "low", "medium", "high"], reasoning_mode),
+        runtime_profiles=_available_runtime_profiles(request),
     )
 
 
