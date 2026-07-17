@@ -12,7 +12,7 @@ import pytest
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
 from sage_harness.runtime.checkpoint import open_sqlite_checkpointer, thread_config
-from sage_harness.runtime.events import HarnessStreamItem
+from sage_harness.runtime.events import HarnessStreamItem, message_payload
 
 from core.coding.context import WorkspaceContext
 from core.coding.runtime import CodingRuntime
@@ -108,6 +108,93 @@ def test_event_adapter_preserves_failed_tool_message_status() -> None:
     assert events[0].status == "error"
     assert events[0].payload["type"] == "tool_result"
     assert events[0].payload["is_error"] is True
+
+
+def test_event_adapter_keeps_large_knowledge_result_valid_and_deduplicated() -> None:
+    adapter = HarnessEventAdapter(session_id="s1", run_id="r1")
+    content = json.dumps(
+        {
+            "status": "evidence_found",
+            "query": "checkpoint citation",
+            "used_tokens": 2400,
+            "token_budget": 3000,
+            "omitted_count": 0,
+            "instruction": "Use only cited evidence.",
+            "citations": [
+                {
+                    "citation_id": f"kcite_{index}",
+                    "rank": index + 1,
+                    "page_revision": f"krev_{index}",
+                    "source_revision": f"sha256:{index}",
+                    "source_kind": "obsidian",
+                    "source_relative_path": f"notes/{index}.md",
+                    "title": f"Checkpoint {index}",
+                    "heading_path": ["Harness", "Citations"],
+                    "block_id": f"block_{index}",
+                    "excerpt": "revision-bound evidence " * 120,
+                    "truncated": False,
+                }
+                for index in range(8)
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+    custom_events = adapter.adapt(
+        HarnessStreamItem(
+            1,
+            "custom",
+            {
+                "type": "tool_result",
+                "tool": "knowledge_search",
+                "tool_call_id": "call-knowledge",
+                "content": content,
+            },
+            "source-custom-knowledge",
+        )
+    )
+    duplicate_message_events = adapter.adapt(
+        HarnessStreamItem(
+            2,
+            "messages",
+            (
+                ToolMessage(
+                    content=content,
+                    tool_call_id="call-knowledge",
+                    name="knowledge_search",
+                ),
+                {},
+            ),
+            "source-message-knowledge",
+        )
+    )
+
+    assert len(custom_events) == 1
+    public_content = str(custom_events[0].payload["content"])
+    retrieval = json.loads(public_content)
+    assert len(public_content) <= 4000
+    assert retrieval["status"] == "evidence_found"
+    assert retrieval["citations"]
+    assert retrieval["citations"][0]["citation_id"] == "kcite_0"
+    assert duplicate_message_events == ()
+
+
+def test_message_payload_only_expands_knowledge_tool_content() -> None:
+    content = "x" * 5_000
+
+    regular = message_payload(
+        ToolMessage(content=content, tool_call_id="call-shell", name="run_shell")
+    )
+    knowledge = message_payload(
+        ToolMessage(
+            content=content,
+            tool_call_id="call-knowledge",
+            name="knowledge_search",
+        )
+    )
+
+    assert len(str(regular["content"])) == 4_000
+    assert knowledge["content"] == content
 
 
 def test_event_adapter_namespaces_resume_events_for_idempotent_replay() -> None:

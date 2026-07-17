@@ -15,6 +15,10 @@ from sage_harness.runtime.events import (
 
 from core.coding.run_coordinator import RunEvent
 
+_PUBLIC_TOOL_CONTENT_LIMIT = 4_000
+_PUBLIC_KNOWLEDGE_CITATION_LIMIT = 12
+_KNOWLEDGE_STATUSES = frozenset({"evidence_found", "no_evidence", "unavailable"})
+
 
 class HarnessEventAdapter:
     """Translate graph events without persisting private model reasoning."""
@@ -105,7 +109,9 @@ class HarnessEventAdapter:
                 )
             return ()
         if message_type == "tool":
-            signature = _tool_result_signature(str(projected.get("name", "")), content)
+            tool_name = str(projected.get("name", ""))
+            content = _public_tool_result_content(tool_name, content)
+            signature = _tool_result_signature(tool_name, content)
             if signature in self._custom_tool_results:
                 self._custom_tool_results.remove(signature)
                 return ()
@@ -116,7 +122,7 @@ class HarnessEventAdapter:
                     "error" if is_error else "completed",
                     {
                         "type": "tool_result",
-                        "tool": projected.get("name", ""),
+                        "tool": tool_name,
                         "tool_call_id": projected.get("tool_call_id", ""),
                         "content": content,
                         "message_id": projected.get("id", ""),
@@ -243,10 +249,16 @@ class HarnessEventAdapter:
                 if tool_call_id:
                     self._seen_model_tool_calls.add(tool_call_id)
             elif event_type == "tool_result":
+                tool_name = str(payload.get("tool", ""))
+                public_content = _public_tool_result_content(
+                    tool_name,
+                    payload.get("content", ""),
+                )
+                event_payload["content"] = public_content
                 self._custom_tool_results.add(
                     _tool_result_signature(
-                        str(payload.get("tool", "")),
-                        payload.get("content", ""),
+                        tool_name,
+                        public_content,
                     )
                 )
             return (
@@ -319,6 +331,123 @@ class HarnessEventAdapter:
 def _public_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
     allowed = {"lc_agent_name", "langgraph_node", "ls_provider", "ls_model_type"}
     return {key: _bounded_value(item) for key, item in value.items() if key in allowed}
+
+
+def _public_tool_result_content(tool_name: str, value: object) -> str:
+    text = value if isinstance(value, str) else str(value)
+    if tool_name != "knowledge_search":
+        return text[:_PUBLIC_TOOL_CONTENT_LIMIT]
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        return text[:_PUBLIC_TOOL_CONTENT_LIMIT]
+    if not isinstance(payload, Mapping):
+        return text[:_PUBLIC_TOOL_CONTENT_LIMIT]
+    status = str(payload.get("status", ""))
+    if status not in _KNOWLEDGE_STATUSES:
+        return text[:_PUBLIC_TOOL_CONTENT_LIMIT]
+
+    raw_citations = payload.get("citations", [])
+    raw_citation_items = raw_citations if isinstance(raw_citations, list) else []
+    citations = [
+        citation
+        for citation in raw_citation_items
+        if isinstance(citation, Mapping)
+        and _public_string(citation.get("citation_id"), 160)
+        and _public_string(citation.get("page_revision"), 160)
+        and _public_string(citation.get("excerpt"), 1)
+    ]
+    omitted_count = _public_non_negative_int(payload.get("omitted_count"))
+    base = {
+        "status": status,
+        "query": _public_string(payload.get("query"), 400),
+        "used_tokens": _public_non_negative_int(payload.get("used_tokens")),
+        "token_budget": _public_non_negative_int(payload.get("token_budget")),
+        "omitted_count": omitted_count,
+    }
+    if status != "evidence_found" or not citations:
+        return json.dumps(
+            {**base, "citations": []},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    maximum = min(len(citations), _PUBLIC_KNOWLEDGE_CITATION_LIMIT)
+    raw_count = len(raw_citation_items)
+    for count in range(maximum, 0, -1):
+        for excerpt_limit in (800, 400, 200, 100, 40):
+            public_citations = [
+                _public_knowledge_citation(item, excerpt_limit=excerpt_limit)
+                for item in citations[:count]
+            ]
+            candidate = {
+                **base,
+                "omitted_count": omitted_count + max(0, raw_count - count),
+                "citations": public_citations,
+            }
+            encoded = json.dumps(
+                candidate,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            if len(encoded) <= _PUBLIC_TOOL_CONTENT_LIMIT:
+                return encoded
+
+    first = citations[0]
+    minimal = {
+        **base,
+        "omitted_count": omitted_count + max(0, raw_count - 1),
+        "citations": [
+            {
+                "citation_id": _public_string(first.get("citation_id"), 160),
+                "rank": _public_positive_int(first.get("rank")) or 1,
+                "page_revision": _public_string(first.get("page_revision"), 160),
+                "excerpt": _public_string(first.get("excerpt"), 40),
+                "truncated": True,
+            }
+        ],
+    }
+    return json.dumps(minimal, ensure_ascii=False, separators=(",", ":"))
+
+
+def _public_knowledge_citation(
+    value: Mapping[object, object],
+    *,
+    excerpt_limit: int,
+) -> dict[str, object]:
+    excerpt = _public_string(value.get("excerpt"), excerpt_limit)
+    original_excerpt = value.get("excerpt")
+    heading_path = value.get("heading_path")
+    return {
+        "citation_id": _public_string(value.get("citation_id"), 160),
+        "rank": _public_positive_int(value.get("rank")),
+        "page_revision": _public_string(value.get("page_revision"), 160),
+        "source_revision": _public_string(value.get("source_revision"), 160),
+        "source_kind": _public_string(value.get("source_kind"), 80),
+        "source_relative_path": _public_string(value.get("source_relative_path"), 500),
+        "title": _public_string(value.get("title"), 240),
+        "heading_path": [
+            _public_string(item, 160) for item in heading_path[:8] if _public_string(item, 160)
+        ]
+        if isinstance(heading_path, list)
+        else [],
+        "block_id": _public_string(value.get("block_id"), 160),
+        "excerpt": excerpt,
+        "truncated": bool(value.get("truncated"))
+        or (isinstance(original_excerpt, str) and len(original_excerpt.strip()) > len(excerpt)),
+    }
+
+
+def _public_string(value: object, limit: int) -> str:
+    return value.strip()[:limit] if isinstance(value, str) else ""
+
+
+def _public_non_negative_int(value: object) -> int:
+    return value if type(value) is int and value >= 0 else 0
+
+
+def _public_positive_int(value: object) -> int:
+    return value if type(value) is int and value > 0 else 0
 
 
 def _memory_proposal_payload(

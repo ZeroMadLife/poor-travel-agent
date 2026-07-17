@@ -10,6 +10,7 @@ from typing import Any, Literal
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
 StreamMode = Literal["messages", "updates", "values", "custom"]
+_TOOL_MESSAGE_CONTENT_LIMIT = 128_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,12 +55,19 @@ def message_payload(message: Any) -> dict[str, Any]:
     else:
         message_type = str(getattr(message, "type", "message"))
     content = getattr(message, "content", "")
+    name = getattr(message, "name", None)
     projected: dict[str, Any] = {
         "type": message_type,
         "id": str(getattr(message, "id", "") or ""),
-        "content": _bounded_content(content),
+        "content": _bounded_content(
+            content,
+            text_limit=(
+                _TOOL_MESSAGE_CONTENT_LIMIT
+                if isinstance(message, ToolMessage) and name == "knowledge_search"
+                else 4_000
+            ),
+        ),
     }
-    name = getattr(message, "name", None)
     if name:
         projected["name"] = str(name)
     tool_call_id = getattr(message, "tool_call_id", None)
@@ -113,9 +121,9 @@ def _bounded_text(value: Any, limit: int = 4000) -> str:
     return str(value)[:limit]
 
 
-def _bounded_content(value: Any) -> Any:
+def _bounded_content(value: Any, *, text_limit: int = 4_000) -> Any:
     if isinstance(value, str):
-        return _bounded_text(value)
+        return _bounded_text(value, text_limit)
     if isinstance(value, list):
         return [_bounded_json(item) for item in value[:32]]
     return _bounded_json(value)
