@@ -50,7 +50,9 @@ GitHub。每轮使用独立 synthetic relay session，`relay.visibility=none`。
 - `BLOCKED_ROOT_DIRTY`：完成或移动根目录人工改动，不得由 Harness stash/reset/clean。
 - `PAUSED_POLICY_DRIFT`：人工审查策略相关 commit 后重新执行 `install --refresh-manifest`。
 - `BLOCKED_CODEX`：检查受控 Codex 二进制路径和认证，不在日志输出凭据。
-- `BLOCKED_GITHUB_AUTH`：完成 `gh` 最小权限认证；未认证时保持 `SHADOW_WRITE`。
+- `BLOCKED_GITHUB_AUTH`：先确认交互终端的 `gh auth status` 正常；若仅 cc-connect cron
+  失败，重新执行 `sage-loopctl install --refresh-manifest`，确保 launcher 显式传递 `HOME`，
+  再人工执行 `sage-loopctl enable --pr-canary`。
 - `BLOCKED_REVIEWER`：检查 cc-connect daemon、`sage-loop-review` 和 synthetic relay binding。
 - 连续同类基础设施错误 3 次会自动暂停；修复后手动选择 `enable --dry-run` 或
   `enable --shadow-write`。`enable --pr-canary` 必须由人工显式执行。

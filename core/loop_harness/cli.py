@@ -219,6 +219,7 @@ def _write_launcher(config: LoopConfig, destination: Path) -> None:
         raise ValueError("launcher must not be a symlink")
     script = config.controller_root / "scripts/loopctl.py"
     exports = {
+        "HOME": str(Path.home()),
         "SAGE_LOOP_REPO_ROOT": str(config.repo_root),
         "SAGE_LOOP_STATE_ROOT": str(config.state_root),
         "SAGE_LOOP_WORKTREE_ROOT": str(config.worktree_root),

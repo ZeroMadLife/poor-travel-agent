@@ -25,8 +25,10 @@ def test_install_writes_private_launcher_without_secrets(tmp_path, monkeypatch, 
     _git(repo, "branch", "-M", "dev/sage-v7")
     state_root = tmp_path / "state"
     worktrees = tmp_path / "worktrees"
+    home = tmp_path / "home"
     launcher = tmp_path / "bin/sage-loopctl"
     secret = "must-not-leak"
+    monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("SAGE_LOOP_REPO_ROOT", str(repo))
     monkeypatch.setenv("SAGE_LOOP_STATE_ROOT", str(state_root))
     monkeypatch.setenv("SAGE_LOOP_WORKTREE_ROOT", str(worktrees))
@@ -41,6 +43,7 @@ def test_install_writes_private_launcher_without_secrets(tmp_path, monkeypatch, 
     assert secret not in launcher_text
     assert str(repo) in launcher_text
     assert str(state_root) in launcher_text
+    assert f"export HOME={home}" in launcher_text
     assert launcher.stat().st_mode & 0o777 == 0o700
     status_output = capsys.readouterr().out
     json_start = status_output.index("{")
