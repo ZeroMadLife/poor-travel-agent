@@ -109,16 +109,18 @@ class HarnessEventAdapter:
             if signature in self._custom_tool_results:
                 self._custom_tool_results.remove(signature)
                 return ()
+            is_error = projected.get("status") == "error"
             events = [
                 self._event(
                     "tool",
-                    "completed",
+                    "error" if is_error else "completed",
                     {
                         "type": "tool_result",
                         "tool": projected.get("name", ""),
                         "tool_call_id": projected.get("tool_call_id", ""),
                         "content": content,
                         "message_id": projected.get("id", ""),
+                        "is_error": is_error,
                     },
                     source_event_id=source_event_id,
                 )
@@ -261,7 +263,7 @@ class HarnessEventAdapter:
                         if event_type == "approval_required"
                         else "running"
                         if event_type in {"agent_started", "subagent_started"}
-                        else "cancelled"
+                        else "error"
                         if event_type == "subagent_cancelled"
                         else "error"
                         if event_type in {"subagent_failed", "subagent_timed_out"}

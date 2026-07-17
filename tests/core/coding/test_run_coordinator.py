@@ -506,6 +506,41 @@ async def test_immediate_cancel_still_closes_run(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_persists_audit_events_before_terminal(tmp_path: Path) -> None:
+    coordinator = RunCoordinator(SessionEventJournal(tmp_path, "session-1"))
+    entered = asyncio.Event()
+
+    async def blocked():
+        entered.set()
+        await asyncio.Event().wait()
+        if False:
+            yield RunEvent(kind="agent", status="running", payload={})
+
+    task = await coordinator.start_run("run-1", blocked())
+    await entered.wait()
+    cancelled_child = RunEvent(
+        kind="agent",
+        status="error",
+        payload={"type": "subagent_cancelled", "child_run_id": "child-1"},
+    )
+
+    assert await coordinator.cancel("run-1", audit_events=(cancelled_child,)) is True
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    events = coordinator.journal.replay(after=0, limit=20).items
+    assert [(item.kind, item.status) for item in events] == [
+        ("system", "running"),
+        ("agent", "error"),
+        ("terminal", "cancelled"),
+    ]
+    assert events[1].payload == {
+        "type": "subagent_cancelled",
+        "child_run_id": "child-1",
+    }
+
+
+@pytest.mark.asyncio
 async def test_duplicate_stream_terminal_is_persisted_once(tmp_path: Path) -> None:
     coordinator = RunCoordinator(SessionEventJournal(tmp_path, "session-1"))
     task = await coordinator.start_run(

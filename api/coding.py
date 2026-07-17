@@ -10,7 +10,7 @@ from contextlib import suppress
 from inspect import signature
 from pathlib import Path
 from typing import Any, Literal, cast
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, WebSocket
 from langchain_core.tools import BaseTool
@@ -1234,9 +1234,41 @@ async def stop_coding_run(
     coordinator = request.app.state.coding_run_registry.get(session_id)
     if coordinator.active_run_id != payload.run_id:
         return {"ok": False}
+    child_run_ids = await asyncio.to_thread(
+        coordinator.journal.active_subagent_run_ids,
+        payload.run_id,
+    )
+    audit_events = tuple(
+        RunEvent(
+            kind="agent",
+            status="error",
+            payload={
+                "type": "subagent_cancelled",
+                "session_id": session_id,
+                "run_id": payload.run_id,
+                "parent_run_id": payload.run_id,
+                "child_run_id": child_run_id,
+                "agent_run_id": child_run_id,
+                "status": "cancelled",
+                "error_code": "parent_cancelled",
+            },
+            event_id=str(
+                uuid5(
+                    NAMESPACE_URL,
+                    f"sage://coding/{session_id}/{payload.run_id}/cancel/{child_run_id}",
+                )
+            ),
+        )
+        for child_run_id in child_run_ids
+    )
     if runtime.active_run_id == payload.run_id:
         runtime.request_stop(run_id=payload.run_id)
-    return {"ok": await coordinator.cancel(payload.run_id)}
+    return {
+        "ok": await coordinator.cancel(
+            payload.run_id,
+            audit_events=audit_events,
+        )
+    }
 
 
 @router.post("/api/v1/coding/{session_id}/plan/approve")

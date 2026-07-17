@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 from typing import ClassVar
 
+import pytest
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
 from sage_harness.runtime.checkpoint import open_sqlite_checkpointer, thread_config
@@ -86,7 +87,27 @@ def test_event_adapter_exposes_ai_delta_and_tool_result_without_private_state() 
     assert ai_events[0].event_id == "source-ai:public"
     assert tool_events[0].payload["type"] == "tool_result"
     assert tool_events[0].payload["tool_call_id"] == "call-1"
+    assert tool_events[0].payload["is_error"] is False
     assert "analysis" not in str(ai_events[0].payload)
+
+
+def test_event_adapter_preserves_failed_tool_message_status() -> None:
+    adapter = HarnessEventAdapter(session_id="s1", run_id="r1")
+    tool = ToolMessage(
+        content="Task timed out.",
+        tool_call_id="call-timeout",
+        name="task",
+        status="error",
+    )
+
+    events = adapter.adapt(
+        HarnessStreamItem(1, "messages", (tool, {}), "source-timeout")
+    )
+
+    assert len(events) == 1
+    assert events[0].status == "error"
+    assert events[0].payload["type"] == "tool_result"
+    assert events[0].payload["is_error"] is True
 
 
 def test_event_adapter_namespaces_resume_events_for_idempotent_replay() -> None:
@@ -636,17 +657,28 @@ def test_event_adapter_projects_agent_started_event() -> None:
     assert events[0].payload["agent_run_id"] == "agent_1"
 
 
-def test_event_adapter_projects_subagent_terminal_status() -> None:
+@pytest.mark.parametrize(
+    ("event_type", "child_status", "error_code"),
+    [
+        ("subagent_timed_out", "timed_out", "timeout"),
+        ("subagent_cancelled", "cancelled", "parent_cancelled"),
+    ],
+)
+def test_event_adapter_projects_subagent_terminal_status(
+    event_type: str,
+    child_status: str,
+    error_code: str,
+) -> None:
     adapter = HarnessEventAdapter(session_id="s1", run_id="r1")
     events = adapter.adapt(
         HarnessStreamItem(
             1,
             "custom",
             {
-                "type": "subagent_timed_out",
+                "type": event_type,
                 "child_run_id": "child_1",
-                "status": "timed_out",
-                "error_code": "timeout",
+                "status": child_status,
+                "error_code": error_code,
             },
             "source-child",
         )

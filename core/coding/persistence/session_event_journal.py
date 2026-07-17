@@ -651,6 +651,34 @@ class SessionEventJournal:
             ).fetchall()
         return tuple(str(row[0]) for row in rows)
 
+    def active_subagent_run_ids(self, run_id: str) -> tuple[str, ...]:
+        """Return child runs started but not terminal in one parent timeline."""
+        validated_run = _validate_identifier("run_id", run_id)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM session_events WHERE run_id = ? AND kind = 'agent' "
+                "ORDER BY sequence",
+                (validated_run,),
+            ).fetchall()
+        active: dict[str, None] = {}
+        terminal_types = {
+            "subagent_completed",
+            "subagent_failed",
+            "subagent_cancelled",
+            "subagent_timed_out",
+        }
+        for row in rows:
+            event = _event_from_row(row, self.session_id)
+            event_type = str(event.payload.get("type", ""))
+            child_run_id = str(event.payload.get("child_run_id", "")).strip()
+            if not child_run_id:
+                continue
+            if event_type == "subagent_started":
+                active.setdefault(child_run_id, None)
+            elif event_type in terminal_types:
+                active.pop(child_run_id, None)
+        return tuple(active)
+
     def recoverable_approval(self, run_id: str | None = None) -> dict[str, Any] | None:
         """Return the newest unresolved graph approval from durable events."""
         with self._connect() as connection:

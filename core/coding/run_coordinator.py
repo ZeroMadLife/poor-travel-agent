@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass
@@ -66,6 +66,7 @@ class RunCoordinator:
         self._active_task: asyncio.Task[None] | None = None
         self._active_fencing_token: int | None = None
         self._suspend_on_cancel: set[str] = set()
+        self._cancel_audit_events: dict[str, tuple[RunEvent, ...]] = {}
         self._subscribers: set[asyncio.Queue[SessionEvent]] = set()
         self._last_broadcast_sequence = 0
 
@@ -214,13 +215,29 @@ class RunCoordinator:
             self._active_task = task
             return task
 
-    async def cancel(self, run_id: str) -> bool:
+    async def cancel(
+        self,
+        run_id: str,
+        *,
+        audit_events: Sequence[RunEvent] = (),
+    ) -> bool:
         """Cancel the matching active task; subscribers are unaffected."""
+        frozen_audit_events = tuple(audit_events)
+        if any(
+            event.kind == "terminal" or event.status in {"cancelled", "interrupted"}
+            for event in frozen_audit_events
+        ):
+            raise ValueError("cancellation audit events must be nonterminal")
         async with self._state_lock:
             if self._active_run_id != run_id or self._active_task is None:
                 return False
             task = self._active_task
             fencing_token = self._active_fencing_token
+            pending_audit_events = self._cancel_audit_events.get(run_id)
+            if pending_audit_events is None or (
+                not pending_audit_events and frozen_audit_events
+            ):
+                self._cancel_audit_events[run_id] = frozen_audit_events
             task.cancel()
         with suppress(asyncio.CancelledError):
             await task
@@ -377,15 +394,7 @@ class RunCoordinator:
                 )
             else:
                 cleanup_task = asyncio.create_task(
-                    self._persist(
-                        run_id=run_id,
-                        event=RunEvent(
-                            kind="terminal",
-                            status="cancelled",
-                            payload={"event": "run_cancelled"},
-                        ),
-                        fencing_token=fencing_token,
-                    )
+                    self._persist_cancelled_run(run_id, fencing_token)
                 )
             await _wait_through_cancellation(cleanup_task)
             raise
@@ -409,6 +418,27 @@ class RunCoordinator:
                     self._active_task = None
                     self._active_fencing_token = None
                 self._suspend_on_cancel.discard(run_id)
+                self._cancel_audit_events.pop(run_id, None)
+
+    async def _persist_cancelled_run(self, run_id: str, fencing_token: int) -> None:
+        audit_events = self._cancel_audit_events.pop(run_id, ())
+        try:
+            for event in audit_events:
+                await self._persist(
+                    run_id=run_id,
+                    event=event,
+                    fencing_token=fencing_token,
+                )
+        finally:
+            await self._persist(
+                run_id=run_id,
+                event=RunEvent(
+                    kind="terminal",
+                    status="cancelled",
+                    payload={"event": "run_cancelled"},
+                ),
+                fencing_token=fencing_token,
+            )
 
     async def _persist(
         self, *, run_id: str, event: RunEvent, fencing_token: int | None = None

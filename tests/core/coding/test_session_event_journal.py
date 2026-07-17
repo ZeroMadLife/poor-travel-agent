@@ -201,6 +201,36 @@ def test_replay_paginates_at_boundaries(tmp_path: Path) -> None:
         journal.replay(after=-1, limit=1)
 
 
+def test_active_subagent_run_ids_projects_unfinished_parent_children(tmp_path: Path) -> None:
+    journal = SessionEventJournal(tmp_path, "session-1")
+    journal.append(
+        run_id="parent-1",
+        kind="agent",
+        status="running",
+        payload={"type": "subagent_started", "child_run_id": "child-1"},
+    )
+    journal.append(
+        run_id="parent-1",
+        kind="agent",
+        status="running",
+        payload={"type": "subagent_started", "child_run_id": "child-2"},
+    )
+    journal.append(
+        run_id="parent-1",
+        kind="agent",
+        status="completed",
+        payload={"type": "subagent_completed", "child_run_id": "child-1"},
+    )
+    journal.append(
+        run_id="other-parent",
+        kind="agent",
+        status="running",
+        payload={"type": "subagent_started", "child_run_id": "child-other"},
+    )
+
+    assert journal.active_subagent_run_ids("parent-1") == ("child-2",)
+
+
 def test_replay_before_reads_a_bounded_tail_and_older_pages(tmp_path: Path) -> None:
     journal = SessionEventJournal(tmp_path, "session-1")
     for index in range(250):
