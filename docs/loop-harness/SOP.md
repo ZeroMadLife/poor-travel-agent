@@ -1,4 +1,4 @@
-# Loop 每小时 SOP
+# Loop 每小时 SOP 2.2
 
 1. 获取单实例 lease 和新的 fencing token。
 2. 检查启用状态、磁盘、Git、Codex、受控 manifest、根目录分支与清洁度。
@@ -11,9 +11,13 @@
 8. `PR_CANARY` 先检查 `gh` 私有仓库权限、远程/本地 PR 槽位和每日额度；再由 Controller
    禁用 hooks/签名后 commit、非 force push，并创建中文 Draft PR。
 9. Controller 通过 synthetic relay session 触发 `sage-loop-review` Claude，只允许读取本轮
-   patch 与 validation；审查结论绑定 exact head，PASS 后仍保持 Draft。
-10. 保存终态和证据摘要，清理临时 worktree，再释放 lease。
-11. `NO_OP` 静默；新 finding、shadow 验证、Draft PR 审查和首次阻断才输出短通知。
+   patch 与 validation；审查结论绑定 exact head。
+10. `PR_CANARY` 一律保持 Draft。`AUTO_MERGE_TIER_A` 仅对 Tier A 将 PR 转 Ready，等待全部
+    GitHub checks 成功，再次核对 exact head/base、人工 review 和阻止标签后 squash 合并并删除
+    Loop 远程分支；Tier B 保持 Draft，Tier C 只报告。
+11. 保存终态和证据摘要，清理临时 worktree，再释放 lease。
+12. `NO_OP` 静默；新 finding、shadow 验证、Draft PR 审查、Tier A 自动合并和首次阻断才输出
+    短通知。
 
 单次运行上限 40 分钟，lease 为 90 分钟。任何外部副作用前后都重新验证 fencing
 token。根目录脏、分支错误、manifest 漂移、结果不可解析或清理失败都不得继续。

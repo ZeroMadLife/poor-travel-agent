@@ -15,13 +15,16 @@ sage-loopctl enable --shadow-write
 
 # 人工 PR canary：允许中文 Draft PR + Claude 审查，仍不会自动合并
 sage-loopctl enable --pr-canary
+
+# Tier A 自动合并：仅低风险前端小修，内测、Claude 审查和 GitHub CI 全通过后合入开发分支
+sage-loopctl enable --auto-merge-tier-a
 sage-loopctl cleanup
 ```
 
 Scanner/Fixer 固定使用 Controller 声明的 `gpt-5.6-luna`、低推理强度和 Honglin
 Codex 网关。运行时继续使用 `--ignore-user-config`，并关闭插件、远程插件、浏览器和生图
 能力；只复用 `$CODEX_HOME/auth.json` 的现有登录状态，不读取个人配置来扩大权限。
-`PR_CANARY` 还要求 `gh auth status` 能访问私有仓库，并要求 cc-connect 内部项目
+`PR_CANARY` 与 `AUTO_MERGE_TIER_A` 还要求 `gh auth status` 能访问私有仓库，并要求 cc-connect 内部项目
 `sage-loop-review` 可用；凭据只由各 CLI 自己读取，不进入模型 Prompt、日志或 SQLite。
 
 `sage-loop-review` 不绑定主飞书会话：使用 `plan` 模式，work_dir 固定为
@@ -54,8 +57,11 @@ GitHub。每轮使用独立 synthetic relay session，`relay.visibility=none`。
   失败，重新执行 `sage-loopctl install --refresh-manifest`，确保 launcher 显式传递 `HOME`，
   再人工执行 `sage-loopctl enable --pr-canary`。
 - `BLOCKED_REVIEWER`：检查 cc-connect daemon、`sage-loop-review` 和 synthetic relay binding。
+- `BLOCKED_GITHUB_CHECKS`：CI 未全绿，保留 PR，不得人工绕过后让 Loop 继续合并。
+- `BLOCKED_BASE_DRIFT` / `BLOCKED_PR_HEAD_DRIFT`：开发分支或 PR head 已变化，原验证失效，
+  PR 转人工处理。
 - 连续同类基础设施错误 3 次会自动暂停；修复后手动选择 `enable --dry-run` 或
-  `enable --shadow-write`。`enable --pr-canary` 必须由人工显式执行。
+  `enable --shadow-write`。`enable --pr-canary` 与 `enable --auto-merge-tier-a` 必须由人工显式执行。
 
 ## 磁盘与卸载
 
