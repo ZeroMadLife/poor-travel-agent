@@ -43,5 +43,20 @@ describe('CodingHarnessWorkbench', () => {
     expect(wrapper.get('.workbench-metrics').text()).toContain('420 / 32000 tokens')
     expect(wrapper.get('.workbench-metrics').text()).toContain('3')
     expect(wrapper.get('[aria-current="step"]').text()).toContain('调用工具')
+    expect(wrapper.get('.workbench-mark').classes()).toContain('running')
+  })
+
+  it('exposes failed and completed states on the workbench chrome', async () => {
+    const current = projection()
+    const wrapper = mount(CodingHarnessWorkbench, {
+      props: { projection: { ...current, status: 'failed' }, sessionTitle: '验证状态' },
+    })
+
+    expect(wrapper.get('.workbench-mark').classes()).toContain('failed')
+    expect(wrapper.get('.metric-state').text()).toContain('失败')
+
+    await wrapper.setProps({ projection: { ...current, status: 'completed' } })
+    expect(wrapper.get('.workbench-mark').classes()).toContain('completed')
+    expect(wrapper.get('.metric-state').text()).toContain('已完成')
   })
 })

@@ -48,8 +48,11 @@ const contextLabel = computed(() => {
   >
     <header class="workbench-header">
       <div class="workbench-title">
-        <strong>Harness 2.0</strong>
-        <span :title="sessionTitle">{{ sessionTitle }}</span>
+        <span class="workbench-mark" :class="projection.status"><Activity :size="15" /></span>
+        <span class="workbench-title-copy">
+          <strong>Harness 2.0</strong>
+          <span :title="sessionTitle">{{ sessionTitle }}</span>
+        </span>
       </div>
       <dl class="workbench-metrics">
         <div class="metric-state" :class="projection.status">
@@ -83,8 +86,9 @@ const contextLabel = computed(() => {
 
 <style scoped>
 .coding-harness-workbench {
+  container: coding-harness / inline-size;
   display: grid;
-  grid-template-rows: 58px minmax(0, 1fr);
+  grid-template-rows: 62px minmax(0, 1fr);
   width: 100%;
   height: 100%;
   min-width: 0;
@@ -96,31 +100,47 @@ const contextLabel = computed(() => {
 .workbench-header {
   display: flex;
   align-items: center;
-  gap: 18px;
+  gap: 14px;
   min-width: 0;
-  padding: 0 18px;
+  padding: 0 16px 0 18px;
   border-bottom: 1px solid var(--sage-border);
 }
 
 .workbench-title {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
+  align-items: center;
+  gap: 10px;
   min-width: 0;
 }
 
-.workbench-title strong { flex: none; font-size: var(--sage-font-md); }
-.workbench-title span {
+.workbench-mark {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--sage-border);
+  border-radius: var(--sage-radius);
+  color: var(--sage-text-muted);
+  background: var(--sage-surface-raised);
+}
+.workbench-mark.running { border-color: color-mix(in srgb, var(--sage-success) 42%, var(--sage-border)); color: var(--sage-success); background: color-mix(in srgb, var(--sage-success-bg) 55%, var(--sage-surface)); }
+.workbench-mark.completed { border-color: color-mix(in srgb, var(--sage-success) 28%, var(--sage-border)); color: var(--sage-success); }
+.workbench-mark.blocked { border-color: color-mix(in srgb, var(--sage-warning) 42%, var(--sage-border)); color: var(--sage-warning); background: color-mix(in srgb, var(--sage-warning-bg) 55%, var(--sage-surface)); }
+.workbench-mark.failed,
+.workbench-mark.cancelled { border-color: color-mix(in srgb, var(--sage-danger) 42%, var(--sage-border)); color: var(--sage-danger); background: color-mix(in srgb, var(--sage-danger-bg) 55%, var(--sage-surface)); }
+.workbench-title-copy { display: grid; min-width: 0; }
+.workbench-title-copy strong { flex: none; font-size: var(--sage-font-md); line-height: 1.35; }
+.workbench-title-copy > span {
   min-width: 0;
-  max-width: 280px;
+  max-width: 230px;
   overflow: hidden;
   color: var(--sage-text-muted);
-  font-size: var(--sage-font-xs);
+  font-size: 11px;
+  line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-
-.workbench-title span::before { margin-right: 8px; color: var(--sage-border-strong); content: '\00b7'; }
 
 .workbench-metrics {
   display: flex;
@@ -132,8 +152,8 @@ const contextLabel = computed(() => {
 .workbench-metrics > div {
   display: grid;
   align-content: center;
-  min-width: 76px;
-  padding: 0 12px;
+  min-width: 70px;
+  padding: 0 10px;
   border-left: 1px solid var(--sage-border);
 }
 
@@ -154,6 +174,7 @@ const contextLabel = computed(() => {
 }
 
 .workbench-metrics .metric-state.running dd { color: var(--sage-success); }
+.workbench-metrics .metric-state.completed dd { color: var(--sage-success); }
 .workbench-metrics .metric-state.blocked dd { color: var(--sage-warning); }
 .workbench-metrics .metric-state.failed dd,
 .workbench-metrics .metric-state.cancelled dd { color: var(--sage-danger); }
@@ -169,12 +190,21 @@ const contextLabel = computed(() => {
 
 .workbench-canvas :deep(.harness-run-status) {
   min-height: 100%;
-  padding: clamp(24px, 4vw, 52px) clamp(20px, 4vw, 54px);
+  padding: clamp(22px, 3vw, 34px) clamp(18px, 3.4vw, 40px);
 }
 
-@media (max-width: 1320px) {
+@container coding-harness (max-width: 900px) {
   .metric-context { display: none !important; }
-  .workbench-title span { max-width: 180px; }
+  .workbench-title-copy > span { max-width: 150px; }
+}
+
+@container coding-harness (max-width: 660px) {
+  .workbench-header { gap: 8px; padding-right: 10px; padding-left: 12px; }
+  .workbench-title { gap: 7px; }
+  .workbench-mark { width: 28px; height: 28px; }
+  .workbench-title-copy > span { display: none; }
+  .workbench-metrics > div { min-width: 58px; padding: 0 7px; }
+  .workbench-metrics dt svg { display: none; }
 }
 
 @media (max-width: 760px) {
