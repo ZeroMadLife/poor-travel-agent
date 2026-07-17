@@ -21,8 +21,7 @@ def test_default_middleware_order_is_stable() -> None:
         "provider_error",
         "remote_content_sanitization",
         "tool_error",
-        "model_call_limit",
-        "token_budget",
+        "run_budget",
         "terminal_response",
     )
     assert [middleware.name for middleware in registry.build(HarnessConfig())] == [
@@ -32,8 +31,7 @@ def test_default_middleware_order_is_stable() -> None:
         "ProviderErrorMiddleware",
         "RemoteContentSanitizationMiddleware",
         "ToolErrorMiddleware",
-        "ModelCallLimitMiddleware",
-        "TokenBudgetMiddleware",
+        "RunBudgetMiddleware",
         "TerminalResponseMiddleware",
     ]
 

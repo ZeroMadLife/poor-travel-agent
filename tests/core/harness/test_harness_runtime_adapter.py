@@ -11,6 +11,7 @@ from typing import ClassVar
 import pytest
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
+from sage_harness import HarnessConfig
 from sage_harness.runtime.checkpoint import open_sqlite_checkpointer, thread_config
 from sage_harness.runtime.events import HarnessStreamItem, message_payload
 
@@ -91,6 +92,39 @@ def test_event_adapter_exposes_ai_delta_and_tool_result_without_private_state() 
     assert "analysis" not in str(ai_events[0].payload)
 
 
+def test_event_adapter_projects_a_bounded_run_budget_stop_and_notice() -> None:
+    adapter = HarnessEventAdapter(session_id="s1", run_id="r1")
+
+    events = adapter.adapt(
+        HarnessStreamItem(
+            1,
+            "custom",
+            {
+                "type": "run_budget_exhausted",
+                "stop_reason": "time_capped",
+                "used": 0.01,
+                "limit": 0.01,
+                "notice": "本轮已达到执行时长安全上限，已停止继续执行。",
+                "secret": "must-not-leak",
+            },
+            "source-budget",
+        )
+    )
+
+    assert [event.kind for event in events] == ["harness", "assistant"]
+    assert events[0].payload == {
+        "type": "run_budget_exhausted",
+        "stop_reason": "time_capped",
+        "used": 0.01,
+        "limit": 0.01,
+        "run_id": "r1",
+        "session_id": "s1",
+    }
+    assert events[1].payload["type"] == "text_delta"
+    assert "执行时长" in events[1].payload["delta"]
+    assert "secret" not in str(events)
+
+
 def test_event_adapter_preserves_failed_tool_message_status() -> None:
     adapter = HarnessEventAdapter(session_id="s1", run_id="r1")
     tool = ToolMessage(
@@ -108,6 +142,31 @@ def test_event_adapter_preserves_failed_tool_message_status() -> None:
     assert events[0].status == "error"
     assert events[0].payload["type"] == "tool_result"
     assert events[0].payload["is_error"] is True
+
+
+def test_event_adapter_bounds_args_when_a_late_result_synthesizes_the_call() -> None:
+    adapter = HarnessEventAdapter(session_id="s1", run_id="r1")
+
+    events = adapter.adapt(
+        HarnessStreamItem(
+            1,
+            "custom",
+            {
+                "type": "tool_result",
+                "tool": "write_file",
+                "tool_call_id": "call-late",
+                "args": {"path": "note.txt", "content": "x" * 10_000},
+                "content": "written",
+            },
+            "source-late-result",
+        )
+    )
+
+    assert [event.payload["type"] for event in events] == [
+        "tool_call",
+        "tool_result",
+    ]
+    assert len(events[0].payload["args"]["content"]) == 4_000
 
 
 def test_event_adapter_keeps_large_knowledge_result_valid_and_deduplicated() -> None:
@@ -169,8 +228,11 @@ def test_event_adapter_keeps_large_knowledge_result_valid_and_deduplicated() -> 
         )
     )
 
-    assert len(custom_events) == 1
-    public_content = str(custom_events[0].payload["content"])
+    assert [event.payload["type"] for event in custom_events] == [
+        "tool_call",
+        "tool_result",
+    ]
+    public_content = str(custom_events[1].payload["content"])
     retrieval = json.loads(public_content)
     assert len(public_content) <= 4000
     assert retrieval["status"] == "evidence_found"
@@ -314,13 +376,13 @@ def test_event_adapter_deduplicates_model_and_executor_tool_events() -> None:
         )
     )
 
-    assert [event.payload["type"] for event in model_call] == ["tool_call"]
-    assert duplicate_custom_call == ()
+    assert model_call == ()
+    assert [event.payload["type"] for event in duplicate_custom_call] == ["tool_call"]
     assert [event.payload["type"] for event in custom_result] == ["tool_result"]
     assert duplicate_message_result == ()
 
 
-def test_event_adapter_splits_ai_tool_calls_into_public_rows() -> None:
+def test_event_adapter_publishes_model_tool_calls_only_when_execution_starts() -> None:
     adapter = HarnessEventAdapter(session_id="s1", run_id="r1")
     ai = AIMessage(
         content="",
@@ -330,11 +392,39 @@ def test_event_adapter_splits_ai_tool_calls_into_public_rows() -> None:
         ],
     )
 
-    events = adapter.adapt(HarnessStreamItem(1, "messages", (ai, {}), "source-ai"))
+    proposed = adapter.adapt(HarnessStreamItem(1, "messages", (ai, {}), "source-ai"))
+    first = adapter.adapt(
+        HarnessStreamItem(
+            2,
+            "custom",
+            {
+                "type": "tool_call",
+                "tool": "list_files",
+                "args": {"path": "."},
+                "tool_call_id": "call-1",
+            },
+            "source-list",
+        )
+    )
+    second = adapter.adapt(
+        HarnessStreamItem(
+            3,
+            "custom",
+            {
+                "type": "tool_call",
+                "tool": "read_file",
+                "args": {"path": "README.md"},
+                "tool_call_id": "call-2",
+            },
+            "source-read",
+        )
+    )
 
+    assert proposed == ()
+    events = (*first, *second)
     assert [event.payload["tool"] for event in events] == ["list_files", "read_file"]
     assert [event.payload["tool_call_id"] for event in events] == ["call-1", "call-2"]
-    assert events[0].event_id == "source-ai:call:0:public"
+    assert events[0].event_id == "source-list:public"
 
 
 def test_event_adapter_summarizes_values_instead_of_dumping_checkpoint() -> None:
@@ -407,6 +497,51 @@ def test_runtime_adapter_streams_a_real_langgraph_message(tmp_path: Path) -> Non
 
     payloads = asyncio.run(run())
     assert any(item.get("type") == "text_delta" for item in payloads)
+
+
+def test_runtime_adapter_keeps_model_budget_for_the_same_run_id(
+    tmp_path: Path,
+) -> None:
+    async def run() -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        async with open_sqlite_checkpointer(tmp_path / "budget-checkpoints.sqlite3") as saver:
+            adapter = SageHarnessRuntimeAdapter(
+                model=FakeMessagesListChatModel(
+                    responses=[
+                        AIMessage(content="first answer"),
+                        AIMessage(content="must not be called"),
+                    ]
+                ),
+                checkpointer=saver,
+                config=HarnessConfig(
+                    max_model_calls=1,
+                    max_tool_calls=4,
+                    max_run_tokens=1_000,
+                ),
+            )
+            common = {
+                "session_id": "s-budget",
+                "run_id": "r-budget",
+                "workspace_id": "w-budget",
+                "workspace_path": str(tmp_path),
+            }
+            first = [
+                event.payload
+                async for event in adapter.stream_turn(content="first", **common)
+            ]
+            second = [
+                event.payload
+                async for event in adapter.stream_turn(content="resume", **common)
+            ]
+            return first, second
+
+    first, second = asyncio.run(run())
+
+    assert any(item.get("delta") == "first answer" for item in first)
+    cap = next(item for item in second if item.get("type") == "run_budget_exhausted")
+    assert cap["stop_reason"] == "model_call_capped"
+    assert cap["used"] == 1
+    assert cap["limit"] == 1
+    assert "must not be called" not in str(second)
 
 
 def test_runtime_adapter_persists_scoped_sandbox_identity(tmp_path: Path) -> None:

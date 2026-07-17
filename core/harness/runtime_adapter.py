@@ -13,6 +13,7 @@ from sage_harness import (
     DeferredToolFilterMiddleware,
     DeferredToolSetup,
     GraphMessageCompactionRequest,
+    HarnessConfig,
     HarnessRunContext,
     HarnessRunManager,
     HarnessRunRequest,
@@ -46,8 +47,10 @@ class SageHarnessRuntimeAdapter:
         deferred_setup: DeferredToolSetup | None = None,
         skill_catalog: SkillCatalog | None = None,
         subagent_limits: SubagentLimits | None = None,
+        config: HarnessConfig | None = None,
     ) -> None:
         self.checkpointer = checkpointer
+        self.config = config or HarnessConfig()
         registry = build_default_registry()
         effective_prompt = system_prompt
         if deferred_setup is not None and deferred_setup.enabled:
@@ -89,6 +92,7 @@ class SageHarnessRuntimeAdapter:
             tools=tools,
             system_prompt=effective_prompt,
             registry=registry,
+            config=self.config,
             checkpointer=checkpointer,
         )
         self.manager = HarnessRunManager(cast(StreamableGraph, self.graph))
@@ -163,6 +167,8 @@ class SageHarnessRuntimeAdapter:
             run_id=run_id,
             context=context,
             message=content,
+            recursion_limit=self.config.recursion_limit,
+            timeout_seconds=self.config.max_run_seconds,
             state_update=state_update,
             resume=resume,
             resume_value=resume_value,

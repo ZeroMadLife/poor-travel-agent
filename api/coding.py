@@ -14,7 +14,14 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, WebSocket
 from langchain_core.tools import BaseTool
-from sage_harness import McpCatalogPort, McpManager, McpScope, SubagentLimits, SubagentToolConfig
+from sage_harness import (
+    HarnessConfig,
+    McpCatalogPort,
+    McpManager,
+    McpScope,
+    SubagentLimits,
+    SubagentToolConfig,
+)
 from starlette.requests import HTTPConnection
 from starlette.websockets import WebSocketDisconnect
 
@@ -198,6 +205,7 @@ async def _runtime_timeline_events(
     run_id: str,
     surface_context: Mapping[str, Any] | None,
     harness_checkpointer: Any | None = None,
+    harness_config: HarnessConfig | None = None,
     mcp_catalog: McpCatalogPort | None = None,
     app_env: str = "development",
     resume_value: object | None = None,
@@ -213,6 +221,7 @@ async def _runtime_timeline_events(
             run_id=run_id,
             surface_context=surface_context,
             checkpointer=harness_checkpointer,
+            harness_config=harness_config,
             mcp_catalog=mcp_catalog,
             app_env=app_env,
             resume_value=resume_value,
@@ -283,7 +292,8 @@ async def _deerflow_timeline_events(
     run_id: str,
     surface_context: Mapping[str, Any] | None,
     checkpointer: Any,
-    mcp_catalog: McpCatalogPort | None,
+    harness_config: HarnessConfig | None = None,
+    mcp_catalog: McpCatalogPort | None = None,
     app_env: str = "development",
     resume_value: object | None = None,
     resume_attempt: int = 0,
@@ -397,6 +407,7 @@ async def _deerflow_timeline_events(
                 deferred_setup=tool_bundle.deferred_setup,
                 skill_catalog=runtime.skill_registry,
                 subagent_limits=SubagentLimits(),
+                config=harness_config,
             )
             graph_compaction: dict[str, object] | None = None
             compaction_result = prepared.compaction_result if prepared is not None else None
@@ -960,6 +971,7 @@ async def coding_stream(websocket: WebSocket, session_id: str) -> None:
                 run_id=run_id,
                 surface_context=surface_context,
                 harness_checkpointer=getattr(websocket.app.state, "sage_harness_checkpointer", None),
+                harness_config=getattr(websocket.app.state, "coding_harness_config", None),
                 mcp_catalog=getattr(websocket.app.state, "coding_mcp_catalog", None),
                 app_env=str(getattr(websocket.app.state, "cloud_app_env", "development")),
             )
@@ -1195,6 +1207,7 @@ async def coding_approval_respond(
                 "sage_harness_checkpointer",
                 None,
             ),
+            harness_config=getattr(request.app.state, "coding_harness_config", None),
             mcp_catalog=getattr(request.app.state, "coding_mcp_catalog", None),
             app_env=str(getattr(request.app.state, "cloud_app_env", "development")),
             resume_value={

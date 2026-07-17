@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -18,6 +19,13 @@ from core.coding.run_coordinator import RunEvent
 _PUBLIC_TOOL_CONTENT_LIMIT = 4_000
 _PUBLIC_KNOWLEDGE_CITATION_LIMIT = 12
 _KNOWLEDGE_STATUSES = frozenset({"evidence_found", "no_evidence", "unavailable"})
+_RUN_BUDGET_NOTICES = {
+    "model_call_capped": "本轮已达到模型调用安全上限，已停止继续调用工具。",
+    "token_capped": "本轮已达到 token 安全上限，已停止继续调用工具。",
+    "tool_call_capped": "本轮已达到工具调用安全上限，已停止继续调用工具。",
+    "step_capped": "本轮已达到执行步数安全上限，已停止继续执行。",
+    "time_capped": "本轮已达到执行时长安全上限，已停止继续执行。",
+}
 
 
 class HarnessEventAdapter:
@@ -41,8 +49,9 @@ class HarnessEventAdapter:
         self._seen_model_tool_calls = {
             tool_call_id for tool_call_id in seen_tool_call_ids if tool_call_id
         }
-        self._pending_model_calls_by_tool: dict[str, int] = {}
+        self._pending_model_tool_calls: dict[str, dict[str, Any]] = {}
         self._custom_tool_results: set[str] = set()
+        self._seen_budget_signatures: set[str] = set()
 
     def adapt(self, item: HarnessStreamItem) -> tuple[RunEvent, ...]:
         """Return zero or more Sage events for one graph stream item."""
@@ -65,8 +74,7 @@ class HarnessEventAdapter:
         if message_type == "ai":
             tool_calls = projected.get("tool_calls")
             if isinstance(tool_calls, list) and tool_calls:
-                events: list[RunEvent] = []
-                for index, call in enumerate(tool_calls):
+                for call in tool_calls:
                     if not isinstance(call, Mapping):
                         continue
                     name = str(call.get("name", ""))
@@ -74,25 +82,14 @@ class HarnessEventAdapter:
                     args = call.get("args", {})
                     if not name or not tool_call_id or tool_call_id in self._seen_model_tool_calls:
                         continue
-                    self._seen_model_tool_calls.add(tool_call_id)
-                    self._pending_model_calls_by_tool[name] = (
-                        self._pending_model_calls_by_tool.get(name, 0) + 1
-                    )
-                    events.append(
-                        self._event(
-                            "tool",
-                            "running",
-                            {
-                                "type": "tool_call",
-                                "tool": name,
-                                "args": args if isinstance(args, Mapping) else {},
-                                "tool_call_id": tool_call_id,
-                                "message_id": projected.get("id", ""),
-                            },
-                            source_event_id=f"{source_event_id}:call:{index}",
-                        )
-                    )
-                return tuple(events)
+                    self._pending_model_tool_calls[tool_call_id] = {
+                        "type": "tool_call",
+                        "tool": name,
+                        "args": args if isinstance(args, Mapping) else {},
+                        "tool_call_id": tool_call_id,
+                        "message_id": projected.get("id", ""),
+                    }
+                return ()
             if content:
                 return (
                     self._event(
@@ -116,7 +113,15 @@ class HarnessEventAdapter:
                 self._custom_tool_results.remove(signature)
                 return ()
             is_error = projected.get("status") == "error"
-            events = [
+            events: list[RunEvent] = []
+            pending_call = self._take_pending_tool_call(
+                tool_call_id=str(projected.get("tool_call_id", "")),
+                tool_name=tool_name,
+                source_event_id=f"{source_event_id}:late-call",
+            )
+            if pending_call is not None:
+                events.append(pending_call)
+            events.append(
                 self._event(
                     "tool",
                     "error" if is_error else "completed",
@@ -130,7 +135,7 @@ class HarnessEventAdapter:
                     },
                     source_event_id=source_event_id,
                 )
-            ]
+            )
             memory_payload = _memory_proposal_payload(
                 tool_name=str(projected.get("name", "")),
                 content=content,
@@ -170,12 +175,18 @@ class HarnessEventAdapter:
         )
         interrupt = _graph_interrupt(payload)
         if interrupt is None:
-            return (checkpoint_event,)
+            return (*self._budget_from_state(payload, source_event_id), checkpoint_event)
         interrupt_payload, interrupt_id = interrupt
         interrupt_event_type = str(interrupt_payload.get("type", "graph_interrupt"))
         if interrupt_event_type == "approval_required":
             interrupt_payload.setdefault("interrupt_id", interrupt_id)
-            return (
+            approval_call = self._tool_call_event(
+                tool_call_id=str(interrupt_payload.get("tool_call_id", "")),
+                tool_name=str(interrupt_payload.get("tool", "")),
+                args=interrupt_payload.get("args", {}),
+                source_event_id=f"{source_event_id}:approval-call",
+            )
+            approval_events = (
                 self._event(
                     "approval",
                     "blocked",
@@ -184,6 +195,9 @@ class HarnessEventAdapter:
                 ),
                 checkpoint_event,
             )
+            if approval_call is None:
+                return approval_events
+            return (approval_call, *approval_events)
         return (
             self._event(
                 "harness",
@@ -202,6 +216,8 @@ class HarnessEventAdapter:
         if not isinstance(payload, Mapping):
             return ()
         event_type = str(payload.get("type", ""))
+        if event_type == "run_budget_exhausted":
+            return self._budget_events(payload, source_event_id)
         if event_type == "memory_proposal_ready":
             memory_payload = _validated_memory_proposal_payload(
                 payload,
@@ -237,19 +253,22 @@ class HarnessEventAdapter:
             if event_type == "tool_call":
                 tool_name = str(event_payload.get("tool", ""))
                 tool_call_id = str(event_payload.get("tool_call_id", ""))
-                pending = self._pending_model_calls_by_tool.get(tool_name, 0)
-                if pending > 0:
-                    if pending == 1:
-                        self._pending_model_calls_by_tool.pop(tool_name, None)
-                    else:
-                        self._pending_model_calls_by_tool[tool_name] = pending - 1
-                    return ()
-                if tool_call_id and tool_call_id in self._seen_model_tool_calls:
-                    return ()
-                if tool_call_id:
-                    self._seen_model_tool_calls.add(tool_call_id)
+                call_event = self._tool_call_event(
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    args=event_payload.get("args", {}),
+                    source_event_id=source_event_id,
+                )
+                return () if call_event is None else (call_event,)
             elif event_type == "tool_result":
                 tool_name = str(payload.get("tool", ""))
+                tool_call_id = str(payload.get("tool_call_id", ""))
+                call_event = self._tool_call_event(
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    args=payload.get("args", {}),
+                    source_event_id=f"{source_event_id}:late-call",
+                )
                 public_content = _public_tool_result_content(
                     tool_name,
                     payload.get("content", ""),
@@ -260,6 +279,16 @@ class HarnessEventAdapter:
                         tool_name,
                         public_content,
                     )
+                )
+                result_event = self._event(
+                    "tool",
+                    "error" if bool(event_payload.get("is_error")) else "completed",
+                    event_payload,
+                    source_event_id=source_event_id,
+                )
+                return (
+                    *((call_event,) if call_event is not None else ()),
+                    result_event,
                 )
             return (
                 self._event(
@@ -305,6 +334,126 @@ class HarnessEventAdapter:
             ),
         )
 
+    def _budget_from_state(
+        self,
+        payload: Any,
+        source_event_id: str,
+    ) -> tuple[RunEvent, ...]:
+        if not isinstance(payload, Mapping):
+            return ()
+        messages = payload.get("messages")
+        if not isinstance(messages, list) or not messages:
+            return ()
+        projected = message_payload(messages[-1])
+        harness_meta = projected.get("sage_harness")
+        if not isinstance(harness_meta, Mapping):
+            return ()
+        return self._budget_events(
+            {"type": "run_budget_exhausted", **harness_meta},
+            f"{source_event_id}:budget",
+        )
+
+    def _budget_events(
+        self,
+        payload: Mapping[str, Any],
+        source_event_id: str,
+    ) -> tuple[RunEvent, ...]:
+        stop_reason = str(payload.get("stop_reason", ""))
+        notice = _RUN_BUDGET_NOTICES.get(stop_reason)
+        if notice is None:
+            return ()
+        used = _public_number(payload.get("used"))
+        limit = _public_number(payload.get("limit"))
+        signature = f"{stop_reason}:{used}:{limit}"
+        if signature in self._seen_budget_signatures:
+            return ()
+        self._seen_budget_signatures.add(signature)
+        self._pending_model_tool_calls.clear()
+        return (
+            self._event(
+                "harness",
+                "completed",
+                {
+                    "type": "run_budget_exhausted",
+                    "stop_reason": stop_reason,
+                    "used": used,
+                    "limit": limit,
+                },
+                source_event_id=f"{source_event_id}:event",
+            ),
+            self._event(
+                "assistant",
+                "running",
+                {
+                    "type": "text_delta",
+                    "delta": notice,
+                    "metadata": {"stop_reason": stop_reason},
+                },
+                source_event_id=f"{source_event_id}:notice",
+            ),
+        )
+
+    def _take_pending_tool_call(
+        self,
+        *,
+        tool_call_id: str,
+        tool_name: str,
+        source_event_id: str,
+    ) -> RunEvent | None:
+        pending_id = tool_call_id if tool_call_id in self._pending_model_tool_calls else ""
+        if not pending_id:
+            pending_id = next(
+                (
+                    call_id
+                    for call_id, call in self._pending_model_tool_calls.items()
+                    if str(call.get("tool", "")) == tool_name
+                ),
+                "",
+            )
+        if not pending_id:
+            return None
+        payload = self._pending_model_tool_calls.pop(pending_id)
+        if pending_id in self._seen_model_tool_calls:
+            return None
+        self._seen_model_tool_calls.add(pending_id)
+        return self._event(
+            "tool",
+            "running",
+            payload,
+            source_event_id=source_event_id,
+        )
+
+    def _tool_call_event(
+        self,
+        *,
+        tool_call_id: str,
+        tool_name: str,
+        args: object,
+        source_event_id: str,
+    ) -> RunEvent | None:
+        pending = self._take_pending_tool_call(
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            source_event_id=source_event_id,
+        )
+        if pending is not None:
+            return pending
+        if not tool_call_id or not tool_name or tool_call_id in self._seen_model_tool_calls:
+            return None
+        self._seen_model_tool_calls.add(tool_call_id)
+        return self._event(
+            "tool",
+            "running",
+            {
+                "type": "tool_call",
+                "tool": tool_name,
+                "args": _bounded_value(args) if isinstance(args, Mapping) else {},
+                "tool_call_id": tool_call_id,
+                "message_id": "",
+            },
+            source_event_id=source_event_id,
+        )
+
     def _event(
         self,
         kind: str,
@@ -331,6 +480,16 @@ class HarnessEventAdapter:
 def _public_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
     allowed = {"lc_agent_name", "langgraph_node", "ls_provider", "ls_model_type"}
     return {key: _bounded_value(item) for key, item in value.items() if key in allowed}
+
+
+def _public_number(value: object) -> int | float:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int | float):
+        if isinstance(value, float) and not math.isfinite(value):
+            return 0
+        return max(value, 0)
+    return 0
 
 
 def _public_tool_result_content(tool_name: str, value: object) -> str:

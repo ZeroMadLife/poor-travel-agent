@@ -356,15 +356,83 @@ def _message_usage(message: AIMessage) -> int:
     return max(int(input_tokens), 0) + max(int(output_tokens), 0)
 
 
-class TokenBudgetMiddleware(AgentMiddleware[SageThreadState, HarnessRunContext]):
-    """Persist per-run token usage and stop before another over-budget model call."""
+_BUDGET_NOTICES = {
+    "model_call_capped": "本轮已达到模型调用安全上限，已停止继续调用工具。",
+    "token_capped": "本轮已达到 token 安全上限，已停止继续调用工具。",
+    "tool_call_capped": "本轮已达到工具调用安全上限，已停止继续调用工具。",
+}
+
+
+def _counter(state: SageThreadState, key: str) -> int:
+    value = state.get(key, 0)
+    return max(value, 0) if isinstance(value, int) else 0
+
+
+def _append_budget_notice(content: object, notice: str) -> object:
+    if isinstance(content, str):
+        return f"{content}\n\n{notice}" if content else notice
+    if isinstance(content, list):
+        return [*content, {"type": "text", "text": f"\n\n{notice}"}]
+    return notice
+
+
+def _budget_stop_message(
+    message: AIMessage,
+    *,
+    reason: str,
+    used: int,
+    limit: int,
+) -> AIMessage:
+    notice = _BUDGET_NOTICES[reason]
+    additional_kwargs = dict(message.additional_kwargs)
+    additional_kwargs.pop("tool_calls", None)
+    additional_kwargs.pop("function_call", None)
+    harness_meta = additional_kwargs.get("sage_harness")
+    public_meta = dict(harness_meta) if isinstance(harness_meta, Mapping) else {}
+    public_meta.update(
+        {
+            "stop_reason": reason,
+            "used": used,
+            "limit": limit,
+            "notice": notice,
+        }
+    )
+    additional_kwargs["sage_harness"] = public_meta
+    response_metadata = dict(message.response_metadata)
+    if response_metadata.get("finish_reason") == "tool_calls":
+        response_metadata["finish_reason"] = "stop"
+    return message.model_copy(
+        update={
+            "content": _append_budget_notice(message.content, notice),
+            "tool_calls": [],
+            "invalid_tool_calls": [],
+            "additional_kwargs": additional_kwargs,
+            "response_metadata": response_metadata,
+        }
+    )
+
+
+class RunBudgetMiddleware(AgentMiddleware[SageThreadState, HarnessRunContext]):
+    """Enforce model, tool and token limits that survive same-run resumes."""
 
     state_schema = SageThreadState
 
-    def __init__(self, max_tokens: int) -> None:
+    def __init__(
+        self,
+        *,
+        max_model_calls: int,
+        max_tool_calls: int,
+        max_tokens: int,
+    ) -> None:
         super().__init__()
+        if max_model_calls < 1:
+            raise ValueError("max_model_calls must be positive")
+        if max_tool_calls < 1:
+            raise ValueError("max_tool_calls must be positive")
         if max_tokens < 1:
             raise ValueError("max_tokens must be positive")
+        self.max_model_calls = max_model_calls
+        self.max_tool_calls = max_tool_calls
         self.max_tokens = max_tokens
 
     @override
@@ -378,7 +446,12 @@ class TokenBudgetMiddleware(AgentMiddleware[SageThreadState, HarnessRunContext])
             raise MissingRunContextError("HarnessRunContext is required")
         if state.get("budget_run_id") == context.run_id:
             return None
-        return {"budget_run_id": context.run_id, "run_token_usage": 0}
+        return {
+            "budget_run_id": context.run_id,
+            "run_token_usage": 0,
+            "run_model_calls": 0,
+            "run_tool_calls": 0,
+        }
 
     @override
     async def abefore_agent(
@@ -396,12 +469,18 @@ class TokenBudgetMiddleware(AgentMiddleware[SageThreadState, HarnessRunContext])
         runtime: Runtime[HarnessRunContext],
     ) -> dict[str, object] | None:
         _ = runtime
-        used = state.get("run_token_usage", 0)
-        if used < self.max_tokens:
+        used_tokens = _counter(state, "run_token_usage")
+        model_calls = _counter(state, "run_model_calls")
+        if used_tokens < self.max_tokens and model_calls < self.max_model_calls:
             return None
-        message = AIMessage(
-            content="本轮已达到 token 安全上限，已停止继续调用模型。",
-            additional_kwargs={"sage_harness": {"stop_reason": "token_capped"}},
+        reason = "token_capped" if used_tokens >= self.max_tokens else "model_call_capped"
+        used = used_tokens if reason == "token_capped" else model_calls
+        limit = self.max_tokens if reason == "token_capped" else self.max_model_calls
+        message = _budget_stop_message(
+            AIMessage(content=""),
+            reason=reason,
+            used=used,
+            limit=limit,
         )
         return {"jump_to": "end", "messages": [message]}
 
@@ -420,11 +499,55 @@ class TokenBudgetMiddleware(AgentMiddleware[SageThreadState, HarnessRunContext])
         state: SageThreadState,
         runtime: Runtime[HarnessRunContext],
     ) -> dict[str, object] | None:
-        _ = runtime
+        context = runtime.context
+        if not isinstance(context, HarnessRunContext):
+            raise MissingRunContextError("HarnessRunContext is required")
         messages = state.get("messages", [])
         if not messages or not isinstance(messages[-1], AIMessage):
             return None
-        return {"run_token_usage": state.get("run_token_usage", 0) + _message_usage(messages[-1])}
+        message = messages[-1]
+        used_tokens = _counter(state, "run_token_usage") + _message_usage(message)
+        model_calls = _counter(state, "run_model_calls") + 1
+        prior_tool_calls = _counter(state, "run_tool_calls")
+        proposed_tool_calls = len(message.tool_calls)
+        proposed_total_tools = prior_tool_calls + proposed_tool_calls
+        update: dict[str, object] = {
+            "run_token_usage": used_tokens,
+            "run_model_calls": model_calls,
+            "run_tool_calls": prior_tool_calls,
+        }
+
+        stop_reason: str | None = None
+        used = 0
+        limit = 0
+        if used_tokens >= self.max_tokens:
+            stop_reason, used, limit = "token_capped", used_tokens, self.max_tokens
+        elif proposed_tool_calls and model_calls >= self.max_model_calls:
+            stop_reason, used, limit = (
+                "model_call_capped",
+                model_calls,
+                self.max_model_calls,
+            )
+        elif proposed_tool_calls and proposed_total_tools > self.max_tool_calls:
+            stop_reason, used, limit = (
+                "tool_call_capped",
+                proposed_total_tools,
+                self.max_tool_calls,
+            )
+
+        if stop_reason is not None:
+            update["messages"] = [
+                _budget_stop_message(
+                    message,
+                    reason=stop_reason,
+                    used=used,
+                    limit=limit,
+                )
+            ]
+            return update
+
+        update["run_tool_calls"] = proposed_total_tools
+        return update
 
     @override
     async def aafter_model(
@@ -433,6 +556,17 @@ class TokenBudgetMiddleware(AgentMiddleware[SageThreadState, HarnessRunContext])
         runtime: Runtime[HarnessRunContext],
     ) -> dict[str, object] | None:
         return self.after_model(state, runtime)
+
+
+class TokenBudgetMiddleware(RunBudgetMiddleware):
+    """Backward-compatible token-only constructor for host extensions."""
+
+    def __init__(self, max_tokens: int) -> None:
+        super().__init__(
+            max_model_calls=2**31 - 1,
+            max_tool_calls=2**31 - 1,
+            max_tokens=max_tokens,
+        )
 
 
 def _has_visible_text(message: AIMessage) -> bool:

@@ -19,6 +19,7 @@ from sage_harness.middleware import (
     ProviderCallError,
     ProviderErrorMiddleware,
     RemoteContentSanitizationMiddleware,
+    RunBudgetMiddleware,
     TerminalResponseMiddleware,
     TokenBudgetMiddleware,
     ToolErrorMiddleware,
@@ -237,6 +238,137 @@ def test_token_budget_stops_before_another_model_call() -> None:
     assert update is not None
     assert update["jump_to"] == "end"
     assert update["messages"][0].additional_kwargs["sage_harness"]["stop_reason"] == "token_capped"
+
+
+def test_run_budget_strips_tools_from_the_response_that_exhausts_tokens() -> None:
+    middleware = RunBudgetMiddleware(
+        max_model_calls=3,
+        max_tool_calls=3,
+        max_tokens=10,
+    )
+    runtime = MagicMock(context=_context())
+    response = AIMessage(
+        id="ai-budget",
+        content="",
+        tool_calls=[
+            {
+                "name": "run_shell",
+                "args": {"command": "touch should-not-run"},
+                "id": "call-budget",
+                "type": "tool_call",
+            }
+        ],
+        usage_metadata={"input_tokens": 8, "output_tokens": 2, "total_tokens": 10},
+        response_metadata={"finish_reason": "tool_calls"},
+    )
+
+    update = middleware.after_model(
+        {
+            "messages": [response],
+            "budget_run_id": "run-1",
+            "run_token_usage": 0,
+            "run_model_calls": 0,
+            "run_tool_calls": 0,
+        },
+        runtime,
+    )
+
+    assert update is not None
+    stopped = update["messages"][0]
+    assert stopped.tool_calls == []
+    assert stopped.response_metadata["finish_reason"] == "stop"
+    assert stopped.additional_kwargs["sage_harness"] == {
+        "stop_reason": "token_capped",
+        "used": 10,
+        "limit": 10,
+        "notice": "本轮已达到 token 安全上限，已停止继续调用工具。",
+    }
+    assert update["run_model_calls"] == 1
+    assert update["run_tool_calls"] == 0
+    assert update["run_token_usage"] == 10
+
+
+@pytest.mark.parametrize(
+    ("state", "middleware", "expected_reason", "expected_used", "expected_limit"),
+    [
+        (
+            {"run_model_calls": 1, "run_tool_calls": 0},
+            RunBudgetMiddleware(max_model_calls=2, max_tool_calls=5, max_tokens=100),
+            "model_call_capped",
+            2,
+            2,
+        ),
+        (
+            {"run_model_calls": 0, "run_tool_calls": 1},
+            RunBudgetMiddleware(max_model_calls=5, max_tool_calls=1, max_tokens=100),
+            "tool_call_capped",
+            2,
+            1,
+        ),
+    ],
+)
+def test_run_budget_strips_tool_batches_that_cannot_finish(
+    state: dict[str, int],
+    middleware: RunBudgetMiddleware,
+    expected_reason: str,
+    expected_used: int,
+    expected_limit: int,
+) -> None:
+    response = AIMessage(
+        id="ai-capped",
+        content="partial",
+        tool_calls=[
+            {
+                "name": "list_files",
+                "args": {"path": "."},
+                "id": "call-capped",
+                "type": "tool_call",
+            }
+        ],
+        usage_metadata={"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+    )
+
+    update = middleware.after_model(
+        {
+            "messages": [response],
+            "budget_run_id": "run-1",
+            "run_token_usage": 0,
+            **state,
+        },
+        MagicMock(context=_context()),
+    )
+
+    assert update is not None
+    stopped = update["messages"][0]
+    assert stopped.tool_calls == []
+    assert stopped.additional_kwargs["sage_harness"]["stop_reason"] == expected_reason
+    assert stopped.additional_kwargs["sage_harness"]["used"] == expected_used
+    assert stopped.additional_kwargs["sage_harness"]["limit"] == expected_limit
+
+
+def test_run_budget_keeps_same_run_counters_across_checkpoint_resume() -> None:
+    middleware = RunBudgetMiddleware(
+        max_model_calls=4,
+        max_tool_calls=4,
+        max_tokens=100,
+    )
+    same_run = {
+        "budget_run_id": "run-1",
+        "run_token_usage": 12,
+        "run_model_calls": 2,
+        "run_tool_calls": 1,
+    }
+
+    assert middleware.before_agent(same_run, MagicMock(context=_context("run-1"))) is None
+    assert middleware.before_agent(
+        same_run,
+        MagicMock(context=_context("run-2")),
+    ) == {
+        "budget_run_id": "run-2",
+        "run_token_usage": 0,
+        "run_model_calls": 0,
+        "run_tool_calls": 0,
+    }
 
 
 def test_terminal_response_rejects_silent_success() -> None:

@@ -82,6 +82,13 @@ def message_payload(message: Any) -> dict[str, Any]:
     usage = getattr(message, "usage_metadata", None)
     if usage:
         projected["usage_metadata"] = _bounded_json(usage)
+    harness_meta = message.additional_kwargs.get("sage_harness")
+    if isinstance(harness_meta, dict):
+        projected["sage_harness"] = {
+            key: _bounded_json(harness_meta[key])
+            for key in ("stop_reason", "used", "limit", "notice")
+            if key in harness_meta
+        }
     return projected
 
 

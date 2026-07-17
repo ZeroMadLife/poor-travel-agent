@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
-from sage_harness import McpCatalogPort, McpManager
+from sage_harness import HarnessConfig, McpCatalogPort, McpManager
 from sage_harness.runtime.checkpoint import open_sqlite_checkpointer
 
 from agents.graph import build_graph
@@ -173,6 +173,7 @@ def create_app(
     coding_default_model: str | None = None,
     coding_checkpoint_anchor_key: bytes | None = None,
     coding_deerflow_v2_enabled: bool | None = None,
+    coding_harness_config: HarnessConfig | None = None,
     coding_sandbox_provider: str | None = None,
     coding_sandbox_image: str | None = None,
     coding_mcp_live_enabled: bool | None = None,
@@ -363,6 +364,7 @@ def create_app(
         if coding_deerflow_v2_enabled is None
         else coding_deerflow_v2_enabled
     )
+    app.state.coding_harness_config = coding_harness_config or HarnessConfig()
     app.state.coding_sandbox_provider = (
         os.getenv("SAGE_CODING_SANDBOX_PROVIDER", "local_workspace")
         if coding_sandbox_provider is None

@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 from sage_harness.config import HarnessRunContext
@@ -20,6 +22,33 @@ class RecordingGraph:
     async def astream(self, input, *, config, context, stream_mode):  # type: ignore[no-untyped-def]
         self.inputs.append(input)
         yield ("custom", {"type": "agent_started"})
+
+
+class RecursionFailureGraph:
+    async def astream(self, input, *, config, context, stream_mode):  # type: ignore[no-untyped-def]
+        _ = input, config, context, stream_mode
+        if False:  # pragma: no cover - keeps this an async generator
+            yield None
+        raise GraphRecursionError("private recursion details")
+
+
+class SlowGraph:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
+    async def astream(self, input, *, config, context, stream_mode):  # type: ignore[no-untyped-def]
+        _ = input, config, context, stream_mode
+        self.started.set()
+        await asyncio.sleep(30)
+        yield ("custom", {"type": "too_late"})
+
+
+class InnerTimeoutGraph:
+    async def astream(self, input, *, config, context, stream_mode):  # type: ignore[no-untyped-def]
+        _ = input, config, context, stream_mode
+        if False:  # pragma: no cover - keeps this an async generator
+            yield None
+        raise TimeoutError("provider timeout")
 
 
 def _context(run_id: str) -> HarnessRunContext:
@@ -123,3 +152,75 @@ def test_manager_resumes_a_real_checkpointed_graph_interrupt() -> None:
     resumed_values = [item.payload for item in resumed if item.mode == "values"]
     assert any("__interrupt__" in value for value in first_values)
     assert resumed_values[-1]["decision"] == "once"
+
+
+def test_manager_recovers_recursion_limit_as_a_public_budget_stop() -> None:
+    request = HarnessRunRequest(
+        thread_id="thread-1",
+        run_id="run-1",
+        context=_context("run-1"),
+        message="continue",
+        recursion_limit=2,
+    )
+
+    async def run() -> list[Any]:
+        return [item async for item in HarnessRunManager(RecursionFailureGraph()).stream(request)]
+
+    items = asyncio.run(run())
+
+    assert len(items) == 1
+    assert items[0].mode == "custom"
+    assert items[0].payload == {
+        "type": "run_budget_exhausted",
+        "stop_reason": "step_capped",
+        "used": 2,
+        "limit": 2,
+        "notice": "本轮已达到执行步数安全上限，已停止继续执行。",
+    }
+    assert "private recursion details" not in str(items[0].payload)
+
+
+def test_manager_recovers_active_invocation_timeout_as_a_public_budget_stop() -> None:
+    request = HarnessRunRequest(
+        thread_id="thread-1",
+        run_id="run-1",
+        context=_context("run-1"),
+        message="continue",
+        timeout_seconds=0.01,
+    )
+
+    async def run() -> list[Any]:
+        return [item async for item in HarnessRunManager(SlowGraph()).stream(request)]
+
+    items = asyncio.run(run())
+
+    assert len(items) == 1
+    assert items[0].payload["stop_reason"] == "time_capped"
+    assert items[0].payload["limit"] == 0.01
+
+
+def test_manager_does_not_swallow_external_cancellation() -> None:
+    graph = SlowGraph()
+
+    async def run() -> None:
+        async def consume() -> None:
+            _ = [item async for item in HarnessRunManager(graph).stream(_request())]
+
+        task = asyncio.create_task(consume())
+        await graph.started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+
+
+def test_manager_does_not_reclassify_an_inner_timeout_as_run_budget() -> None:
+    async def run() -> None:
+        with pytest.raises(TimeoutError, match="provider timeout"):
+            _ = [
+                item
+                async for item in HarnessRunManager(InnerTimeoutGraph()).stream(_request())
+            ]
+
+    asyncio.run(run())

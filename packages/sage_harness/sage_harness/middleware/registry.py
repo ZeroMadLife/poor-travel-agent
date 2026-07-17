@@ -6,16 +6,16 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from langchain.agents.middleware import AgentMiddleware, ModelCallLimitMiddleware
+from langchain.agents.middleware import AgentMiddleware
 
 from sage_harness.config import HarnessConfig
 from sage_harness.middleware.builtin import (
     InputSanitizationMiddleware,
     ProviderErrorMiddleware,
     RemoteContentSanitizationMiddleware,
+    RunBudgetMiddleware,
     TerminalResponseMiddleware,
     ThreadContextMiddleware,
-    TokenBudgetMiddleware,
     ToolErrorMiddleware,
 )
 from sage_harness.middleware.durable_context import DurableContextMiddleware
@@ -92,10 +92,13 @@ def build_default_registry() -> MiddlewareRegistry:
             ),
             MiddlewareSpec("tool_error", lambda config: ToolErrorMiddleware()),
             MiddlewareSpec(
-                "model_call_limit",
-                lambda config: ModelCallLimitMiddleware(run_limit=config.max_model_calls, exit_behavior="end"),
+                "run_budget",
+                lambda config: RunBudgetMiddleware(
+                    max_model_calls=config.max_model_calls,
+                    max_tool_calls=config.max_tool_calls,
+                    max_tokens=config.max_run_tokens,
+                ),
             ),
-            MiddlewareSpec("token_budget", lambda config: TokenBudgetMiddleware(config.max_run_tokens)),
             MiddlewareSpec("terminal_response", lambda config: TerminalResponseMiddleware()),
         ]
     )
