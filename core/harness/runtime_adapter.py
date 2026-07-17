@@ -101,6 +101,7 @@ class SageHarnessRuntimeAdapter:
         content: str,
         resume: bool = False,
         resume_value: object | None = None,
+        resume_attempt: int = 0,
         surface: str = "coding",
         surface_context: Mapping[str, Any] | None = None,
         durable_context: Mapping[str, Any] | None = None,
@@ -164,7 +165,13 @@ class SageHarnessRuntimeAdapter:
             resume=resume,
             resume_value=resume_value,
         )
-        adapter = HarnessEventAdapter(session_id=session_id, run_id=run_id)
+        if resume_attempt < 0:
+            raise ValueError("resume_attempt must be non-negative")
+        adapter = HarnessEventAdapter(
+            session_id=session_id,
+            run_id=run_id,
+            stream_namespace=f"resume-{resume_attempt}" if resume else "initial",
+        )
         async for item in self.manager.stream(request):
             if compaction_event is not None:
                 yield compaction_event

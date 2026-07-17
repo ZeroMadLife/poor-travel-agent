@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Annotated, Any, cast
 
-from langchain_core.tools import BaseTool, StructuredTool
+from langchain_core.tools import BaseTool, InjectedToolCallId, StructuredTool
+from langgraph.types import interrupt
 from sage_harness import (
     DeferredToolSetup,
     KnowledgePort,
@@ -21,6 +23,7 @@ from sage_harness import (
 
 from core.coding.engine.events import ToolResultEvent, event_to_dict
 from core.coding.runtime import CodingRuntime
+from core.coding.tool_executor.approval import ApprovalChoice
 from core.coding.tool_executor.executor import ToolExecutor
 
 _DEERFLOW_TOOLS = frozenset(
@@ -46,6 +49,7 @@ def build_deerflow_coding_tools(
     sandbox: SandboxPort | None = None,
     subagent_executor: SubagentExecutorPort | None = None,
     subagent_config: SubagentToolConfig | None = None,
+    graph_approvals: bool = False,
 ) -> list[BaseTool]:
     """Build the established resident tool slice without deferred discovery."""
     return list(
@@ -57,6 +61,7 @@ def build_deerflow_coding_tools(
             sandbox=sandbox,
             subagent_executor=subagent_executor,
             subagent_config=subagent_config,
+            graph_approvals=graph_approvals,
             enable_deferred_tools=False,
         ).tools
     )
@@ -72,6 +77,7 @@ def build_deerflow_coding_tool_bundle(
     extra_deferred_tools: Sequence[BaseTool] = (),
     subagent_executor: SubagentExecutorPort | None = None,
     subagent_config: SubagentToolConfig | None = None,
+    graph_approvals: bool = False,
     enable_deferred_tools: bool = True,
 ) -> CodingToolBundle:
     """Build V2 tools while preserving Sage execution and approval boundaries."""
@@ -105,6 +111,7 @@ def build_deerflow_coding_tool_bundle(
             name=name,
             args_schema=definition.schema_model,
             sandbox=sandbox,
+            graph_approvals=graph_approvals,
         )
         target = (
             deferred_tools
@@ -232,10 +239,11 @@ def _build_runtime_tool(
     name: str,
     args_schema: Any,
     sandbox: SandboxPort | None,
+    graph_approvals: bool,
 ) -> BaseTool:
     registered = runtime.tools[name]
 
-    async def invoke(**kwargs: Any) -> str:
+    async def invoke_impl(tool_call_id: str, kwargs: Mapping[str, Any]) -> str:
         executor = ToolExecutor(
             tools=runtime.tools,
             workspace=runtime.workspace,
@@ -247,9 +255,60 @@ def _build_runtime_tool(
             run_id=run_id,
             sandbox=sandbox,
         )
+        tool_payload = {"name": name, "args": dict(kwargs)}
+        approval_choice: ApprovalChoice | None = None
+        if graph_approvals:
+            requirement = executor.approval_requirement(tool_payload)
+            if requirement is not None:
+                approval_id, args_digest = _graph_approval_identity(
+                    runtime,
+                    run_id=run_id,
+                    tool_call_id=tool_call_id,
+                    tool=requirement.tool,
+                    args=requirement.args,
+                )
+                entry = runtime.approval_manager.submit(
+                    runtime.session_id,
+                    requirement.tool,
+                    requirement.args,
+                    requirement.description,
+                    requirement.pattern_key,
+                    approval_id=approval_id,
+                )
+                if entry.result is None:
+                    decision = interrupt(
+                        {
+                            "type": "approval_required",
+                            "approval_id": entry.approval_id,
+                            "tool": requirement.tool,
+                            "args": requirement.args,
+                            "description": requirement.description,
+                            "pattern_key": requirement.pattern_key,
+                            "tool_call_id": tool_call_id,
+                            "args_digest": args_digest,
+                        }
+                    )
+                else:
+                    decision = {
+                        "approval_id": entry.approval_id,
+                        "choice": entry.result,
+                    }
+                approval_choice = _graph_approval_choice(
+                    decision,
+                    approval_id=entry.approval_id,
+                )
+                server_choice = runtime.approval_manager.consume_resolution(
+                    runtime.session_id,
+                    entry.approval_id,
+                )
+                if server_choice is None or server_choice != approval_choice:
+                    approval_choice = "deny"
         result = ""
         writer = _stream_writer()
-        async for event in executor.execute({"name": name, "args": dict(kwargs)}):
+        async for event in executor.execute(
+            tool_payload,
+            approval_choice=approval_choice,
+        ):
             payload = event_to_dict(event)
             if writer is not None:
                 writer(payload)
@@ -257,8 +316,28 @@ def _build_runtime_tool(
                 result = event.content
         return result or f"{name} completed without a result"
 
+    if graph_approvals:
+
+        async def graph_invoke(
+            tool_call_id: Annotated[str, InjectedToolCallId],
+            **kwargs: Any,
+        ) -> str:
+            return await invoke_impl(tool_call_id, kwargs)
+
+        # ``from __future__ import annotations`` stringifies this nested annotation;
+        # StructuredTool needs the runtime object to inject the model tool-call id.
+        graph_invoke.__annotations__["tool_call_id"] = Annotated[
+            str, InjectedToolCallId
+        ]
+        coroutine: Any = graph_invoke
+    else:
+
+        async def direct_invoke(**kwargs: Any) -> str:
+            return await invoke_impl("", kwargs)
+
+        coroutine = direct_invoke
     return StructuredTool.from_function(
-        coroutine=invoke,
+        coroutine=coroutine,
         name=name,
         description=registered.description,
         args_schema=args_schema,
@@ -268,6 +347,35 @@ def _build_runtime_tool(
             "sage_source": "coding_registry",
         },
     )
+
+
+def _graph_approval_identity(
+    runtime: CodingRuntime,
+    *,
+    run_id: str,
+    tool_call_id: str,
+    tool: str,
+    args: Mapping[str, Any],
+) -> tuple[str, str]:
+    canonical_args = json.dumps(args, sort_keys=True, ensure_ascii=True, default=str)
+    args_digest = hashlib.sha256(canonical_args.encode("utf-8")).hexdigest()
+    identity = "\0".join(
+        (runtime.session_id, run_id, tool_call_id or "missing", tool, args_digest)
+    )
+    approval_id = f"appr_{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:16]}"
+    return approval_id, args_digest
+
+
+def _graph_approval_choice(value: object, *, approval_id: str) -> ApprovalChoice:
+    raw_choice: object = value
+    if isinstance(value, Mapping):
+        if str(value.get("approval_id", "")) != approval_id:
+            return "deny"
+        raw_choice = value.get("choice")
+    choice = str(raw_choice)
+    if choice not in {"once", "session", "always", "deny"}:
+        return "deny"
+    return cast(ApprovalChoice, choice)
 
 
 def _stream_writer() -> Callable[[Any], None] | None:

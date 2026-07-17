@@ -89,6 +89,17 @@ def test_event_adapter_exposes_ai_delta_and_tool_result_without_private_state() 
     assert "analysis" not in str(ai_events[0].payload)
 
 
+def test_event_adapter_namespaces_resume_events_for_idempotent_replay() -> None:
+    initial = HarnessEventAdapter(session_id="s1", run_id="r1")
+    resumed = HarnessEventAdapter(session_id="s1", run_id="r1", stream_namespace="resume-1")
+    message = AIMessage(content="answer", id="ai-1")
+
+    initial_event = initial.adapt(HarnessStreamItem(1, "messages", (message, {}), "source"))[0]
+    resumed_event = resumed.adapt(HarnessStreamItem(1, "messages", (message, {}), "source"))[0]
+
+    assert initial_event.event_id != resumed_event.event_id
+
+
 def test_event_adapter_projects_provider_message_chunks_as_text_deltas() -> None:
     adapter = HarnessEventAdapter(session_id="s1", run_id="r1")
     chunk = AIMessageChunk(content="流式正文", id="chunk-1")

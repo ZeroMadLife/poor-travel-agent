@@ -364,6 +364,7 @@ async def _deerflow_timeline_events(
                 extra_deferred_tools=mcp_tools,
                 subagent_executor=subagent_executor,
                 subagent_config=subagent_config,
+                graph_approvals=True,
             )
             adapter = SageHarnessRuntimeAdapter(
                 model=runtime.model,
@@ -388,21 +389,53 @@ async def _deerflow_timeline_events(
                     "summary_text": summary_text,
                 }
             response_parts: list[str] = []
-            async for event in adapter.stream_turn(
-                session_id=runtime.session_id,
-                run_id=run_id,
-                workspace_id=workspace_id,
-                workspace_path=str(runtime.workspace.root),
-                content=content,
-                surface_context=surface_context,
-                durable_context=durable_context,
-                graph_compaction=graph_compaction,
-                sandbox=sandbox.descriptor,
-            ):
-                if event.payload.get("type") == "text_delta":
-                    delta = str(event.payload.get("delta", ""))
-                    response_parts.append(delta)
-                yield event
+            resume_attempt = 0
+            resume = False
+            resume_value: object | None = None
+            while True:
+                approval_to_resume: str | None = None
+                async for event in adapter.stream_turn(
+                    session_id=runtime.session_id,
+                    run_id=run_id,
+                    workspace_id=workspace_id,
+                    workspace_path=str(runtime.workspace.root),
+                    content=content,
+                    surface_context=surface_context,
+                    durable_context=durable_context,
+                    graph_compaction=graph_compaction if not resume else None,
+                    sandbox=sandbox.descriptor,
+                    resume=resume,
+                    resume_value=resume_value,
+                    resume_attempt=resume_attempt,
+                ):
+                    if event.payload.get("type") == "text_delta":
+                        response_parts.append(str(event.payload.get("delta", "")))
+                    yield event
+                    if event.payload.get("type") == "approval_required":
+                        approval_to_resume = str(
+                            event.payload.get("approval_id", "")
+                        ).strip()
+                        if not approval_to_resume:
+                            raise RuntimeError("graph approval event is missing approval_id")
+                if approval_to_resume is None:
+                    break
+                choice = await runtime.approval_manager.wait_for(
+                    runtime.session_id,
+                    approval_to_resume,
+                )
+                if choice is None:
+                    raise RuntimeError("graph approval timed out or was cancelled")
+                if choice in {"session", "always"}:
+                    runtime.approval_manager.consume_resolution(
+                        runtime.session_id,
+                        approval_to_resume,
+                    )
+                resume = True
+                resume_attempt += 1
+                resume_value = {
+                    "approval_id": approval_to_resume,
+                    "choice": choice,
+                }
         finally:
             await sandbox.aclose()
         answer = "".join(response_parts).strip()

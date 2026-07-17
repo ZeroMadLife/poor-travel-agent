@@ -142,6 +142,43 @@ class DeerflowApprovalFakeModel(FakeMessagesListChatModel):
         return self
 
 
+class DeerflowMultiApprovalFakeModel(FakeMessagesListChatModel):
+    """Tool-capable fake that requires two graph checkpoint resumes."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "write_file",
+                            "args": {"path": "first.txt", "content": "one"},
+                            "id": "call-write-first",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "write_file",
+                            "args": {"path": "second.txt", "content": "two"},
+                            "id": "call-write-second",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(content="两次写入完成"),
+            ]
+        )
+
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):  # type: ignore[no-untyped-def]
+        _ = tools, tool_choice, kwargs
+        return self
+
+
 class DeerflowAgentFakeModel(FakeMessagesListChatModel):
     """Tool-capable fake that awaits one bounded Explore child."""
 
@@ -383,6 +420,8 @@ def test_enabled_deerflow_profile_reuses_approval_endpoint_for_write_tool(tmp_pa
                 json={"approval_id": approval["approval_id"], "choice": "once"},
             )
             assert response.status_code == 200
+            assert approval["tool_call_id"] == "call-write-file"
+            assert len(approval["args_digest"]) == 64
             payloads: list[dict] = []
             while True:
                 event = websocket.receive_json()
@@ -393,6 +432,119 @@ def test_enabled_deerflow_profile_reuses_approval_endpoint_for_write_tool(tmp_pa
     assert (tmp_path / "approved.txt").read_text(encoding="utf-8") == "ok"
     assert any(item.get("type") == "approval_granted" for item in payloads)
     assert any(item.get("type") == "final" for item in payloads)
+
+
+def test_enabled_deerflow_profile_resumes_graph_after_approval_denial(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        coding_model_factory=DeerflowApprovalFakeModel,
+        coding_workspace_root=tmp_path,
+        coding_storage_root=tmp_path / ".coding",
+        coding_deerflow_v2_enabled=True,
+    )
+    with TestClient(app) as client:
+        session_id = client.post(
+            "/api/v1/coding/session",
+            json={"runtime_profile": "deerflow_v2", "approval_policy": "ask"},
+        ).json()["session_id"]
+        with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
+            websocket.send_json({"content": "不要写这个文件"})
+            approval = None
+            while approval is None:
+                event = websocket.receive_json()
+                if event["payload"].get("type") == "approval_required":
+                    approval = event["payload"]
+            response = client.post(
+                f"/api/v1/coding/{session_id}/approval/respond",
+                json={"approval_id": approval["approval_id"], "choice": "deny"},
+            )
+            assert response.status_code == 200
+            payloads: list[dict] = []
+            while True:
+                event = websocket.receive_json()
+                payloads.append(event["payload"])
+                if event["kind"] == "terminal":
+                    break
+
+    assert not (tmp_path / "approved.txt").exists()
+    assert any(
+        item.get("type") == "tool_result"
+        and item.get("content") == "approval denied"
+        for item in payloads
+    )
+    assert any(item.get("type") == "final" for item in payloads)
+
+
+def test_enabled_deerflow_profile_handles_multiple_graph_approval_resumes(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        coding_model_factory=DeerflowMultiApprovalFakeModel,
+        coding_workspace_root=tmp_path,
+        coding_storage_root=tmp_path / ".coding",
+        coding_deerflow_v2_enabled=True,
+    )
+    with TestClient(app) as client:
+        session_id = client.post(
+            "/api/v1/coding/session",
+            json={"runtime_profile": "deerflow_v2", "approval_policy": "ask"},
+        ).json()["session_id"]
+        approvals: list[str] = []
+        payloads: list[dict] = []
+        with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
+            websocket.send_json({"content": "写两个文件"})
+            while True:
+                event = websocket.receive_json()
+                payload = event["payload"]
+                payloads.append(payload)
+                if payload.get("type") == "approval_required":
+                    approvals.append(str(payload["approval_id"]))
+                    response = client.post(
+                        f"/api/v1/coding/{session_id}/approval/respond",
+                        json={"approval_id": approvals[-1], "choice": "once"},
+                    )
+                    assert response.status_code == 200
+                if event["kind"] == "terminal":
+                    break
+
+    assert len(approvals) == 2
+    assert (tmp_path / "first.txt").read_text(encoding="utf-8") == "one"
+    assert (tmp_path / "second.txt").read_text(encoding="utf-8") == "two"
+    assert any(item.get("type") == "final" for item in payloads)
+
+
+def test_enabled_deerflow_profile_reuses_graph_session_approval(tmp_path: Path) -> None:
+    app = create_app(
+        coding_model_factory=DeerflowMultiApprovalFakeModel,
+        coding_workspace_root=tmp_path,
+        coding_storage_root=tmp_path / ".coding",
+        coding_deerflow_v2_enabled=True,
+    )
+    with TestClient(app) as client:
+        session_id = client.post(
+            "/api/v1/coding/session",
+            json={"runtime_profile": "deerflow_v2", "approval_policy": "ask"},
+        ).json()["session_id"]
+        approvals: list[str] = []
+        with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
+            websocket.send_json({"content": "本会话写两个文件"})
+            while True:
+                event = websocket.receive_json()
+                payload = event["payload"]
+                if payload.get("type") == "approval_required":
+                    approvals.append(str(payload["approval_id"]))
+                    response = client.post(
+                        f"/api/v1/coding/{session_id}/approval/respond",
+                        json={"approval_id": approvals[-1], "choice": "session"},
+                    )
+                    assert response.status_code == 200
+                if event["kind"] == "terminal":
+                    break
+
+    assert len(approvals) == 1
+    assert (tmp_path / "first.txt").read_text(encoding="utf-8") == "one"
+    assert (tmp_path / "second.txt").read_text(encoding="utf-8") == "two"
 
 
 def test_enabled_deerflow_profile_awaits_and_projects_subagent_terminal(tmp_path: Path) -> None:

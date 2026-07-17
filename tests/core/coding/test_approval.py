@@ -63,6 +63,24 @@ def test_approval_manager_cancel_session_denies_pending_entries() -> None:
     assert manager.pending("s1") is None
 
 
+def test_graph_approval_resolution_is_replayable_after_cancel() -> None:
+    manager = ApprovalManager()
+    entry = manager.submit(
+        "s1",
+        "write_file",
+        {"path": "note.txt"},
+        "write_file requires approval.",
+        "tool:write_file",
+        approval_id="appr_graph_1",
+    )
+
+    manager.cancel_session("s1")
+
+    assert entry.result == "deny"
+    assert manager.consume_resolution("s1", "appr_graph_1") == "deny"
+    assert manager.consume_resolution("s1", "appr_graph_1") is None
+
+
 def test_check_dangerous_command_detects_common_patterns() -> None:
     """Common destructive shell commands are classified for approval."""
     dangerous, description, pattern_key = check_dangerous_command("git reset --hard HEAD")

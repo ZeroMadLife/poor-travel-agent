@@ -19,11 +19,20 @@ from core.coding.run_coordinator import RunEvent
 class HarnessEventAdapter:
     """Translate graph events without persisting private model reasoning."""
 
-    def __init__(self, *, session_id: str, run_id: str) -> None:
+    def __init__(
+        self,
+        *,
+        session_id: str,
+        run_id: str,
+        stream_namespace: str = "initial",
+    ) -> None:
         if not session_id.strip() or not run_id.strip():
             raise ValueError("session_id and run_id are required")
+        if not stream_namespace.strip():
+            raise ValueError("stream_namespace must not be empty")
         self.session_id = session_id
         self.run_id = run_id
+        self.stream_namespace = stream_namespace
         self._seen_model_tool_calls: set[str] = set()
         self._pending_model_calls_by_tool: dict[str, int] = {}
         self._custom_tool_results: set[str] = set()
@@ -284,11 +293,16 @@ class HarnessEventAdapter:
     ) -> RunEvent:
         payload.setdefault("run_id", self.run_id)
         payload.setdefault("session_id", self.session_id)
+        event_id = (
+            f"{source_event_id}:public"
+            if self.stream_namespace == "initial"
+            else f"harness:{self.run_id}:{self.stream_namespace}:{source_event_id}:public"
+        )
         return RunEvent(
             kind=kind,
             status=status,
             payload=payload,
-            event_id=f"{source_event_id}:public",
+            event_id=event_id,
         )
 
 
