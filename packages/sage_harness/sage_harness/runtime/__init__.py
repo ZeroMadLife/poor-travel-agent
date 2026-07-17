@@ -1,7 +1,9 @@
 """Long-running graph runtime primitives for the Sage harness."""
 
 from sage_harness.runtime.checkpoint import (
+    CheckpointScopeError,
     build_memory_checkpointer,
+    load_scoped_checkpoint,
     open_sqlite_checkpointer,
     thread_config,
 )
@@ -16,6 +18,7 @@ from sage_harness.runtime.message_compaction import (
 )
 
 __all__ = [
+    "CheckpointScopeError",
     "GraphMessageCompactionError",
     "GraphMessageCompactionPlan",
     "GraphMessageCompactionRequest",
@@ -25,6 +28,7 @@ __all__ = [
     "build_graph_message_compaction_plan",
     "build_memory_checkpointer",
     "load_graph_message_compaction_plan",
+    "load_scoped_checkpoint",
     "normalize_stream_item",
     "open_sqlite_checkpointer",
     "thread_config",

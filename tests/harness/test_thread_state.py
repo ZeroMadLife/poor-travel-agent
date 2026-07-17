@@ -110,10 +110,33 @@ def test_skill_refs_are_bounded_and_normalized() -> None:
 def test_conflicting_workspace_sandbox_and_approval_fail_closed() -> None:
     with pytest.raises(ValueError, match="workspace paths"):
         merge_thread_data({"workspace_path": "/one"}, {"workspace_path": "/two"})
+    with pytest.raises(ValueError, match="owner ids"):
+        merge_thread_data({"owner_id": "owner-a"}, {"owner_id": "owner-b"})
+    with pytest.raises(ValueError, match="workspace ids"):
+        merge_thread_data({"workspace_id": "workspace-a"}, {"workspace_id": "workspace-b"})
+    with pytest.raises(ValueError, match="thread ids"):
+        merge_thread_data({"thread_id": "thread-a"}, {"thread_id": "thread-b"})
     with pytest.raises(ValueError, match="sandbox ids"):
         merge_sandbox({"sandbox_id": "s1"}, {"sandbox_id": "s2"})
     with pytest.raises(ValueError, match="approval requests"):
         merge_approval_context({"request_id": "r1", "status": "pending"}, {"request_id": "r2", "status": "pending"})
+
+
+def test_legacy_path_only_thread_state_can_claim_matching_durable_scope() -> None:
+    assert merge_thread_data(
+        {"workspace_path": "/workspace"},
+        {
+            "owner_id": "owner-a",
+            "workspace_id": "workspace-a",
+            "thread_id": "thread-a",
+            "workspace_path": "/workspace",
+        },
+    ) == {
+        "owner_id": "owner-a",
+        "workspace_id": "workspace-a",
+        "thread_id": "thread-a",
+        "workspace_path": "/workspace",
+    }
 
 
 def test_approval_is_bound_to_exact_tool_call_and_arguments() -> None:

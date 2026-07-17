@@ -213,6 +213,7 @@ def test_real_graph_persists_skill_ref_without_persisting_skill_body() -> None:
         context=HarnessRunContext(
             thread_id="thread-skill",
             run_id="run-skill",
+            owner_id="owner-skill",
             workspace_id="workspace-skill",
             workspace_path="/workspace",
         ),

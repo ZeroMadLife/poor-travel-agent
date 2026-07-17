@@ -10,7 +10,8 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
-from sage_harness.runtime.checkpoint import thread_config
+from sage_harness.config import HarnessRunContext
+from sage_harness.runtime.checkpoint import load_scoped_checkpoint, thread_config
 
 _MAX_SUMMARY_CHARS = 8_000
 _MAX_COMPACTION_ID_CHARS = 128
@@ -92,12 +93,18 @@ async def load_graph_message_compaction_plan(
     *,
     thread_id: str,
     request: GraphMessageCompactionRequest,
+    context: HarnessRunContext | None = None,
 ) -> GraphMessageCompactionPlan:
     """Read one thread checkpoint and build a reducer update without rewriting storage directly."""
     try:
-        checkpoint_tuple = await checkpointer.aget_tuple(
-            cast(RunnableConfig, thread_config(thread_id))
-        )
+        if context is not None:
+            if context.thread_id != thread_id:
+                raise GraphMessageCompactionError("graph compaction scope is invalid")
+            checkpoint_tuple = await load_scoped_checkpoint(checkpointer, context)
+        else:
+            checkpoint_tuple = await checkpointer.aget_tuple(
+                cast(RunnableConfig, thread_config(thread_id))
+            )
     except Exception as exc:
         raise GraphMessageCompactionError("graph checkpoint could not be read") from exc
     if checkpoint_tuple is None:

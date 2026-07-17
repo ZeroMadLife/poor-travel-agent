@@ -54,6 +54,7 @@ def _context(run_id: str = "run-parent") -> HarnessRunContext:
     return HarnessRunContext(
         thread_id="thread-parent",
         run_id=run_id,
+        owner_id="owner-parent",
         workspace_id="workspace-parent",
         workspace_path="/workspace",
     )

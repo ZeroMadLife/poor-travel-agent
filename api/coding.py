@@ -94,6 +94,7 @@ from core.coding.persistence import (
     MemoryStoreError,
 )
 from core.coding.persistence.session_event_journal import SessionEvent
+from core.coding.persistence.tool_result_store import ToolResultStore
 from core.coding.provider_settings import SageProviderSettings, SageProviderSettingsStore
 from core.coding.run_coordinator import ActiveRunConflictError, RunEvent
 from core.coding.runtime import CodingRuntime
@@ -408,6 +409,11 @@ async def _deerflow_timeline_events(
                 skill_catalog=runtime.skill_registry,
                 subagent_limits=SubagentLimits(),
                 config=harness_config,
+                artifact_store=ToolResultStore(
+                    runtime.storage_root,
+                    runtime.session_id,
+                    run_id,
+                ),
             )
             graph_compaction: dict[str, object] | None = None
             compaction_result = prepared.compaction_result if prepared is not None else None
@@ -431,6 +437,7 @@ async def _deerflow_timeline_events(
                 async for event in adapter.stream_turn(
                     session_id=runtime.session_id,
                     run_id=run_id,
+                    owner_id=runtime.owner_user_id or "local",
                     workspace_id=workspace_id,
                     workspace_path=str(runtime.workspace.root),
                     content=content,

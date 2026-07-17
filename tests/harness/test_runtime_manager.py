@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -11,6 +12,7 @@ from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 from sage_harness.config import HarnessRunContext
+from sage_harness.runtime.checkpoint import load_scoped_checkpoint
 from sage_harness.runtime.manager import HarnessRunManager, HarnessRunRequest
 from typing_extensions import TypedDict
 
@@ -51,10 +53,20 @@ class InnerTimeoutGraph:
         raise TimeoutError("provider timeout")
 
 
+class StaticCheckpointSaver:
+    def __init__(self, checkpoint: object) -> None:
+        self.checkpoint = checkpoint
+
+    async def aget_tuple(self, config):  # type: ignore[no-untyped-def]
+        _ = config
+        return self.checkpoint
+
+
 def _context(run_id: str) -> HarnessRunContext:
     return HarnessRunContext(
         thread_id="thread-1",
         run_id=run_id,
+        owner_id="owner-1",
         workspace_id="workspace-1",
         workspace_path="/tmp/workspace",
     )
@@ -88,6 +100,21 @@ def test_manager_uses_server_owned_command_for_checkpoint_resume() -> None:
 def test_resume_request_can_omit_a_new_user_message() -> None:
     request = _request(resume=True)
     assert request.message == ""
+
+
+def test_path_only_legacy_checkpoint_can_be_claimed_by_matching_scope() -> None:
+    legacy = SimpleNamespace(
+        checkpoint={
+            "channel_values": {
+                "thread_data": {"workspace_path": "/tmp/workspace"},
+            }
+        }
+    )
+
+    async def run() -> object:
+        return await load_scoped_checkpoint(StaticCheckpointSaver(legacy), _context("run-1"))  # type: ignore[arg-type]
+
+    assert asyncio.run(run()) is legacy
 
 
 def test_request_rejects_a_cross_run_context() -> None:

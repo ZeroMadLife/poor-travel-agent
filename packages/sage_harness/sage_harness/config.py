@@ -36,13 +36,21 @@ class HarnessRunContext:
 
     thread_id: str
     run_id: str
+    owner_id: str
     workspace_id: str
     workspace_path: str
     surface: str = "coding"
     metadata: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        for field_name in ("thread_id", "run_id", "workspace_id", "workspace_path", "surface"):
+        for field_name in (
+            "thread_id",
+            "run_id",
+            "owner_id",
+            "workspace_id",
+            "workspace_path",
+            "surface",
+        ):
             if not str(getattr(self, field_name)).strip():
                 raise ValueError(f"{field_name} must not be empty")
 

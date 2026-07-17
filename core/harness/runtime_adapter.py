@@ -6,7 +6,6 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any, cast
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from sage_harness import (
@@ -24,10 +23,15 @@ from sage_harness import (
     SubagentLimits,
     create_sage_agent,
     load_graph_message_compaction_plan,
+    load_scoped_checkpoint,
     render_deferred_tool_index,
 )
-from sage_harness.middleware import MiddlewareSpec, build_default_registry
-from sage_harness.runtime.checkpoint import thread_config
+from sage_harness.middleware import (
+    MiddlewareSpec,
+    ToolResultArtifactMiddleware,
+    build_default_registry,
+)
+from sage_harness.ports import ToolArtifactPort
 from sage_harness.runtime.manager import StreamableGraph
 
 from core.coding.run_coordinator import RunEvent
@@ -48,10 +52,19 @@ class SageHarnessRuntimeAdapter:
         skill_catalog: SkillCatalog | None = None,
         subagent_limits: SubagentLimits | None = None,
         config: HarnessConfig | None = None,
+        artifact_store: ToolArtifactPort | None = None,
     ) -> None:
         self.checkpointer = checkpointer
         self.config = config or HarnessConfig()
         registry = build_default_registry()
+        if artifact_store is not None:
+            registry = registry.with_spec(
+                MiddlewareSpec(
+                    "tool_result_artifact",
+                    lambda config: ToolResultArtifactMiddleware(artifact_store),
+                ),
+                after="remote_content_sanitization",
+            )
         effective_prompt = system_prompt
         if deferred_setup is not None and deferred_setup.enabled:
             catalog_hash = deferred_setup.catalog_hash
@@ -102,6 +115,7 @@ class SageHarnessRuntimeAdapter:
         *,
         session_id: str,
         run_id: str,
+        owner_id: str = "local",
         workspace_id: str,
         workspace_path: str,
         content: str,
@@ -118,6 +132,7 @@ class SageHarnessRuntimeAdapter:
         context = HarnessRunContext(
             thread_id=session_id,
             run_id=run_id,
+            owner_id=owner_id,
             workspace_id=workspace_id,
             workspace_path=workspace_path,
             surface=surface,
@@ -128,11 +143,17 @@ class SageHarnessRuntimeAdapter:
         )
         if sandbox is not None and sandbox.workspace_id != workspace_id:
             raise ValueError("sandbox workspace_id does not match run context")
+        await load_scoped_checkpoint(self.checkpointer, context)
         state_update: dict[str, object] = {}
         if sandbox is not None:
             state_update.update(
                 {
-                    "thread_data": {"workspace_path": workspace_path},
+                    "thread_data": {
+                        "owner_id": owner_id,
+                        "workspace_id": workspace_id,
+                        "thread_id": session_id,
+                        "workspace_path": workspace_path,
+                    },
                     "sandbox": {"sandbox_id": sandbox.sandbox_id},
                 }
             )
@@ -147,6 +168,7 @@ class SageHarnessRuntimeAdapter:
                 self.checkpointer,
                 thread_id=session_id,
                 request=compaction_request,
+                context=context,
             )
             state_update.update(plan.state_update())
             compaction_event = RunEvent(
@@ -180,7 +202,7 @@ class SageHarnessRuntimeAdapter:
             run_id=run_id,
             stream_namespace=f"resume-{resume_attempt}" if resume else "initial",
             seen_tool_call_ids=(
-                await _checkpoint_pending_tool_call_ids(self.checkpointer, session_id)
+                await _checkpoint_pending_tool_call_ids(self.checkpointer, context)
                 if resume
                 else ()
             ),
@@ -195,11 +217,9 @@ class SageHarnessRuntimeAdapter:
 
 async def _checkpoint_pending_tool_call_ids(
     checkpointer: BaseCheckpointSaver[Any],
-    thread_id: str,
+    context: HarnessRunContext,
 ) -> tuple[str, ...]:
-    checkpoint = await checkpointer.aget_tuple(
-        cast(RunnableConfig, thread_config(thread_id))
-    )
+    checkpoint = await load_scoped_checkpoint(checkpointer, context)
     if checkpoint is None:
         return ()
     channels: object = checkpoint.checkpoint.get("channel_values", {})

@@ -23,6 +23,7 @@ from sage_harness.middleware import (
     TerminalResponseMiddleware,
     TokenBudgetMiddleware,
     ToolErrorMiddleware,
+    ToolResultArtifactMiddleware,
     neutralize_untrusted_text,
 )
 
@@ -31,6 +32,7 @@ def _context(run_id: str = "run-1") -> HarnessRunContext:
     return HarnessRunContext(
         thread_id="thread-1",
         run_id=run_id,
+        owner_id="owner-1",
         workspace_id="workspace-1",
         workspace_path="/workspace",
     )
@@ -52,7 +54,12 @@ def test_default_middleware_chain_runs_and_projects_thread_context() -> None:
     result = graph.invoke({"messages": [HumanMessage(content="hello")]}, context=_context())
 
     assert result["messages"][-1].content == "ready"
-    assert result["thread_data"] == {"workspace_path": "/workspace"}
+    assert result["thread_data"] == {
+        "owner_id": "owner-1",
+        "workspace_id": "workspace-1",
+        "thread_id": "thread-1",
+        "workspace_path": "/workspace",
+    }
     assert result["surface_context"]["run_id"] == "run-1"
     assert result["budget_run_id"] == "run-1"
 
@@ -220,6 +227,44 @@ def test_remote_tool_content_is_bounded_and_neutralized_by_metadata() -> None:
     assert len(str(result.content)) < 12_200
     assert result.additional_kwargs["sage_harness"] == {
         "remote_content": True,
+        "truncated": True,
+    }
+
+
+def test_large_tool_result_is_archived_before_checkpoint_projection() -> None:
+    class ArtifactStore:
+        def archive(self, call_id: str, content: str):
+            assert call_id == "call-1"
+            assert content == "x" * 20_000
+            return MagicMock(
+                artifact_ref="sage://coding/s1/runs/r1/tool-results/call-1.txt",
+                preview="bounded preview",
+                original_chars=len(content),
+                truncated=True,
+            )
+
+    middleware = ToolResultArtifactMiddleware(ArtifactStore())
+    request = ToolCallRequest(
+        tool_call={"name": "remote_lookup", "args": {}, "id": "call-1", "type": "tool_call"},
+        tool=None,
+        state={},
+        runtime=MagicMock(),
+    )
+
+    result = middleware.wrap_tool_call(
+        request,
+        lambda _: ToolMessage(
+            content="x" * 20_000,
+            name="remote_lookup",
+            tool_call_id="call-1",
+        ),
+    )
+
+    assert isinstance(result, ToolMessage)
+    assert result.content == "bounded preview"
+    assert result.artifact == {
+        "artifact_ref": "sage://coding/s1/runs/r1/tool-results/call-1.txt",
+        "original_chars": 20_000,
         "truncated": True,
     }
 

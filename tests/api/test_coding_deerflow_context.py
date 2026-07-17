@@ -22,6 +22,7 @@ from core.coding.engine.events import (
     ContextCompactionStartedEvent,
     ContextUsageUpdatedEvent,
 )
+from core.coding.persistence.tool_result_store import ToolResultStore
 from core.coding.run_coordinator import RunEvent
 from core.coding.runtime import CodingRuntime
 
@@ -192,14 +193,18 @@ class RecordingAdapter:
     runtime: ClassVar[CodingRuntime]
     durable_contexts: ClassVar[list[dict[str, object]]]
     graph_compactions: ClassVar[list[dict[str, object]]]
+    init_kwargs: ClassVar[dict[str, object]]
+    stream_kwargs: ClassVar[list[dict[str, object]]]
 
     def __init__(self, **kwargs: Any) -> None:
-        del kwargs
+        type(self).init_kwargs = dict(kwargs)
         type(self).durable_contexts = []
         type(self).graph_compactions = []
+        type(self).stream_kwargs = []
 
     async def stream_turn(self, **kwargs: Any):  # type: ignore[no-untyped-def]
         assert type(self).runtime.active_run_id == kwargs["run_id"]
+        type(self).stream_kwargs.append(dict(kwargs))
         type(self).durable_contexts.append(dict(kwargs["durable_context"]))
         if kwargs.get("graph_compaction") is not None:
             type(self).graph_compactions.append(dict(kwargs["graph_compaction"]))
@@ -243,6 +248,8 @@ async def test_v2_compacts_before_graph_and_injects_new_summary(
             "summary_text": RecordingAdapter.durable_contexts[0]["summary_text"],
         }
     ]
+    assert isinstance(RecordingAdapter.init_kwargs["artifact_store"], ToolResultStore)
+    assert RecordingAdapter.stream_kwargs[0]["owner_id"] == "local"
     assert runtime.session["context_state"]["checkpoint_id"] == "compact-v2"
     assert runtime.active_run_id is None
     assert runtime.context_snapshot()["context_operation_active"] is False

@@ -25,8 +25,11 @@ MAX_PROMOTED_TOOLS = 64
 
 
 class ThreadDataState(TypedDict, total=False):
-    """Paths owned by a host workspace binding."""
+    """Server-owned durable identity and paths for one thread binding."""
 
+    owner_id: str
+    workspace_id: str
+    thread_id: str
     workspace_path: str | None
     uploads_path: str | None
     outputs_path: str | None
@@ -120,15 +123,22 @@ def merge_thread_data(
     existing: ThreadDataState | None,
     new: ThreadDataState | None,
 ) -> ThreadDataState | None:
-    """Merge paths while rejecting a thread workspace identity change."""
+    """Merge a legacy or current binding while rejecting identity changes."""
     if new is None:
         return existing
     if existing is None:
         return new
-    old_workspace = existing.get("workspace_path")
-    new_workspace = new.get("workspace_path")
-    if old_workspace and new_workspace and old_workspace != new_workspace:
-        raise ValueError(f"Conflicting workspace paths: {old_workspace!r} != {new_workspace!r}")
+    identity_labels = {
+        "owner_id": "owner ids",
+        "workspace_id": "workspace ids",
+        "thread_id": "thread ids",
+        "workspace_path": "workspace paths",
+    }
+    for field_name, label in identity_labels.items():
+        old_value = existing.get(field_name)
+        new_value = new.get(field_name)
+        if old_value and new_value and old_value != new_value:
+            raise ValueError(f"Conflicting {label}: {old_value!r} != {new_value!r}")
     return {**existing, **new}
 
 

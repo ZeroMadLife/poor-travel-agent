@@ -18,7 +18,7 @@ def test_large_tool_result_is_written_before_preview(tmp_path):
 
     assert result.artifact_path.is_file()
     assert result.artifact_path.read_text(encoding="utf-8") == "x" * 20_000
-    assert result.preview.endswith("[full result: call_1]")
+    assert result.preview.endswith(f"[full result: {result.artifact_ref}]")
     assert len(result.preview) < 20_000
 
 
@@ -43,7 +43,7 @@ def test_preview_keeps_head_and_tail_lines(tmp_path):
     assert "line-169" not in result.preview
     assert "line-170" in result.preview
     assert "line-249" in result.preview
-    assert result.preview.endswith("[full result: call_1]")
+    assert result.preview.endswith(f"[full result: {result.artifact_ref}]")
     assert result.truncated is True
     assert result.original_chars == len(content)
 
@@ -53,7 +53,7 @@ def test_preview_is_bounded_by_character_cap(tmp_path):
     result = ToolResultStore(tmp_path, "s1", "run_1").archive("call_1", content)
 
     assert len(result.preview) <= PREVIEW_CHARS
-    assert result.preview.endswith("[full result: call_1]")
+    assert result.preview.endswith(f"[full result: {result.artifact_ref}]")
     assert result.truncated is True
 
 
@@ -62,7 +62,17 @@ def test_small_result_is_not_truncated(tmp_path):
 
     assert result.preview == "short"
     assert result.truncated is False
-    assert result.artifact_ref == "call_1.txt"
+    assert result.artifact_ref == "sage://coding/s1/runs/run_1/tool-results/call_1.txt"
+
+
+def test_artifact_reference_is_bound_to_its_session_and_run(tmp_path):
+    first = ToolResultStore(tmp_path, "s1", "run_1")
+    second = ToolResultStore(tmp_path, "s2", "run_2")
+    archived = first.archive("call_1", "private result")
+
+    assert first.read(archived.artifact_ref) == "private result"
+    with pytest.raises(ValueError, match="scope"):
+        second.read(archived.artifact_ref)
 
 
 @pytest.mark.parametrize(

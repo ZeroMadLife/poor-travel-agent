@@ -64,6 +64,16 @@ class ToolExecutionResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolArtifactReceipt:
+    """Opaque durable tool-result reference plus checkpoint-safe preview."""
+
+    artifact_ref: str
+    preview: str
+    original_chars: int
+    truncated: bool
+
+
+@dataclass(frozen=True, slots=True)
 class ApprovalRequest:
     """Server-owned approval request bound to exact tool arguments."""
 
@@ -157,6 +167,12 @@ class ToolExecutionPort(Protocol):
     """Execute a normalized tool call through the host policy boundary."""
 
     async def execute(self, call: ToolCallRequest) -> ToolExecutionResult: ...
+
+
+class ToolArtifactPort(Protocol):
+    """Archive full tool text outside graph state before checkpointing."""
+
+    def archive(self, call_id: str, content: str) -> ToolArtifactReceipt: ...
 
 
 class ApprovalPort(Protocol):

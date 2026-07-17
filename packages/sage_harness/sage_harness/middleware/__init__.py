@@ -13,6 +13,7 @@ from sage_harness.middleware.builtin import (
     ThreadContextMiddleware,
     TokenBudgetMiddleware,
     ToolErrorMiddleware,
+    ToolResultArtifactMiddleware,
     neutralize_remote_content_text,
     neutralize_untrusted_text,
 )
@@ -43,6 +44,7 @@ __all__ = [
     "ThreadContextMiddleware",
     "TokenBudgetMiddleware",
     "ToolErrorMiddleware",
+    "ToolResultArtifactMiddleware",
     "build_default_registry",
     "neutralize_remote_content_text",
     "neutralize_untrusted_text",

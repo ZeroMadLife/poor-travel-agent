@@ -82,6 +82,15 @@ def message_payload(message: Any) -> dict[str, Any]:
     usage = getattr(message, "usage_metadata", None)
     if usage:
         projected["usage_metadata"] = _bounded_json(usage)
+    artifact = getattr(message, "artifact", None)
+    if isinstance(message, ToolMessage) and isinstance(artifact, dict):
+        artifact_ref = artifact.get("artifact_ref")
+        if isinstance(artifact_ref, str) and artifact_ref.strip():
+            projected["artifact"] = {
+                "artifact_ref": artifact_ref[:1_000],
+                "original_chars": _non_negative_int(artifact.get("original_chars")),
+                "truncated": artifact.get("truncated") is True,
+            }
     harness_meta = message.additional_kwargs.get("sage_harness")
     if isinstance(harness_meta, dict):
         projected["sage_harness"] = {
@@ -146,6 +155,10 @@ def _bounded_json(value: Any) -> Any:
     if isinstance(value, int | float | bool) or value is None:
         return value
     return _bounded_text(value)
+
+
+def _non_negative_int(value: object) -> int:
+    return max(value, 0) if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
 __all__ = [

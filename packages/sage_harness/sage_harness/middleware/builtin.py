@@ -15,6 +15,7 @@ from langgraph.runtime import Runtime
 from langgraph.types import Command
 
 from sage_harness.config import HarnessRunContext
+from sage_harness.ports import ToolArtifactPort
 from sage_harness.state import SageThreadState
 
 _BLOCKED_TAGS = frozenset(
@@ -151,7 +152,12 @@ class ThreadContextMiddleware(AgentMiddleware[SageThreadState, HarnessRunContext
         if not isinstance(surface_metadata, Mapping):
             surface_metadata = {}
         return {
-            "thread_data": {"workspace_path": context.workspace_path},
+            "thread_data": {
+                "owner_id": context.owner_id,
+                "workspace_id": context.workspace_id,
+                "thread_id": context.thread_id,
+                "workspace_path": context.workspace_path,
+            },
             "surface_context": {
                 **{str(key): value for key, value in surface_metadata.items()},
                 "thread_id": context.thread_id,
@@ -343,6 +349,60 @@ class RemoteContentSanitizationMiddleware(
     ) -> ToolMessage | Command[Any]:
         result = await handler(request)
         return self._sanitize(result) if self._is_remote(request) else result
+
+
+class ToolResultArtifactMiddleware(AgentMiddleware[SageThreadState, HarnessRunContext]):
+    """Move large tool text out of graph state and retain an opaque reference."""
+
+    state_schema = SageThreadState
+
+    def __init__(self, store: ToolArtifactPort, *, minimum_bytes: int = 16 * 1024) -> None:
+        if minimum_bytes < 1:
+            raise ValueError("minimum_bytes must be positive")
+        self._store = store
+        self._minimum_bytes = minimum_bytes
+
+    def _archive(
+        self,
+        request: ToolCallRequest,
+        result: ToolMessage | Command[Any],
+    ) -> ToolMessage | Command[Any]:
+        if not isinstance(result, ToolMessage) or result.name == "knowledge_search":
+            return result
+        if result.artifact is not None or not isinstance(result.content, str):
+            return result
+        if len(result.content.encode("utf-8")) < self._minimum_bytes:
+            return result
+        call_id = str(request.tool_call.get("id") or result.tool_call_id or "").strip()
+        if not call_id:
+            return result
+        receipt = self._store.archive(call_id, result.content)
+        return result.model_copy(
+            update={
+                "content": receipt.preview,
+                "artifact": {
+                    "artifact_ref": receipt.artifact_ref,
+                    "original_chars": receipt.original_chars,
+                    "truncated": receipt.truncated,
+                },
+            }
+        )
+
+    @override
+    def wrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], ToolMessage | Command[Any]],
+    ) -> ToolMessage | Command[Any]:
+        return self._archive(request, handler(request))
+
+    @override
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
+    ) -> ToolMessage | Command[Any]:
+        return self._archive(request, await handler(request))
 
 def _message_usage(message: AIMessage) -> int:
     usage = message.usage_metadata

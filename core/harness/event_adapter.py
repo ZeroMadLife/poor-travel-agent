@@ -125,14 +125,7 @@ class HarnessEventAdapter:
                 self._event(
                     "tool",
                     "error" if is_error else "completed",
-                    {
-                        "type": "tool_result",
-                        "tool": tool_name,
-                        "tool_call_id": projected.get("tool_call_id", ""),
-                        "content": content,
-                        "message_id": projected.get("id", ""),
-                        "is_error": is_error,
-                    },
+                    _tool_result_payload(projected, tool_name, content, is_error),
                     source_event_id=source_event_id,
                 )
             )
@@ -480,6 +473,36 @@ class HarnessEventAdapter:
 def _public_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
     allowed = {"lc_agent_name", "langgraph_node", "ls_provider", "ls_model_type"}
     return {key: _bounded_value(item) for key, item in value.items() if key in allowed}
+
+
+def _tool_result_payload(
+    projected: Mapping[str, Any],
+    tool_name: str,
+    content: str,
+    is_error: bool,
+) -> dict[str, Any]:
+    payload = {
+        "type": "tool_result",
+        "tool": tool_name,
+        "tool_call_id": projected.get("tool_call_id", ""),
+        "content": content,
+        "message_id": projected.get("id", ""),
+        "is_error": is_error,
+    }
+    artifact = projected.get("artifact")
+    if isinstance(artifact, Mapping):
+        artifact_ref = artifact.get("artifact_ref")
+        if isinstance(artifact_ref, str) and artifact_ref.startswith("sage://coding/"):
+            payload.update(
+                {
+                    "artifact_ref": artifact_ref,
+                    "original_chars": _public_non_negative_int(
+                        artifact.get("original_chars")
+                    ),
+                    "truncated": artifact.get("truncated") is True,
+                }
+            )
+    return payload
 
 
 def _public_number(value: object) -> int | float:
