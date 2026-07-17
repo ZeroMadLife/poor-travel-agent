@@ -9,7 +9,7 @@ beforeEach(() => {
   setActivePinia(createPinia())
 })
 
-function mountComposer() {
+function mountComposer(props: { density?: 'default' | 'compact' } = {}) {
   const store = useCodingStore()
   store.sessionId = 'c1'
   store.isThinking = false
@@ -18,7 +18,7 @@ function mountComposer() {
     { name: 'plan', description: 'plan a task', source: 'builtin', argument_hint: '' },
     { name: 'test', description: 'run tests', source: 'project', argument_hint: '' },
   ]
-  const wrapper = mount(CodingComposer)
+  const wrapper = mount(CodingComposer, { props })
   return { wrapper, store }
 }
 
@@ -133,6 +133,14 @@ it('does not render the retired context placeholder inside the composer', () => 
 
   expect(wrapper.find('[role="progressbar"]').exists()).toBe(false)
   expect(wrapper.text()).not.toContain('模型未配置')
+})
+
+it('supports a compact density for the chat dock without changing the default composer', () => {
+  const { wrapper: compact } = mountComposer({ density: 'compact' })
+  const { wrapper: standard } = mountComposer()
+
+  expect(compact.get('.composer').classes()).toContain('compact')
+  expect(standard.get('.composer').classes()).toContain('default')
 })
 
 it('shows configured context at the top-right and real reasoning controls in the rail', async () => {

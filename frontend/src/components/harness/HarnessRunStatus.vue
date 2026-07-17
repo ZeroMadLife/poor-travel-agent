@@ -69,6 +69,26 @@ const loopTransition = computed(() => props.projection.transitions.find(
   (transition) => transition.from === 'act' && transition.to === 'plan',
 ))
 
+const focusStage = computed(() => {
+  const active = props.projection.stages.find((stage) => stage.id === props.projection.activeStageId)
+  if (active) return active
+  return [...props.projection.stages].reverse().find((stage) => (
+    stage.status === 'failed'
+    || stage.status === 'cancelled'
+    || stage.status === 'blocked'
+    || stage.visitCount > 0
+  ))
+})
+
+function stageStatusLabel(status: HarnessStageStatus) {
+  if (status === 'running') return '执行中'
+  if (status === 'blocked') return '等待确认'
+  if (status === 'completed') return '完成'
+  if (status === 'failed') return '失败'
+  if (status === 'cancelled') return '已取消'
+  return '未开始'
+}
+
 function formatDuration(duration?: number) {
   if (duration === undefined) return ''
   if (duration < 1_000) return `${duration}ms`
@@ -91,40 +111,60 @@ function formatDuration(duration?: number) {
       历史流程 {{ projection.definitionId }} v{{ projection.definitionVersion }} 已按事件顺序还原
     </p>
 
-    <ol class="stage-path">
-      <li
-        v-for="(stage, index) in projection.stages"
-        :key="stage.id"
-        class="stage-step"
-        :class="stage.status"
-        :data-stage-id="stage.id"
+    <div class="stage-path-scroller">
+      <ol
+        class="stage-path"
+        :style="{
+          '--stage-count': projection.stages.length,
+          '--stage-min-width': `${projection.stages.length * 106}px`,
+        }"
       >
-        <div
-          class="stage-node"
-          :aria-current="projection.activeStageId === stage.id ? 'step' : undefined"
+        <li
+          v-for="(stage, index) in projection.stages"
+          :key="stage.id"
+          class="stage-step"
+          :class="stage.status"
+          :data-stage-id="stage.id"
         >
-          <span class="stage-icon"><component :is="iconFor(stage.status)" :size="18" /></span>
-          <span class="stage-copy">
-            <strong>{{ stage.label }}</strong>
-            <small v-if="stage.detail" :title="stage.detail">{{ stage.detail }}</small>
-            <small v-else-if="stage.operationRef?.kind === 'knowledge_job'">
-              {{ stage.operationRef.kind }} · {{ stage.operationRef.id }}
-            </small>
-          </span>
-          <span v-if="stage.visitCount > 1" class="visit-count"><RotateCcw :size="11" />{{ stage.visitCount }}</span>
-          <span v-if="stage.durationMs !== undefined" class="stage-duration"><Clock3 :size="11" />{{ formatDuration(stage.durationMs) }}</span>
-        </div>
-        <span
-          v-if="index < projection.stages.length - 1"
-          class="stage-edge"
-          :class="{
-            taken: transitionTaken(stage.id, projection.stages[index + 1]?.id),
-            live: transitionActive(stage.id, projection.stages[index + 1]?.id),
-          }"
-          aria-hidden="true"
-        ></span>
-      </li>
-    </ol>
+          <div
+            class="stage-node"
+            :aria-current="projection.activeStageId === stage.id ? 'step' : undefined"
+          >
+            <span class="stage-icon"><component :is="iconFor(stage.status)" :size="18" /></span>
+            <span class="stage-copy">
+              <strong>{{ stage.label }}</strong>
+              <small v-if="stage.detail" :title="stage.detail">{{ stage.detail }}</small>
+              <small v-else-if="stage.operationRef?.kind === 'knowledge_job'">
+                {{ stage.operationRef.kind }} · {{ stage.operationRef.id }}
+              </small>
+            </span>
+            <span v-if="stage.visitCount > 1 || stage.durationMs !== undefined" class="stage-meta">
+              <span v-if="stage.visitCount > 1" class="visit-count"><RotateCcw :size="11" />{{ stage.visitCount }}</span>
+              <span v-if="stage.durationMs !== undefined" class="stage-duration"><Clock3 :size="11" />{{ formatDuration(stage.durationMs) }}</span>
+            </span>
+          </div>
+          <span
+            v-if="index < projection.stages.length - 1"
+            class="stage-edge"
+            :class="{
+              taken: transitionTaken(stage.id, projection.stages[index + 1]?.id),
+              live: transitionActive(stage.id, projection.stages[index + 1]?.id),
+            }"
+            aria-hidden="true"
+          ></span>
+        </li>
+      </ol>
+    </div>
+
+    <div v-if="focusStage" class="stage-focus" :class="focusStage.status">
+      <component :is="iconFor(focusStage.status)" :size="15" />
+      <span class="stage-focus-copy">
+        <small>{{ projection.activeStageId ? '当前步骤' : '最近步骤' }}</small>
+        <strong>{{ focusStage.label }}</strong>
+      </span>
+      <code v-if="focusStage.detail" :title="focusStage.detail">{{ focusStage.detail }}</code>
+      <span class="stage-focus-state">{{ stageStatusLabel(focusStage.status) }}</span>
+    </div>
 
     <div v-if="loopTransition" class="loop-return" :class="{ taken: loopTransition.takenCount > 0, live: loopTransition.active }">
       <RotateCcw :size="13" />
@@ -187,21 +227,31 @@ function formatDuration(duration?: number) {
 .run-state.failed,.run-state.cancelled { color: var(--sage-danger); }
 
 .definition-fallback {
-  margin: 14px 0 0;
+  margin: 0 0 14px;
   color: var(--sage-text-muted);
   font-size: var(--sage-font-xs);
 }
 
+.stage-path-scroller {
+  width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--sage-border-strong) transparent;
+}
+
 .stage-path {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(116px, 1fr));
+  grid-template-columns: repeat(var(--stage-count), minmax(96px, 1fr));
   gap: 0;
-  margin: 18px 0 0;
-  padding: 0;
+  min-width: var(--stage-min-width);
+  margin: 0;
+  padding: 6px 0 4px;
   list-style: none;
 }
 
-.stage-step { position: relative; min-width: 0; padding-right: 22px; }
+.stage-step { position: relative; min-width: 0; padding-right: 18px; }
 .stage-step:last-child { padding-right: 0; }
 
 .stage-node {
@@ -210,9 +260,10 @@ function formatDuration(duration?: number) {
   display: grid;
   grid-template-columns: 1fr;
   justify-items: center;
-  gap: 9px;
-  min-height: 112px;
-  padding: 0 8px 10px;
+  align-content: start;
+  gap: 7px;
+  min-height: 118px;
+  padding: 0 6px 8px;
   border: 0;
   color: var(--sage-text-muted);
   background: transparent;
@@ -221,8 +272,8 @@ function formatDuration(duration?: number) {
 .stage-icon {
   display: grid;
   place-items: center;
-  width: 48px;
-  height: 48px;
+  width: 44px;
+  height: 44px;
   border: 1px solid var(--sage-border-strong);
   border-radius: 50%;
   color: var(--sage-text-muted);
@@ -241,10 +292,13 @@ function formatDuration(duration?: number) {
 .stage-step.failed .stage-icon,.stage-step.cancelled .stage-icon { border-color: var(--sage-danger); color: var(--sage-danger); }
 .stage-step.running .stage-icon > svg { animation: stage-spin 1.2s linear infinite; }
 
-.stage-copy { display: grid; justify-items: center; gap: 3px; min-width: 0; text-align: center; }
+.stage-copy { display: grid; justify-items: center; gap: 3px; width: 100%; min-width: 0; text-align: center; }
 .stage-copy strong { overflow: hidden; color: var(--sage-text); font-size: var(--sage-font-sm); text-overflow: ellipsis; white-space: nowrap; }
-.stage-copy small { overflow: hidden; color: var(--sage-text-muted); font-family: var(--sage-font-mono); font-size: var(--sage-font-xs); text-overflow: ellipsis; white-space: nowrap; }
+.stage-copy strong,
+.stage-copy small { display: block; width: 100%; max-width: 100%; }
+.stage-copy small { overflow: hidden; color: var(--sage-text-muted); font-family: var(--sage-font-mono); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 
+.stage-meta,
 .visit-count,.stage-duration {
   display: inline-flex;
   align-items: center;
@@ -253,15 +307,14 @@ function formatDuration(duration?: number) {
   font-size: var(--sage-font-xs);
 }
 
-.visit-count { position: absolute; top: 34px; left: calc(50% + 16px); }
-.stage-duration { position: static; }
+.stage-meta { justify-content: center; gap: 8px; min-height: 17px; }
 
 .stage-edge {
   position: absolute;
   z-index: 1;
-  top: 24px;
+  top: 22px;
   right: 0;
-  width: 22px;
+  width: 18px;
   height: 1px;
   background: var(--sage-border-strong);
 }
@@ -294,6 +347,41 @@ function formatDuration(duration?: number) {
   content: '';
 }
 
+.stage-focus {
+  display: grid;
+  grid-template-columns: 18px auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 46px;
+  margin: 4px 0 0;
+  padding: 7px 11px;
+  border: 1px solid var(--sage-border);
+  border-radius: var(--sage-radius-sm);
+  color: var(--sage-text-muted);
+  background: var(--sage-surface-muted);
+}
+.stage-focus > svg { color: var(--sage-text-muted); }
+.stage-focus.running > svg,.stage-focus.completed > svg { color: var(--sage-success); }
+.stage-focus.blocked > svg { color: var(--sage-warning); }
+.stage-focus.failed > svg,.stage-focus.cancelled > svg { color: var(--sage-danger); }
+.stage-focus.running > svg { animation: stage-spin 1.2s linear infinite; }
+.stage-focus-copy { display: grid; min-width: 0; }
+.stage-focus-copy small { color: var(--sage-text-muted); font-size: 10px; }
+.stage-focus-copy strong { color: var(--sage-text-secondary); font-size: var(--sage-font-sm); }
+.stage-focus code {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--sage-text-secondary);
+  font-family: var(--sage-font-mono);
+  font-size: var(--sage-font-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stage-focus-state { color: var(--sage-text-muted); font-size: var(--sage-font-xs); white-space: nowrap; }
+.stage-focus.running .stage-focus-state,.stage-focus.completed .stage-focus-state { color: var(--sage-success); }
+.stage-focus.blocked .stage-focus-state { color: var(--sage-warning); }
+.stage-focus.failed .stage-focus-state,.stage-focus.cancelled .stage-focus-state { color: var(--sage-danger); }
+
 .loop-return {
   display: flex;
   align-items: center;
@@ -301,7 +389,7 @@ function formatDuration(duration?: number) {
   gap: 6px;
   width: max-content;
   max-width: 100%;
-  margin: 0 auto 24px;
+  margin: 12px auto 18px;
   color: var(--sage-text-muted);
   font-size: var(--sage-font-xs);
 }
@@ -310,7 +398,7 @@ function formatDuration(duration?: number) {
 .loop-return.live svg { animation: stage-spin 1.2s linear infinite; }
 
 .resource-section {
-  margin-top: clamp(24px, 5vh, 54px);
+  margin-top: 18px;
   border-top: 1px solid var(--sage-border);
 }
 .resource-section > header,
@@ -329,7 +417,7 @@ function formatDuration(duration?: number) {
 .runtime-resources { margin: 0; padding: 0; list-style: none; }
 .runtime-resources li {
   position: relative;
-  min-height: 48px;
+  min-height: 44px;
   padding-left: 28px;
   border-top: 1px solid var(--sage-border);
   color: var(--sage-text-muted);
@@ -345,15 +433,19 @@ function formatDuration(duration?: number) {
 .resource-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 @keyframes stage-spin { to { transform: rotate(360deg); } }
-@keyframes stage-flow { to { transform: translateX(18px); } }
+@keyframes stage-flow { to { transform: translateX(14px); } }
 
 @media (max-width: 760px) {
   .harness-run-status { padding: 16px; }
-  .stage-path { display: grid; grid-template-columns: 1fr; gap: 18px; margin-top: 22px; }
+  .stage-path-scroller { overflow: visible; }
+  .stage-path { display: grid; grid-template-columns: 1fr !important; gap: 18px; min-width: 0; margin-top: 6px; }
   .stage-step { padding-right: 0; }
+  .stage-node { min-height: 108px; }
   .stage-edge { top: auto; right: auto; bottom: -18px; left: 50%; width: 1px; height: 18px; }
   .stage-edge::after { top: auto; right: -3px; bottom: 1px; transform: rotate(135deg); }
   .stage-edge.live::before { display: none; }
+  .stage-focus { grid-template-columns: 18px minmax(0, 1fr) auto; }
+  .stage-focus code { grid-column: 2 / -1; }
   .resource-section > header { display: none; }
   .runtime-resources li { grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; padding: 10px 0 10px 28px; }
   .runtime-resources li > svg { top: 12px; }
@@ -363,6 +455,7 @@ function formatDuration(duration?: number) {
 @media (prefers-reduced-motion: reduce) {
   .stage-step.running .stage-icon > svg,
   .stage-edge.live::before,
+  .stage-focus.running > svg,
   .loop-return.live svg { animation: none; }
 }
 </style>
