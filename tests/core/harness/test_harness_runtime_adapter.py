@@ -188,6 +188,39 @@ def test_event_adapter_summarizes_values_instead_of_dumping_checkpoint() -> None
     assert "token" not in str(events[0].payload)
 
 
+def test_event_adapter_projects_graph_approval_interrupt_without_checkpoint_contents() -> None:
+    adapter = HarnessEventAdapter(session_id="s1", run_id="r1")
+
+    class Interrupt:
+        id = "interrupt-1"
+        value: ClassVar[dict[str, object]] = {
+            "type": "approval_required",
+            "tool": "write_file",
+            "args": {"path": "note.txt", "content": "approved"},
+            "secret": "must stay bounded",
+        }
+
+    events = adapter.adapt(
+        HarnessStreamItem(
+            1,
+            "values",
+            {
+                "__interrupt__": (Interrupt(),),
+                "messages": [],
+                "private_checkpoint": {"token": "do not expose"},
+            },
+            "source-interrupt",
+        )
+    )
+
+    assert events[0].kind == "approval"
+    assert events[0].status == "blocked"
+    assert events[0].payload["type"] == "approval_required"
+    assert events[0].payload["interrupt_id"] == "interrupt-1"
+    assert "private_checkpoint" not in str(events[0].payload)
+    assert events[1].payload["type"] == "checkpoint_update"
+
+
 def test_runtime_adapter_streams_a_real_langgraph_message(tmp_path: Path) -> None:
     async def run() -> list[dict[str, object]]:
         async with open_sqlite_checkpointer(tmp_path / "checkpoints.sqlite3") as saver:

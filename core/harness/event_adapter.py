@@ -142,13 +142,40 @@ class HarnessEventAdapter:
         )
 
     def _values(self, payload: Any, source_event_id: str) -> tuple[RunEvent, ...]:
+        checkpoint_event = self._event(
+            "harness",
+            "completed",
+            {"type": "checkpoint_update", **bounded_state_summary(payload)},
+            source_event_id=source_event_id,
+        )
+        interrupt = _graph_interrupt(payload)
+        if interrupt is None:
+            return (checkpoint_event,)
+        interrupt_payload, interrupt_id = interrupt
+        interrupt_event_type = str(interrupt_payload.get("type", "graph_interrupt"))
+        if interrupt_event_type == "approval_required":
+            interrupt_payload.setdefault("interrupt_id", interrupt_id)
+            return (
+                self._event(
+                    "approval",
+                    "blocked",
+                    interrupt_payload,
+                    source_event_id=f"{source_event_id}:interrupt:{interrupt_id}",
+                ),
+                checkpoint_event,
+            )
         return (
             self._event(
                 "harness",
-                "completed",
-                {"type": "checkpoint_update", **bounded_state_summary(payload)},
-                source_event_id=source_event_id,
+                "blocked",
+                {
+                    "type": "graph_interrupt",
+                    "interrupt_id": interrupt_id,
+                    "value": interrupt_payload,
+                },
+                source_event_id=f"{source_event_id}:interrupt:{interrupt_id}",
             ),
+            checkpoint_event,
         )
 
     def _custom(self, payload: Any, source_event_id: str) -> tuple[RunEvent, ...]:
@@ -336,6 +363,33 @@ def _bounded_value(value: Any) -> Any:
 def _tool_result_signature(tool_name: str, content: object) -> str:
     payload = f"{tool_name}\0{content}"
     return hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()
+
+
+def _graph_interrupt(value: Any) -> tuple[dict[str, Any], str] | None:
+    """Project one LangGraph interrupt from a checkpoint value.
+
+    Interrupt values are provider/tool-owned data.  Only bounded JSON-like
+    fields are exposed to the Sage timeline; opaque exception objects and
+    checkpoint internals never cross this boundary.
+    """
+    if not isinstance(value, Mapping):
+        return None
+    raw_interrupts = value.get("__interrupt__")
+    if raw_interrupts is None:
+        return None
+    items = raw_interrupts if isinstance(raw_interrupts, list | tuple) else (raw_interrupts,)
+    for item in items:
+        raw_value = getattr(item, "value", item)
+        interrupt_id = str(getattr(item, "id", "") or "")[:256]
+        if not isinstance(raw_value, Mapping):
+            raw_value = {"value": _bounded_value(raw_value)}
+        projected = {
+            str(key): _bounded_value(item_value)
+            for key, item_value in list(raw_value.items())[:64]
+        }
+        projected.setdefault("type", "graph_interrupt")
+        return projected, interrupt_id or "anonymous"
+    return None
 
 
 __all__ = ["HarnessEventAdapter"]

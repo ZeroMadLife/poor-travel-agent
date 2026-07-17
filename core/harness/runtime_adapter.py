@@ -99,6 +99,8 @@ class SageHarnessRuntimeAdapter:
         workspace_id: str,
         workspace_path: str,
         content: str,
+        resume: bool = False,
+        resume_value: object | None = None,
         surface: str = "coding",
         surface_context: Mapping[str, Any] | None = None,
         durable_context: Mapping[str, Any] | None = None,
@@ -159,6 +161,8 @@ class SageHarnessRuntimeAdapter:
             context=context,
             message=content,
             state_update=state_update,
+            resume=resume,
+            resume_value=resume_value,
         )
         adapter = HarnessEventAdapter(session_id=session_id, run_id=run_id)
         async for item in self.manager.stream(request):
