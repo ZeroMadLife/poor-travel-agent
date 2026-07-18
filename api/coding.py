@@ -13,7 +13,17 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, WebSocket
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketException,
+    status,
+)
 from langchain_core.tools import BaseTool
 from sage_harness import (
     CapabilityRegistry,
@@ -213,7 +223,41 @@ async def _enforce_coding_session_owner(connection: HTTPConnection) -> None:
         raise HTTPException(status_code=404, detail=f"Unknown coding session: {session_id}")
 
 
-router = APIRouter(dependencies=[Depends(_enforce_coding_session_owner)])
+async def _require_coding_authentication_in_production(
+    connection: HTTPConnection,
+) -> None:
+    """Fail closed for every Coding route once the cloud app is in production."""
+    app_env = str(getattr(connection.app.state, "cloud_app_env", "development")).lower()
+    if app_env != "production":
+        return
+
+    cloud = getattr(connection.app.state, "cloud_repository", None)
+    is_websocket = connection.scope.get("type") == "websocket"
+    if not isinstance(cloud, CloudRepository):
+        if is_websocket:
+            raise WebSocketException(
+                code=status.WS_1011_INTERNAL_ERROR,
+                reason="cloud control plane is unavailable",
+            )
+        raise HTTPException(status_code=503, detail="cloud control plane is unavailable")
+
+    user = await cloud.authenticated_user(connection.cookies.get(SESSION_COOKIE, ""))
+    if user is not None:
+        return
+    if is_websocket:
+        raise WebSocketException(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="cloud authentication is required",
+        )
+    raise HTTPException(status_code=401, detail="cloud authentication is required")
+
+
+router = APIRouter(
+    dependencies=[
+        Depends(_require_coding_authentication_in_production),
+        Depends(_enforce_coding_session_owner),
+    ]
+)
 
 
 def _valid_session_id(session_id: str) -> bool:
