@@ -25,6 +25,12 @@ function projection(): HarnessProjection {
       label: '上下文',
       detail: '420 / 32000 tokens',
       status: 'completed',
+    }, {
+      id: 'run-budget',
+      kind: 'budget',
+      label: '本轮预算',
+      detail: '24k / 100k tokens · 3/24 模型 · 5/64 工具',
+      status: 'completed',
     }],
   }
 }
@@ -40,7 +46,7 @@ describe('CodingHarnessWorkbench', () => {
     expect(wrapper.get('.workbench-title').text()).toContain('重构项目')
     expect(wrapper.get('.workbench-metrics').text()).toContain('LIVE')
     expect(wrapper.get('.workbench-metrics').text()).toContain('2.5s')
-    expect(wrapper.get('.workbench-metrics').text()).toContain('420 / 32000 tokens')
+    expect(wrapper.get('.workbench-metrics').text()).toContain('24k / 100k tokens')
     expect(wrapper.get('.workbench-metrics').text()).toContain('3')
     expect(wrapper.get('[aria-current="step"]').text()).toContain('调用工具')
     expect(wrapper.get('.workbench-mark').classes()).toContain('running')

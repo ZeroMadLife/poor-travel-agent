@@ -736,6 +736,8 @@ export type CodingToolResultEvent = CodingEventMeta & {
   args: Record<string, unknown>
   content: string
   is_error: boolean
+  error_code?: string | null
+  retryable?: boolean | null
   policy_reason?: string | null
   security_event_type?: string | null
 }

@@ -333,6 +333,37 @@ def test_run_budget_strips_tools_from_the_response_that_exhausts_tokens() -> Non
     assert update["run_token_usage"] == 10
 
 
+def test_run_budget_publishes_limits_without_resetting_a_resumed_run() -> None:
+    middleware = RunBudgetMiddleware(
+        max_model_calls=24,
+        max_tool_calls=64,
+        max_tokens=100_000,
+    )
+    runtime = MagicMock(context=_context())
+
+    initial = middleware.before_agent({}, runtime)
+    resumed = middleware.before_agent(
+        {
+            "budget_run_id": "run-1",
+            "run_token_usage": 42_000,
+            "run_model_calls": 4,
+            "run_tool_calls": 6,
+        },
+        runtime,
+    )
+
+    assert initial == {
+        "budget_run_id": "run-1",
+        "run_token_usage": 0,
+        "run_model_calls": 0,
+        "run_tool_calls": 0,
+        "run_token_limit": 100_000,
+        "run_model_call_limit": 24,
+        "run_tool_call_limit": 64,
+    }
+    assert resumed is None
+
+
 @pytest.mark.parametrize(
     ("state", "middleware", "expected_reason", "expected_used", "expected_limit"),
     [
@@ -413,6 +444,9 @@ def test_run_budget_keeps_same_run_counters_across_checkpoint_resume() -> None:
         "run_token_usage": 0,
         "run_model_calls": 0,
         "run_tool_calls": 0,
+        "run_token_limit": 100,
+        "run_model_call_limit": 4,
+        "run_tool_call_limit": 4,
     }
 
 

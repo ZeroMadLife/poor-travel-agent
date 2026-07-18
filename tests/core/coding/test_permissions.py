@@ -263,3 +263,45 @@ def test_policy_allows_compound_shell_validation_commands(
     )
 
     assert decision.allowed is True
+
+
+@pytest.mark.parametrize(
+    ("command", "reason"),
+    [
+        ("pip list; find / -name '*.py'", "shell_root_scan_forbidden"),
+        ("curl -sL https://example.com/docs", "shell_network_timeout_required"),
+        (
+            "curl -sL --max-time 10 https://example.com/docs",
+            "shell_network_timeout_required",
+        ),
+    ],
+)
+def test_policy_rejects_unbounded_shell_fallbacks(
+    tmp_path: Path,
+    command: str,
+    reason: str,
+) -> None:
+    workspace, tools = _tools(tmp_path)
+
+    decision = ToolPolicyChecker(workspace).check(
+        tools["run_shell"], {"command": command}
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == reason
+
+
+def test_policy_allows_bounded_curl_for_coding_diagnostics(tmp_path: Path) -> None:
+    workspace, tools = _tools(tmp_path)
+
+    decision = ToolPolicyChecker(workspace).check(
+        tools["run_shell"],
+        {
+            "command": (
+                "curl -sL --connect-timeout 3 --max-time 10 "
+                "https://example.com/docs"
+            )
+        },
+    )
+
+    assert decision.allowed is True

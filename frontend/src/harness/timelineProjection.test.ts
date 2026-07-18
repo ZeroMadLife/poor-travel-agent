@@ -233,6 +233,36 @@ describe('harness timeline projection', () => {
     }))
   })
 
+  it('projects the current run budget separately from the context window', () => {
+    const projection = projectLatestCodingHarness([
+      codingEvent(1, 'harness', {
+        type: 'run_budget_updated',
+        used_tokens: 24_000,
+        limit_tokens: 100_000,
+        model_calls: 3,
+        model_call_limit: 24,
+        tool_calls: 5,
+        tool_call_limit: 64,
+      }),
+      codingEvent(2, 'context', {
+        type: 'context_usage_updated',
+        used_tokens: 4_200,
+        effective_limit_tokens: 936_000,
+      }),
+    ])
+
+    expect(projection.runtimeResources).toContainEqual({
+      id: 'run-budget',
+      kind: 'budget',
+      label: '本轮预算',
+      detail: '24k / 100k tokens · 3/24 模型 · 5/64 工具',
+      status: 'completed',
+    })
+    expect(projection.runtimeResources).toContainEqual(expect.objectContaining({
+      id: 'context-budget', kind: 'context',
+    }))
+  })
+
   it('projects a V2 approval loop without charging human wait to plan or tool time', () => {
     const projection = projectLatestCodingHarness([
       { ...codingEvent(1, 'user', { type: 'user', content: '执行 pwd' }), timestamp: '2026-07-16T00:00:00Z' },

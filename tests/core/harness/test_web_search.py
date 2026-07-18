@@ -158,6 +158,55 @@ def test_search_web_tool_and_timeline_keep_only_bounded_public_citations() -> No
     assert "original_url" not in public_content
 
 
+def test_search_web_enforces_a_per_call_evidence_token_budget() -> None:
+    adapter, _ = _adapter(
+        {
+            "results": [
+                {
+                    "url": f"https://example.com/{index}",
+                    "title": f"Result {index}",
+                    "content": "网页证据" * 1_000,
+                }
+                for index in range(6)
+            ]
+        }
+    )
+    tool = build_web_search_tool(adapter)
+
+    content = asyncio.run(
+        tool.ainvoke({"query": "Sage Harness", "top_k": 6, "token_budget": 256})
+    )
+    payload = json.loads(content)
+
+    assert payload["status"] == "evidence_found"
+    assert payload["token_budget"] == 256
+    assert 0 < payload["used_tokens"] <= 256
+    assert payload["omitted_count"] >= 1
+    assert payload["citations"]
+    assert len(content) < 2_000
+
+
+def test_search_web_counts_non_ascii_evidence_conservatively() -> None:
+    adapter, _ = _adapter(
+        {
+            "results": [
+                {
+                    "url": "https://example.com/chinese",
+                    "title": "中文资料",
+                    "content": "证据" * 1_000,
+                }
+            ]
+        }
+    )
+
+    result = asyncio.run(adapter.search("中文检索", token_budget=256))
+
+    assert result.status == "evidence_found"
+    assert 0 < result.used_tokens <= 256
+    assert result.evidence[0].excerpt.endswith("...")
+    assert len(result.evidence[0].excerpt) < 256
+
+
 def test_search_web_is_discoverable_but_deferred_from_initial_model_tools(tmp_path) -> None:  # type: ignore[no-untyped-def]
     adapter, _ = _adapter({"results": []})
     runtime = CodingRuntime(

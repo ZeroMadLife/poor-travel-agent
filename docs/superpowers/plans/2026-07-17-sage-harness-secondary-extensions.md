@@ -265,6 +265,8 @@ search_web(query, freshness, domains, top_k)
 
 同时关闭两项运行时可追溯性缺口：Subagent 类型按规范化 ID 匹配，父 timeline 通过 `operation_ref` 关联 child run；前端事件回放改为 append-only event view，重复进入同一阶段不会覆盖旧记录。断连时发送失败会保留输入草稿，由用户在连接恢复后显式重试。
 
+H2.5A 联调后增加前置收口 `H2.5B0`：不提高 `100000` 本轮硬上限，而是将同一 `run_id` 的累计 token、模型调用和工具调用实时投影到状态画布；`search_web` 另设默认 `2000 tokens` 的单次证据预算，避免长摘要被后续模型循环重复放大。`run_shell` timeout 改为进程组清理并输出可审计错误分类，同时拒绝根目录扫描和无完整网络 timeout 的 shell 兜底。完整契约见 `2026-07-18-sage-h2-5b0-runtime-budget-shell-reliability.md`。
+
 #### H2.5B：Fetch + Artifact
 
 - 实现安全 Fetch Port、HTML 主内容提取和 PDF 文本适配。

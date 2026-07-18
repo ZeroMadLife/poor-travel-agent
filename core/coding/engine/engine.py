@@ -405,6 +405,8 @@ class Engine:
                 "args": event.args,
                 "content": event.content,
                 "is_error": event.is_error,
+                "error_code": event.error_code or "",
+                "retryable": event.retryable,
                 "policy_reason": event.policy_reason or "",
                 "security_event_type": event.security_event_type or "",
                 "created_at": now(),

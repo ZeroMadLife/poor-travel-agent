@@ -139,6 +139,8 @@ class WebSearchResult:
     query: str
     provider: str
     status: Literal["evidence_found", "no_evidence", "unavailable"]
+    token_budget: int
+    used_tokens: int
     evidence: tuple[WebEvidence, ...] = ()
     omitted_count: int = 0
     error_code: str = ""
@@ -242,6 +244,7 @@ class WebSearchPort(Protocol):
         query: str,
         *,
         top_k: int = 5,
+        token_budget: int = 2_000,
         freshness: str = "all",
         domains: Sequence[str] = (),
         language: str = "all",
