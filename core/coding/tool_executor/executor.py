@@ -198,6 +198,8 @@ class ToolExecutor:
                 result = ToolResult(
                     content=sandbox_result.content,
                     is_error=sandbox_result.is_error,
+                    error_code=sandbox_result.error_code,
+                    retryable=sandbox_result.retryable,
                 )
             except SandboxPolicyError as exc:
                 result = ToolResult(content=str(exc), is_error=True)
@@ -304,6 +306,8 @@ class ToolExecutor:
             args=args,
             content=result.content,
             is_error=result.is_error,
+            error_code=result.error_code,
+            retryable=result.retryable,
         )
 
     def _cancelled_event(self) -> CancelledEvent:

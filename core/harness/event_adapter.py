@@ -61,6 +61,7 @@ class HarnessEventAdapter:
         self._pending_model_tool_calls: dict[str, dict[str, Any]] = {}
         self._custom_tool_results: set[str] = set()
         self._seen_budget_signatures: set[str] = set()
+        self._seen_budget_usage_signatures: set[str] = set()
 
     def adapt(self, item: HarnessStreamItem) -> tuple[RunEvent, ...]:
         """Return zero or more Sage events for one graph stream item."""
@@ -176,8 +177,12 @@ class HarnessEventAdapter:
             source_event_id=source_event_id,
         )
         interrupt = _graph_interrupt(payload)
+        budget_events = (
+            *self._budget_usage_from_state(payload, source_event_id),
+            *self._budget_from_state(payload, source_event_id),
+        )
         if interrupt is None:
-            return (*self._budget_from_state(payload, source_event_id), checkpoint_event)
+            return (*budget_events, checkpoint_event)
         interrupt_payload, interrupt_id = interrupt
         interrupt_event_type = str(interrupt_payload.get("type", "graph_interrupt"))
         if interrupt_event_type == "approval_required":
@@ -198,9 +203,10 @@ class HarnessEventAdapter:
                 checkpoint_event,
             )
             if approval_call is None:
-                return approval_events
-            return (approval_call, *approval_events)
+                return (*budget_events, *approval_events)
+            return (*budget_events, approval_call, *approval_events)
         return (
+            *budget_events,
             self._event(
                 "harness",
                 "blocked",
@@ -370,6 +376,53 @@ class HarnessEventAdapter:
         return self._budget_events(
             {"type": "run_budget_exhausted", **harness_meta},
             f"{source_event_id}:budget",
+        )
+
+    def _budget_usage_from_state(
+        self,
+        payload: Any,
+        source_event_id: str,
+    ) -> tuple[RunEvent, ...]:
+        if not isinstance(payload, Mapping):
+            return ()
+        used_tokens = _public_non_negative_int(payload.get("run_token_usage"))
+        limit_tokens = _public_non_negative_int(payload.get("run_token_limit"))
+        model_calls = _public_non_negative_int(payload.get("run_model_calls"))
+        model_call_limit = _public_non_negative_int(payload.get("run_model_call_limit"))
+        tool_calls = _public_non_negative_int(payload.get("run_tool_calls"))
+        tool_call_limit = _public_non_negative_int(payload.get("run_tool_call_limit"))
+        if limit_tokens <= 0 or model_call_limit <= 0 or tool_call_limit <= 0:
+            return ()
+        signature = ":".join(
+            str(item)
+            for item in (
+                used_tokens,
+                limit_tokens,
+                model_calls,
+                model_call_limit,
+                tool_calls,
+                tool_call_limit,
+            )
+        )
+        if signature in self._seen_budget_usage_signatures:
+            return ()
+        self._seen_budget_usage_signatures.add(signature)
+        return (
+            self._event(
+                "harness",
+                "completed",
+                {
+                    "type": "run_budget_updated",
+                    "used_tokens": used_tokens,
+                    "limit_tokens": limit_tokens,
+                    "model_calls": model_calls,
+                    "model_call_limit": model_call_limit,
+                    "tool_calls": tool_calls,
+                    "tool_call_limit": tool_call_limit,
+                    "usage_ratio": min(1.0, used_tokens / limit_tokens),
+                },
+                source_event_id=f"{source_event_id}:budget-usage",
+            ),
         )
 
     def _budget_events(
@@ -749,6 +802,8 @@ def _public_web_search_content(text: str) -> str:
         "status": status,
         "query": _public_string(payload.get("query"), 400),
         "provider": _public_string(payload.get("provider"), 80),
+        "used_tokens": _public_non_negative_int(payload.get("used_tokens")),
+        "token_budget": _public_non_negative_int(payload.get("token_budget")),
         "omitted_count": omitted_count,
         "error_code": _public_string(payload.get("error_code"), 80),
         "remote_content": True,

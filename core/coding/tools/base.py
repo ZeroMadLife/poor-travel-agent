@@ -16,6 +16,8 @@ class ToolResult:
 
     content: str
     is_error: bool = False
+    error_code: str | None = None
+    retryable: bool | None = None
 
 
 ToolRunner = Callable[[dict[str, Any]], ToolResult | str]
@@ -51,9 +53,20 @@ class RegisteredTool:
         try:
             result = future.result(timeout=self.timeout)
         except TimeoutError:
-            return ToolResult(content=f"tool timed out after {self.timeout:g}s", is_error=True)
+            future.cancel()
+            return ToolResult(
+                content=f"tool timed out after {self.timeout:g}s",
+                is_error=True,
+                error_code="tool_timeout",
+                retryable=True,
+            )
         except Exception as exc:
-            return ToolResult(content=str(exc), is_error=True)
+            return ToolResult(
+                content=str(exc),
+                is_error=True,
+                error_code="tool_runtime_error",
+                retryable=False,
+            )
         if isinstance(result, ToolResult):
             return result
         return ToolResult(content=str(result))

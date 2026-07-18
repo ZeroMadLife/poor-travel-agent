@@ -428,8 +428,11 @@ class SageThreadState(AgentState):
     summary_text: NotRequired[str | None]
     budget_run_id: NotRequired[str]
     run_token_usage: NotRequired[int]
+    run_token_limit: NotRequired[int]
     run_model_calls: NotRequired[int]
+    run_model_call_limit: NotRequired[int]
     run_tool_calls: NotRequired[int]
+    run_tool_call_limit: NotRequired[int]
 
 
 __all__ = [

@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   Circle,
   Clock3,
+  Gauge,
   Database,
   LoaderCircle,
   PauseCircle,
@@ -46,6 +47,7 @@ function iconFor(status: HarnessStageStatus) {
 }
 
 function resourceIcon(resource: HarnessRuntimeResource) {
+  if (resource.kind === 'budget') return Gauge
   if (resource.kind === 'mcp') return PlugZap
   if (resource.kind === 'agent') return Bot
   return Database

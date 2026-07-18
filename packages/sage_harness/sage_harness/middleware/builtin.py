@@ -511,6 +511,9 @@ class RunBudgetMiddleware(AgentMiddleware[SageThreadState, HarnessRunContext]):
             "run_token_usage": 0,
             "run_model_calls": 0,
             "run_tool_calls": 0,
+            "run_token_limit": self.max_tokens,
+            "run_model_call_limit": self.max_model_calls,
+            "run_tool_call_limit": self.max_tool_calls,
         }
 
     @override

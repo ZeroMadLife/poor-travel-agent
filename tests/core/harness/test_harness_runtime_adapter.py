@@ -128,6 +128,38 @@ def test_event_adapter_projects_a_bounded_run_budget_stop_and_notice() -> None:
     assert "secret" not in str(events)
 
 
+def test_event_adapter_projects_live_run_budget_usage_once_per_counter_state() -> None:
+    adapter = HarnessEventAdapter(session_id="s1", run_id="r1")
+    state = {
+        "messages": [],
+        "run_token_usage": 24_000,
+        "run_token_limit": 100_000,
+        "run_model_calls": 3,
+        "run_model_call_limit": 24,
+        "run_tool_calls": 5,
+        "run_tool_call_limit": 64,
+    }
+
+    first = adapter.adapt(HarnessStreamItem(1, "values", state, "source-budget-live"))
+    repeated = adapter.adapt(HarnessStreamItem(2, "values", state, "source-budget-repeat"))
+
+    budget = next(event for event in first if event.payload["type"] == "run_budget_updated")
+    assert budget.kind == "harness"
+    assert budget.payload == {
+        "type": "run_budget_updated",
+        "used_tokens": 24_000,
+        "limit_tokens": 100_000,
+        "model_calls": 3,
+        "model_call_limit": 24,
+        "tool_calls": 5,
+        "tool_call_limit": 64,
+        "usage_ratio": 0.24,
+        "run_id": "r1",
+        "session_id": "s1",
+    }
+    assert not any(event.payload["type"] == "run_budget_updated" for event in repeated)
+
+
 def test_event_adapter_projects_only_allowlisted_capability_audit_fields() -> None:
     adapter = HarnessEventAdapter(session_id="s1", run_id="r1")
 
@@ -541,18 +573,25 @@ def test_event_adapter_projects_graph_approval_interrupt_without_checkpoint_cont
             {
                 "__interrupt__": (Interrupt(),),
                 "messages": [],
+                "run_token_usage": 12,
+                "run_token_limit": 100,
+                "run_model_calls": 1,
+                "run_model_call_limit": 4,
+                "run_tool_calls": 1,
+                "run_tool_call_limit": 4,
                 "private_checkpoint": {"token": "do not expose"},
             },
             "source-interrupt",
         )
     )
 
-    assert events[0].kind == "approval"
-    assert events[0].status == "blocked"
-    assert events[0].payload["type"] == "approval_required"
-    assert events[0].payload["interrupt_id"] == "interrupt-1"
-    assert "private_checkpoint" not in str(events[0].payload)
-    assert events[1].payload["type"] == "checkpoint_update"
+    assert events[0].payload["type"] == "run_budget_updated"
+    assert events[1].kind == "approval"
+    assert events[1].status == "blocked"
+    assert events[1].payload["type"] == "approval_required"
+    assert events[1].payload["interrupt_id"] == "interrupt-1"
+    assert "private_checkpoint" not in str(events[1].payload)
+    assert events[2].payload["type"] == "checkpoint_update"
 
 
 def test_runtime_adapter_streams_a_real_langgraph_message(tmp_path: Path) -> None:

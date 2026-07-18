@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import math
 import re
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
@@ -20,6 +21,9 @@ _QUERY_MAX = 2_000
 _TITLE_MAX = 300
 _EXCERPT_MAX = 1_500
 _RESULT_SCAN_MAX = 50
+_DEFAULT_TOKEN_BUDGET = 2_000
+_MIN_TOKEN_BUDGET = 256
+_MAX_TOKEN_BUDGET = 8_000
 _ALLOWED_FRESHNESS = frozenset({"all", "day", "month", "year"})
 _DOMAIN = re.compile(r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 
@@ -122,6 +126,7 @@ class SearxngWebSearchAdapter:
         query: str,
         *,
         top_k: int = 5,
+        token_budget: int = _DEFAULT_TOKEN_BUDGET,
         freshness: str = "all",
         domains: Sequence[str] = (),
         language: str = "all",
@@ -131,6 +136,8 @@ class SearxngWebSearchAdapter:
             raise ValueError("query must contain between 1 and 2000 characters")
         if not 1 <= top_k <= 10:
             raise ValueError("top_k must be between 1 and 10")
+        if not _MIN_TOKEN_BUDGET <= token_budget <= _MAX_TOKEN_BUDGET:
+            raise ValueError("token_budget must be between 256 and 8000")
         freshness = str(freshness).strip().casefold()
         if freshness not in _ALLOWED_FRESHNESS:
             raise ValueError("freshness must be all, day, month, or year")
@@ -154,6 +161,8 @@ class SearxngWebSearchAdapter:
                 query=clean_query,
                 provider=self.provider,
                 status="unavailable",
+                token_budget=token_budget,
+                used_tokens=0,
                 error_code="provider_unavailable",
             )
         except ValueError:
@@ -161,6 +170,8 @@ class SearxngWebSearchAdapter:
                 query=clean_query,
                 provider=self.provider,
                 status="unavailable",
+                token_budget=token_budget,
+                used_tokens=0,
                 error_code="invalid_provider_response",
             )
         if not isinstance(payload, Mapping):
@@ -168,6 +179,8 @@ class SearxngWebSearchAdapter:
                 query=clean_query,
                 provider=self.provider,
                 status="unavailable",
+                token_budget=token_budget,
+                used_tokens=0,
                 error_code="invalid_provider_response",
             )
         raw_results = payload.get("results")
@@ -175,6 +188,7 @@ class SearxngWebSearchAdapter:
         retrieved_at = self._clock().astimezone(UTC).isoformat().replace("+00:00", "Z")
         evidence: list[WebEvidence] = []
         seen_urls: set[str] = set()
+        used_tokens = 0
         for candidate in candidates[:_RESULT_SCAN_MAX]:
             if not isinstance(candidate, Mapping):
                 continue
@@ -188,6 +202,18 @@ class SearxngWebSearchAdapter:
             excerpt = _plain_text(candidate.get("content"), _EXCERPT_MAX)
             if not title or not excerpt:
                 continue
+            remaining_tokens = token_budget - used_tokens
+            if remaining_tokens <= 0:
+                break
+            excerpt = _fit_evidence_excerpt(
+                excerpt,
+                remaining_tokens=remaining_tokens,
+                title=title,
+                url=canonical_url,
+            )
+            if not excerpt:
+                break
+            evidence_tokens = _estimated_evidence_tokens(title, canonical_url, excerpt)
             content_hash = hashlib.sha256(
                 f"{canonical_url}\0{title}\0{excerpt}".encode()
             ).hexdigest()
@@ -210,12 +236,15 @@ class SearxngWebSearchAdapter:
                 )
             )
             seen_urls.add(canonical_url)
+            used_tokens += evidence_tokens
             if len(evidence) >= top_k:
                 break
         return WebSearchResult(
             query=clean_query,
             provider=self.provider,
             status="evidence_found" if evidence else "no_evidence",
+            token_budget=token_budget,
+            used_tokens=used_tokens,
             evidence=tuple(evidence),
             omitted_count=max(0, len(candidates) - len(evidence)),
         )
@@ -226,6 +255,11 @@ class SearchWebArgs(BaseModel):
 
     query: str
     top_k: int = Field(default=5, ge=1, le=10)
+    token_budget: int = Field(
+        default=_DEFAULT_TOKEN_BUDGET,
+        ge=_MIN_TOKEN_BUDGET,
+        le=_MAX_TOKEN_BUDGET,
+    )
     freshness: str = "all"
     domains: list[str] = Field(default_factory=list, max_length=10)
     language: str = Field(default="all", max_length=32)
@@ -258,6 +292,7 @@ def build_web_search_tool(port: WebSearchPort) -> BaseTool:
     async def search_web(
         query: str,
         top_k: int = 5,
+        token_budget: int = _DEFAULT_TOKEN_BUDGET,
         freshness: str = "all",
         domains: list[str] | None = None,
         language: str = "all",
@@ -265,6 +300,7 @@ def build_web_search_tool(port: WebSearchPort) -> BaseTool:
         result = await port.search(
             query,
             top_k=top_k,
+            token_budget=token_budget,
             freshness=freshness,
             domains=domains or (),
             language=language,
@@ -273,6 +309,8 @@ def build_web_search_tool(port: WebSearchPort) -> BaseTool:
             "status": result.status,
             "query": result.query,
             "provider": result.provider,
+            "used_tokens": result.used_tokens,
+            "token_budget": result.token_budget,
             "omitted_count": result.omitted_count,
             "error_code": result.error_code,
             "instruction": (
@@ -314,6 +352,44 @@ def build_web_search_tool(port: WebSearchPort) -> BaseTool:
             "sage_source": "web_search_port",
         },
     )
+
+
+def _estimated_evidence_tokens(title: str, url: str, excerpt: str) -> int:
+    content = f"{title}\n{url}\n{excerpt}"
+    ascii_characters = sum(character.isascii() for character in content)
+    non_ascii_bytes = sum(
+        len(character.encode("utf-8"))
+        for character in content
+        if not character.isascii()
+    )
+    return max(1, math.ceil(ascii_characters / 4) + math.ceil(non_ascii_bytes / 2))
+
+
+def _fit_evidence_excerpt(
+    excerpt: str,
+    *,
+    remaining_tokens: int,
+    title: str,
+    url: str,
+) -> str:
+    overhead = _estimated_evidence_tokens(title, url, "")
+    available = remaining_tokens - overhead
+    if available < 16:
+        return ""
+    if _estimated_evidence_tokens(title, url, excerpt) <= remaining_tokens:
+        return excerpt
+    marker = "..."
+    lower = 0
+    upper = len(excerpt)
+    while lower < upper:
+        midpoint = (lower + upper + 1) // 2
+        candidate = f"{excerpt[:midpoint].rstrip()}{marker}"
+        if _estimated_evidence_tokens(title, url, candidate) <= remaining_tokens:
+            lower = midpoint
+        else:
+            upper = midpoint - 1
+    clipped = excerpt[:lower].rstrip()
+    return f"{clipped}{marker}" if clipped else ""
 
 
 __all__ = ["SearchWebArgs", "SearxngWebSearchAdapter", "build_web_search_tool"]

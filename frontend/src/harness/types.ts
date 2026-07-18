@@ -136,7 +136,7 @@ export type HarnessProjection = {
 
 export type HarnessRuntimeResource = {
   id: string
-  kind: 'context' | 'mcp' | 'agent'
+  kind: 'context' | 'budget' | 'mcp' | 'agent'
   label: string
   detail: string
   status: HarnessStageStatus

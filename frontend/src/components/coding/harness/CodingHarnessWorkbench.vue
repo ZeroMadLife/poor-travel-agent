@@ -72,9 +72,12 @@ const elapsedLabel = computed(() => {
   if (elapsed < 60_000) return `${(elapsed / 1_000).toFixed(elapsed < 10_000 ? 1 : 0)}s`
   return `${Math.floor(elapsed / 60_000)}m ${Math.round(elapsed % 60_000 / 1_000)}s`
 })
-const contextLabel = computed(() => (
-  props.projection.runtimeResources?.find((resource) => resource.kind === 'context')?.detail || '--'
+const runBudgetLabel = computed(() => (
+  props.projection.runtimeResources?.find((resource) => resource.kind === 'budget')?.detail
+  || props.projection.runtimeResources?.find((resource) => resource.kind === 'context')?.detail
+  || '--'
 ))
+const runBudgetCompactLabel = computed(() => runBudgetLabel.value.split(' · ')[0] || '--')
 const visitedEvents = computed(() => props.projection.stageEvents?.length
   ? props.projection.stageEvents
   : props.projection.stages
@@ -130,7 +133,7 @@ function eventTime(value?: string) {
         <div><dt><Clock3 :size="13" />耗时</dt><dd>{{ elapsedLabel }}</dd></div>
         <div><dt><Braces :size="13" />迭代</dt><dd>{{ iterationCount }}</dd></div>
         <div><dt><Wrench :size="13" />工具</dt><dd>{{ toolCallCount }}</dd></div>
-        <div class="metric-context"><dt>上下文</dt><dd :title="contextLabel">{{ contextLabel }}</dd></div>
+        <div class="metric-context"><dt>本轮</dt><dd :title="runBudgetLabel">{{ runBudgetCompactLabel }}</dd></div>
       </dl>
     </header>
 

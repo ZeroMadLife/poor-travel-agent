@@ -36,7 +36,13 @@ class FakeWebSearchPort:
     available = True
 
     async def search(self, query: str, **_: object) -> WebSearchResult:
-        return WebSearchResult(query=query, provider=self.provider, status="no_evidence")
+        return WebSearchResult(
+            query=query,
+            provider=self.provider,
+            status="no_evidence",
+            token_budget=2_000,
+            used_tokens=0,
+        )
 
 
 class CountingTransport:

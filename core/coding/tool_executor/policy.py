@@ -57,6 +57,18 @@ class ToolPolicyChecker:
                 return self._prior_read_required(tool.name, str(args.get("path", "")))
         if tool.name == "run_shell":
             command = str(args.get("command", "")).strip()
+            if _contains_root_filesystem_scan(command):
+                return ToolPolicyDecision.deny(
+                    "shell_root_scan_forbidden",
+                    "error: run_shell cannot scan the filesystem root; scope the command "
+                    "to the current workspace or a known subdirectory",
+                )
+            if _network_command_lacks_timeout(command):
+                return ToolPolicyDecision.deny(
+                    "shell_network_timeout_required",
+                    "error: curl/wget requires explicit connect and total timeouts; use "
+                    "curl --connect-timeout N --max-time N or wget --timeout=N",
+                )
             if _is_ordinary_shell_read(command):
                 return ToolPolicyDecision.deny(
                     "shell_search_should_use_tool",
@@ -104,3 +116,30 @@ def _is_ordinary_shell_read(command: str) -> bool:
     return bool(command_names) and all(
         name in SHELL_READ_COMMANDS for name in command_names
     )
+
+
+def _contains_root_filesystem_scan(command: str) -> bool:
+    return bool(
+        re.search(
+            r"(?:^|[;&|]\s*)find\s+/(?:\s|$)",
+            command,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _network_command_lacks_timeout(command: str) -> bool:
+    if re.search(r"(?:^|[;&|]\s*)curl(?:\s|$)", command, flags=re.IGNORECASE):
+        has_connect_timeout = bool(
+            re.search(r"--connect-timeout(?:=|\s+)\d", command, flags=re.IGNORECASE)
+        )
+        has_total_timeout = bool(
+            re.search(r"(?:--max-time(?:=|\s+)|(?:^|\s)-m\s*)\d", command, flags=re.IGNORECASE)
+        )
+        if not has_connect_timeout or not has_total_timeout:
+            return True
+    if re.search(r"(?:^|[;&|]\s*)wget(?:\s|$)", command, flags=re.IGNORECASE):
+        return not bool(
+            re.search(r"--timeout(?:=|\s+)\d", command, flags=re.IGNORECASE)
+        )
+    return False
