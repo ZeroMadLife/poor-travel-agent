@@ -14,6 +14,7 @@ from api.main import create_app
 from core.cloud.auth.repository import CloudRepository
 from core.cloud.model_providers import ModelProviderRepository
 from core.coding.memory import workspace_id_from_path
+from core.coding.run_coordinator import RunEvent
 from db.database import create_engine, create_session_factory
 from db.migrations import init_db
 
@@ -188,6 +189,52 @@ def test_capability_api_rejects_unknown_session_and_invalid_filters(tmp_path: Pa
     assert invalid.status_code == 422
 
 
+def test_capability_health_api_returns_content_free_workspace_metrics(
+    tmp_path: Path,
+) -> None:
+    app = _app(tmp_path)
+    with TestClient(app) as client:
+        session_id = client.post("/api/v1/coding/session", json={}).json()["session_id"]
+        app.state.harness_capability_health_store.record_event(
+            RunEvent(
+                kind="harness",
+                status="completed",
+                payload={
+                    "type": "capability_invocation_completed",
+                    "version": 1,
+                    "capability_id": "local:list_files",
+                    "catalog_revision": "catalog-r1",
+                    "status": "success",
+                    "duration_ms": 42,
+                },
+                event_id="capability-health-event-1",
+            ),
+            owner_id="local",
+            workspace_id=workspace_id_from_path(tmp_path),
+            session_id=session_id,
+            run_id="run-health",
+        )
+
+        response = client.get(
+            "/api/v1/harness/capabilities/health",
+            params={"session_id": session_id, "surface": "coding", "range": "30d"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    metric = next(
+        item
+        for item in payload["capabilities"]
+        if item["capability_id"] == "local:list_files"
+    )
+    assert payload["workspace_id"] == workspace_id_from_path(tmp_path)
+    assert payload["range_days"] == 30
+    assert metric["invocation_count"] == 1
+    assert metric["success_count"] == 1
+    assert metric["p50_latency_ms"] == 42
+    assert "content" not in str(metric)
+
+
 async def test_capability_api_hides_guessed_session_from_another_owner(
     tmp_path: Path,
     cloud_repositories: tuple[CloudRepository, ModelProviderRepository],
@@ -234,5 +281,10 @@ async def test_capability_api_hides_guessed_session_from_another_owner(
         "/api/v1/harness/capabilities",
         params={"session_id": session_id, "surface": "coding"},
     )
+    health = other.get(
+        "/api/v1/harness/capabilities/health",
+        params={"session_id": session_id, "surface": "coding"},
+    )
 
     assert response.status_code == 404
+    assert health.status_code == 404

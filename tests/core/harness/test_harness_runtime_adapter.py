@@ -128,6 +128,52 @@ def test_event_adapter_projects_a_bounded_run_budget_stop_and_notice() -> None:
     assert "secret" not in str(events)
 
 
+def test_event_adapter_projects_only_allowlisted_capability_audit_fields() -> None:
+    adapter = HarnessEventAdapter(session_id="s1", run_id="r1")
+
+    selection = adapter.adapt(
+        HarnessStreamItem(
+            1,
+            "custom",
+            {
+                "type": "capability_selected",
+                "version": 1,
+                "catalog_revision": "catalog-r1",
+                "catalog_hash": "hash-r1",
+                "capability_ids": ["local:list_files"],
+                "selected_count": 1,
+                "schema": {"secret": "must-not-leak"},
+                "path": "/Users/example/private",
+            },
+            "source-capability",
+        )
+    )
+    invocation = adapter.adapt(
+        HarnessStreamItem(
+            2,
+            "custom",
+            {
+                "type": "capability_invocation_completed",
+                "version": 1,
+                "catalog_revision": "catalog-r1",
+                "capability_id": "local:list_files",
+                "status": "failure",
+                "duration_ms": 25,
+                "failure_category": "timeout",
+                "args": {"api_key": "must-not-leak"},
+            },
+            "source-invocation",
+        )
+    )
+
+    assert selection[0].payload["type"] == "capability_selected"
+    assert selection[0].payload["capability_ids"] == ["local:list_files"]
+    assert invocation[0].payload["failure_category"] == "timeout"
+    assert "schema" not in str(selection)
+    assert "/Users/" not in str(selection)
+    assert "api_key" not in str(invocation)
+
+
 def test_event_adapter_preserves_failed_tool_message_status() -> None:
     adapter = HarnessEventAdapter(session_id="s1", run_id="r1")
     tool = ToolMessage(

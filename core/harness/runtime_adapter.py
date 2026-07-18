@@ -9,6 +9,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from sage_harness import (
+    CapabilityTelemetryMiddleware,
     DeferredToolFilterMiddleware,
     DeferredToolSetup,
     GraphMessageCompactionRequest,
@@ -53,6 +54,8 @@ class SageHarnessRuntimeAdapter:
         subagent_limits: SubagentLimits | None = None,
         config: HarnessConfig | None = None,
         artifact_store: ToolArtifactPort | None = None,
+        capability_ids_by_tool_name: Mapping[str, str] | None = None,
+        capability_revision: str | None = None,
     ) -> None:
         self.checkpointer = checkpointer
         self.config = config or HarnessConfig()
@@ -86,6 +89,19 @@ class SageHarnessRuntimeAdapter:
             deferred_prompt = render_deferred_tool_index(deferred_setup)
             effective_prompt = "\n\n".join(
                 part for part in (system_prompt, deferred_prompt) if part
+            )
+        if capability_ids_by_tool_name:
+            if capability_revision is None:
+                raise ValueError("Capability telemetry requires a catalog revision")
+            registry = registry.with_spec(
+                MiddlewareSpec(
+                    "capability_telemetry",
+                    lambda config: CapabilityTelemetryMiddleware(
+                        capability_ids_by_tool_name,
+                        capability_revision,
+                    ),
+                ),
+                before="tool_error",
             )
         if skill_catalog is not None:
             registry = registry.with_spec(

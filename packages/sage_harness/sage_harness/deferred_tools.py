@@ -169,6 +169,32 @@ def build_tool_search_tool(catalog: DeferredToolCatalog) -> BaseTool:
                 ensure_ascii=False,
                 indent=2,
             )
+            writer = _stream_writer()
+            if writer is not None:
+                if capability_ids:
+                    writer(
+                        {
+                            "type": "capability_selected",
+                            "version": 1,
+                            "catalog_revision": catalog.selection_index.revision,
+                            "catalog_hash": catalog_hash,
+                            "capability_ids": capability_ids,
+                            "selected_count": len(capability_ids),
+                        }
+                    )
+                if outcome.rejected:
+                    writer(
+                        {
+                            "type": "capability_selection_failed",
+                            "version": 1,
+                            "catalog_revision": catalog.selection_index.revision,
+                            "catalog_hash": catalog_hash,
+                            "failure_categories": sorted(
+                                {item.code for item in outcome.rejected}
+                            ),
+                            "rejected_count": len(outcome.rejected),
+                        }
+                    )
         else:
             matched = catalog.discover(normalized)
             content = json.dumps(
@@ -204,6 +230,15 @@ def build_tool_search_tool(catalog: DeferredToolCatalog) -> BaseTool:
         )
 
     return tool_search
+
+
+def _stream_writer() -> Callable[[Any], None] | None:
+    try:
+        from langgraph.config import get_stream_writer
+
+        return get_stream_writer()
+    except (KeyError, RuntimeError):
+        return None
 
 
 def _capability_binding(

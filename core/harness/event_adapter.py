@@ -19,6 +19,14 @@ from core.coding.run_coordinator import RunEvent
 _PUBLIC_TOOL_CONTENT_LIMIT = 4_000
 _PUBLIC_KNOWLEDGE_CITATION_LIMIT = 12
 _KNOWLEDGE_STATUSES = frozenset({"evidence_found", "no_evidence", "unavailable"})
+_CAPABILITY_EVENT_TYPES = frozenset(
+    {
+        "capability_catalog_updated",
+        "capability_selected",
+        "capability_selection_failed",
+        "capability_invocation_completed",
+    }
+)
 _RUN_BUDGET_NOTICES = {
     "model_call_capped": "本轮已达到模型调用安全上限，已停止继续调用工具。",
     "token_capped": "本轮已达到 token 安全上限，已停止继续调用工具。",
@@ -224,6 +232,23 @@ class HarnessEventAdapter:
                     "memory",
                     "completed",
                     memory_payload,
+                    source_event_id=source_event_id,
+                ),
+            )
+        if event_type in _CAPABILITY_EVENT_TYPES:
+            capability_payload = _public_capability_payload(payload)
+            if capability_payload is None:
+                return ()
+            return (
+                self._event(
+                    "harness",
+                    (
+                        "error"
+                        if event_type == "capability_selection_failed"
+                        or capability_payload.get("status") == "failure"
+                        else "completed"
+                    ),
+                    capability_payload,
                     source_event_id=source_event_id,
                 ),
             )
@@ -513,6 +538,119 @@ def _public_number(value: object) -> int | float:
             return 0
         return max(value, 0)
     return 0
+
+
+def _public_capability_payload(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    event_type = str(payload.get("type", ""))
+    version = payload.get("version")
+    revision = _public_string(payload.get("catalog_revision"), 128)
+    if event_type not in _CAPABILITY_EVENT_TYPES or version != 1 or not revision:
+        return None
+    public: dict[str, Any] = {
+        "type": event_type,
+        "version": 1,
+        "catalog_revision": revision,
+    }
+    catalog_hash = _public_string(payload.get("catalog_hash"), 128)
+    if catalog_hash:
+        public["catalog_hash"] = catalog_hash
+    if event_type == "capability_catalog_updated":
+        public.update(
+            {
+                "surface": _public_string(payload.get("surface"), 32),
+                "capability_count": _public_non_negative_int(
+                    payload.get("capability_count")
+                ),
+                "executable_count": _public_non_negative_int(
+                    payload.get("executable_count")
+                ),
+            }
+        )
+        return public
+    if event_type == "capability_selected":
+        capability_ids = _public_capability_ids(payload.get("capability_ids"))
+        if not capability_ids:
+            return None
+        public.update(
+            {
+                "capability_ids": capability_ids,
+                "selected_count": len(capability_ids),
+            }
+        )
+        return public
+    if event_type == "capability_selection_failed":
+        categories = _public_failure_categories(
+            payload.get("failure_categories"),
+            allowed={
+                "ambiguous",
+                "disallowed",
+                "not_deferred",
+                "surface_mismatch",
+                "unavailable",
+                "unknown",
+            },
+        )
+        if not categories:
+            return None
+        public.update(
+            {
+                "failure_categories": categories,
+                "rejected_count": _public_non_negative_int(
+                    payload.get("rejected_count")
+                ),
+            }
+        )
+        return public
+    capability_id = _public_string(payload.get("capability_id"), 256)
+    status = _public_string(payload.get("status"), 16)
+    if not capability_id or status not in {"success", "failure"}:
+        return None
+    public.update(
+        {
+            "capability_id": capability_id,
+            "status": status,
+            "duration_ms": _public_non_negative_int(payload.get("duration_ms")),
+        }
+    )
+    if status == "failure":
+        category = _public_string(payload.get("failure_category"), 64)
+        if category not in {
+            "approval_denied",
+            "execution_error",
+            "policy_blocked",
+            "timeout",
+            "tool_error",
+            "unavailable",
+        }:
+            category = "execution_error"
+        public["failure_category"] = category
+    return public
+
+
+def _public_capability_ids(value: object) -> list[str]:
+    if not isinstance(value, list | tuple):
+        return []
+    return [
+        item
+        for item in (_public_string(candidate, 256) for candidate in value[:20])
+        if item
+    ]
+
+
+def _public_failure_categories(
+    value: object,
+    *,
+    allowed: set[str],
+) -> list[str]:
+    if not isinstance(value, list | tuple):
+        return []
+    return sorted(
+        {
+            category
+            for category in (_public_string(candidate, 64) for candidate in value[:20])
+            if category in allowed
+        }
+    )
 
 
 def _public_tool_result_content(tool_name: str, value: object) -> str:

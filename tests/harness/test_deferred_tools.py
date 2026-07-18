@@ -6,6 +6,7 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
+import sage_harness.deferred_tools as deferred_tools_module
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, ToolMessage
@@ -155,6 +156,33 @@ def test_tool_search_returns_metadata_before_stable_id_schema_promotion() -> Non
         "names": ["deferred_tool"],
         "capability_ids": ["local:deferred_tool"],
     }
+
+
+def test_tool_search_emits_only_safe_selection_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[dict[str, object]] = []
+    monkeypatch.setattr(deferred_tools_module, "_stream_writer", lambda: events.append)
+    search_tool = assemble_deferred_tools(
+        [resident_tool],
+        [deferred_tool],
+        enabled=True,
+        capability_registry=_registry(),
+    )[1].tool_search
+    assert search_tool is not None
+
+    search_tool.func(
+        query="select:local:deferred_tool,api_key=secret,/Users/example/private",
+        tool_call_id="call-select",
+    )
+
+    assert events[0]["type"] == "capability_selected"
+    assert events[0]["capability_ids"] == ["local:deferred_tool"]
+    assert events[1]["type"] == "capability_selection_failed"
+    assert events[1]["failure_categories"] == ["unknown"]
+    assert "secret" not in str(events)
+    assert "/Users/" not in str(events)
+    assert "schema" not in str(events)
 
 
 def test_skill_allowlist_hides_disallowed_discovery_and_changes_catalog_hash() -> None:

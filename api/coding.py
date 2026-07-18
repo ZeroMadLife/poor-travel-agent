@@ -16,6 +16,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, WebSocket
 from langchain_core.tools import BaseTool
 from sage_harness import (
+    CapabilityRegistry,
     HarnessConfig,
     McpCatalogPort,
     McpManager,
@@ -83,6 +84,8 @@ from api.schemas import (
     CodingUsageSummary,
     ErrorEvent,
     HarnessCapabilitiesResponse,
+    HarnessCapabilityHealthItem,
+    HarnessCapabilityHealthResponse,
     HarnessCapabilityResponse,
     PermissionModeSwitchRequest,
     UserMessage,
@@ -479,6 +482,21 @@ async def _deerflow_timeline_events(
                 subagent_config=subagent_config,
                 graph_approvals=True,
             )
+            if not is_resume:
+                yield RunEvent(
+                    kind="harness",
+                    status="completed",
+                    payload={
+                        "type": "capability_catalog_updated",
+                        "version": 1,
+                        "catalog_revision": tool_bundle.capability_revision,
+                        "catalog_hash": tool_bundle.deferred_setup.catalog_hash or "resident-only",
+                        "surface": "coding",
+                        "capability_count": tool_bundle.capability_count,
+                        "executable_count": len(tool_bundle.capability_ids_by_tool_name),
+                    },
+                    event_id=f"harness:{run_id}:capability-catalog",
+                )
             adapter = SageHarnessRuntimeAdapter(
                 model=runtime.model,
                 checkpointer=checkpointer,
@@ -493,6 +511,8 @@ async def _deerflow_timeline_events(
                     runtime.session_id,
                     run_id,
                 ),
+                capability_ids_by_tool_name=tool_bundle.capability_ids_by_tool_name,
+                capability_revision=tool_bundle.capability_revision,
             )
             graph_compaction: dict[str, object] | None = None
             compaction_result = prepared.compaction_result if prepared is not None else None
@@ -765,6 +785,59 @@ async def _close_coding_mcp_scope(request: Request, session_id: str) -> None:
         await manager.close_scope(scope)
 
 
+def _harness_capability_context(
+    request: Request,
+    session_id: str,
+) -> tuple[str, str, CapabilityRegistry]:
+    """Resolve one authorized session into owner, workspace and current catalog."""
+    sessions: dict[str, CodingRuntime] = request.app.state.coding_sessions
+    runtime = sessions.get(session_id)
+    store = CodingSessionStore(Path(request.app.state.coding_storage_root) / "sessions")
+    try:
+        persisted = store.load(session_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404, detail=f"Unknown coding session: {session_id}"
+        ) from exc
+    default_workspace = Path(request.app.state.coding_workspace_root).resolve()
+    workspace_root = _resolve_persisted_workspace_root(
+        default_workspace,
+        persisted.get("workspace_root"),
+    )
+    if runtime is not None:
+        tools: Mapping[str, object] = runtime.tools
+        skills = runtime.skill_registry.list()
+        owner_id = runtime.owner_user_id or "local"
+    else:
+        from core.coding.context import WorkspaceContext
+        from core.coding.skills import SkillRegistry
+        from core.coding.tools.registry import build_tool_registry
+
+        tools = build_tool_registry(WorkspaceContext(workspace_root))
+        skills = SkillRegistry(root=workspace_root).list()
+        owner_id = str(persisted.get("owner_user_id") or "local")
+    workspace_id = workspace_id_from_path(workspace_root)
+    mcp_snapshot = None
+    manager = getattr(request.app.state, "coding_mcp_manager", None)
+    if isinstance(manager, McpManager):
+        mcp_snapshot = manager.cached_catalog(
+            McpScope(
+                owner_id=owner_id,
+                workspace_id=workspace_id,
+                thread_id=session_id,
+            )
+        )
+    return (
+        owner_id,
+        workspace_id,
+        build_sage_capability_registry(
+            tools=tools,
+            skills=skills,
+            mcp_catalog=mcp_snapshot,
+        ),
+    )
+
+
 @router.get(
     "/api/v1/harness/capabilities",
     response_model=HarnessCapabilitiesResponse,
@@ -785,50 +858,7 @@ async def list_harness_capabilities(
 ) -> HarnessCapabilitiesResponse:
     """List safe metadata for capabilities visible to one authorized session."""
     _require_valid_session_id(session_id)
-    sessions: dict[str, CodingRuntime] = request.app.state.coding_sessions
-    runtime = sessions.get(session_id)
-    store = CodingSessionStore(Path(request.app.state.coding_storage_root) / "sessions")
-    try:
-        persisted = store.load(session_id)
-    except FileNotFoundError as exc:
-        raise HTTPException(
-            status_code=404, detail=f"Unknown coding session: {session_id}"
-        ) from exc
-
-    default_workspace = Path(request.app.state.coding_workspace_root).resolve()
-    workspace_root = _resolve_persisted_workspace_root(
-        default_workspace,
-        persisted.get("workspace_root"),
-    )
-    if runtime is not None:
-        tools: Mapping[str, object] = runtime.tools
-        skills = runtime.skill_registry.list()
-        owner_id = runtime.owner_user_id or "local"
-    else:
-        from core.coding.context import WorkspaceContext
-        from core.coding.skills import SkillRegistry
-        from core.coding.tools.registry import build_tool_registry
-
-        tools = build_tool_registry(WorkspaceContext(workspace_root))
-        skills = SkillRegistry(root=workspace_root).list()
-        owner_id = str(persisted.get("owner_user_id") or "local")
-
-    workspace_id = workspace_id_from_path(workspace_root)
-    mcp_snapshot = None
-    manager = getattr(request.app.state, "coding_mcp_manager", None)
-    if isinstance(manager, McpManager):
-        mcp_snapshot = manager.cached_catalog(
-            McpScope(
-                owner_id=owner_id,
-                workspace_id=workspace_id,
-                thread_id=session_id,
-            )
-        )
-    registry = build_sage_capability_registry(
-        tools=tools,
-        skills=skills,
-        mcp_catalog=mcp_snapshot,
-    )
+    _, workspace_id, registry = _harness_capability_context(request, session_id)
     descriptors = registry.query(
         surface=surface,
         origins=frozenset(origin) if origin else None,
@@ -845,6 +875,55 @@ async def list_harness_capabilities(
         revision=registry.revision,
         count=len(capabilities),
         capabilities=capabilities,
+    )
+
+
+@router.get(
+    "/api/v1/harness/capabilities/health",
+    response_model=HarnessCapabilityHealthResponse,
+)
+async def harness_capability_health(
+    request: Request,
+    session_id: str,
+    surface: Literal["growth", "knowledge", "coding"] = "coding",
+    range: Literal["7d", "30d", "90d"] = "30d",
+) -> HarnessCapabilityHealthResponse:
+    """Return content-free metrics for capabilities visible to one authorized session."""
+    _require_valid_session_id(session_id)
+    owner_id, workspace_id, registry = _harness_capability_context(request, session_id)
+    days = {"7d": 7, "30d": 30, "90d": 90}[range]
+    aggregates = request.app.state.harness_capability_health_store.summary(
+        owner_id=owner_id,
+        workspace_id=workspace_id,
+        days=days,
+    )
+    empty: dict[str, Any] = {
+        "invocation_count": 0,
+        "success_count": 0,
+        "failure_count": 0,
+        "first_success_at": None,
+        "last_success_at": None,
+        "p50_latency_ms": None,
+        "p95_latency_ms": None,
+        "failure_categories": {},
+    }
+    descriptors = registry.query(surface=surface)
+    return HarnessCapabilityHealthResponse(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        surface=surface,
+        catalog_revision=registry.revision,
+        range_days=days,
+        capabilities=[
+            HarnessCapabilityHealthItem(
+                capability_id=descriptor.capability_id,
+                origin=descriptor.origin,
+                revision=descriptor.revision,
+                availability=descriptor.availability,
+                **aggregates.get(descriptor.capability_id, empty),
+            )
+            for descriptor in descriptors
+        ],
     )
 
 

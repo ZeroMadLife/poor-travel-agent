@@ -25,6 +25,7 @@ from core.coding.context import ModelCapabilityRegistry
 from core.coding.provider_settings import SageProviderSettings, SageProviderSettingsStore
 from core.coding.usage_store import UsageStore
 from core.config.settings import get_settings
+from core.harness.capability_health_store import CapabilityHealthStore
 from core.harness.mcp_adapter import (
     build_configured_mcp_catalog,
     build_configured_mcp_manager,
@@ -468,10 +469,16 @@ def create_app(
                 external_parser=build_external_parse_coordinator(settings),
             )
     app.state.coding_usage_store = UsageStore(resolved_workspace_root / ".sage" / "usage.sqlite3")
+    app.state.harness_capability_health_store = CapabilityHealthStore(
+        app.state.coding_storage_root / "capability-health.sqlite3"
+    )
     app.state.coding_sessions = {}
     from api.coding_runs import CodingRunRegistry
 
-    app.state.coding_run_registry = CodingRunRegistry(app.state.coding_storage_root)
+    app.state.coding_run_registry = CodingRunRegistry(
+        app.state.coding_storage_root,
+        capability_health_store=app.state.harness_capability_health_store,
+    )
 
     from api import (
         assistant,
