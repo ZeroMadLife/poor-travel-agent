@@ -44,6 +44,9 @@ class CodingToolBundle:
 
     tools: tuple[BaseTool, ...]
     deferred_setup: DeferredToolSetup
+    capability_revision: str
+    capability_ids_by_tool_name: Mapping[str, str]
+    capability_count: int
 
 
 def build_deerflow_coding_tools(
@@ -184,7 +187,11 @@ def build_deerflow_coding_tool_bundle(
                     name="knowledge_search",
                     description=search_definition.description,
                     args_schema=search_definition.schema_model,
-                    metadata={"category": "knowledge", "sage_source": "knowledge_port"},
+                    metadata={
+                        "category": "knowledge",
+                        "sage_source": "knowledge_port",
+                        "capability_id": local_tool_capability_id("knowledge_search"),
+                    },
                 )
             )
     if memory_port is not None:
@@ -232,7 +239,12 @@ def build_deerflow_coding_tool_bundle(
             (deferred_tools if enable_deferred_tools else resident_tools).append(remember_tool)
 
     if subagent_executor is not None:
-        resident_tools.append(build_task_tool(subagent_executor, subagent_config))
+        task_tool = build_task_tool(subagent_executor, subagent_config)
+        task_metadata = (
+            dict(task_tool.metadata) if isinstance(task_tool.metadata, Mapping) else {}
+        )
+        task_metadata["capability_id"] = "subagent:explore"
+        resident_tools.append(task_tool.model_copy(update={"metadata": task_metadata}))
 
     deferred_tools.extend(_with_mcp_capability_ids(extra_deferred_tools))
 
@@ -250,7 +262,23 @@ def build_deerflow_coding_tool_bundle(
         surface="coding",
         allowed_tool_names=active_skill_allowed_tools,
     )
-    return CodingToolBundle(tuple(graph_tools), deferred_setup)
+    return CodingToolBundle(
+        tuple(graph_tools),
+        deferred_setup,
+        capability_registry.revision,
+        _capability_bindings(graph_tools),
+        len(capability_registry.query(surface="coding")),
+    )
+
+
+def _capability_bindings(tools: Sequence[BaseTool]) -> Mapping[str, str]:
+    bindings: dict[str, str] = {}
+    for tool in tools:
+        metadata = tool.metadata if isinstance(tool.metadata, Mapping) else {}
+        capability_id = str(metadata.get("capability_id", "")).strip()
+        if capability_id:
+            bindings[tool.name] = capability_id
+    return bindings
 
 
 def _with_mcp_capability_ids(tools: Sequence[BaseTool]) -> list[BaseTool]:

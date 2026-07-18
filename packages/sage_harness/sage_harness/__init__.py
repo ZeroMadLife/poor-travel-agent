@@ -5,6 +5,7 @@ from sage_harness.capabilities import (
     CapabilityAvailability,
     CapabilityBinding,
     CapabilityDescriptor,
+    CapabilityFailureCategory,
     CapabilityKind,
     CapabilityOrigin,
     CapabilityPermission,
@@ -13,6 +14,7 @@ from sage_harness.capabilities import (
     CapabilitySelectionIndex,
     CapabilitySelectionOutcome,
     CapabilitySurface,
+    CapabilityTelemetryMiddleware,
 )
 from sage_harness.config import HarnessConfig, HarnessRunContext
 from sage_harness.deferred_tools import (
@@ -109,6 +111,7 @@ __all__ = [
     "CapabilityAvailability",
     "CapabilityBinding",
     "CapabilityDescriptor",
+    "CapabilityFailureCategory",
     "CapabilityKind",
     "CapabilityOrigin",
     "CapabilityPermission",
@@ -117,6 +120,7 @@ __all__ = [
     "CapabilitySelectionIndex",
     "CapabilitySelectionOutcome",
     "CapabilitySurface",
+    "CapabilityTelemetryMiddleware",
     "CheckpointPort",
     "CheckpointScopeError",
     "DeferredToolCatalog",

@@ -1167,6 +1167,34 @@ class HarnessCapabilitiesResponse(BaseModel):
     capabilities: list[HarnessCapabilityResponse]
 
 
+class HarnessCapabilityHealthItem(BaseModel):
+    """Content-free health summary for one currently visible capability."""
+
+    capability_id: str
+    origin: Literal["local", "mcp", "skill", "subagent", "web"]
+    revision: str
+    availability: Literal["available", "degraded", "unavailable", "disabled", "stale"]
+    invocation_count: int = Field(ge=0)
+    success_count: int = Field(ge=0)
+    failure_count: int = Field(ge=0)
+    first_success_at: str | None = None
+    last_success_at: str | None = None
+    p50_latency_ms: int | None = Field(default=None, ge=0)
+    p95_latency_ms: int | None = Field(default=None, ge=0)
+    failure_categories: dict[str, int] = Field(default_factory=dict)
+
+
+class HarnessCapabilityHealthResponse(BaseModel):
+    """Authorized workspace-scoped capability health projection."""
+
+    session_id: str
+    workspace_id: str
+    surface: Literal["growth", "knowledge", "coding"]
+    catalog_revision: str
+    range_days: int = Field(ge=1, le=3650)
+    capabilities: list[HarnessCapabilityHealthItem]
+
+
 class CodingApprovalResponse(BaseModel):
     """Pending approval returned to the coding UI."""
 

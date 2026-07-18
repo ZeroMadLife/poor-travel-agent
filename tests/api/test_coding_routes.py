@@ -415,6 +415,10 @@ def test_enabled_deerflow_profile_streams_read_tool_summary(tmp_path: Path) -> N
                 events.append(event)
                 if event["kind"] == "terminal":
                     break
+        health = client.get(
+            "/api/v1/harness/capabilities/health",
+            params={"session_id": session_id, "surface": "coding", "range": "30d"},
+        )
 
     payloads = [event["payload"] for event in events]
     tool_calls = [payload for payload in payloads if payload.get("type") == "tool_call"]
@@ -424,6 +428,28 @@ def test_enabled_deerflow_profile_streams_read_tool_summary(tmp_path: Path) -> N
     assert tool_calls[0]["tool_call_id"] == "call-list-files"
     assert tool_results and "README.md" in tool_results[0]["content"]
     assert any(payload.get("type") == "text_delta" for payload in payloads)
+    catalog_event = next(
+        payload
+        for payload in payloads
+        if payload.get("type") == "capability_catalog_updated"
+    )
+    invocation_event = next(
+        payload
+        for payload in payloads
+        if payload.get("type") == "capability_invocation_completed"
+    )
+    assert invocation_event["capability_id"] == "local:list_files"
+    assert invocation_event["status"] == "success"
+    assert "schema" not in str(catalog_event).lower()
+    assert "/Users/" not in str(catalog_event)
+    assert health.status_code == 200
+    metric = next(
+        item
+        for item in health.json()["capabilities"]
+        if item["capability_id"] == "local:list_files"
+    )
+    assert metric["invocation_count"] == 1
+    assert metric["success_count"] == 1
 
 
 def test_enabled_deerflow_profile_reuses_approval_endpoint_for_write_tool(tmp_path: Path) -> None:

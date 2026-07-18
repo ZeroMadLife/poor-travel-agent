@@ -18,11 +18,16 @@ from sage_harness.capabilities.selection import (
     CapabilitySelectionOutcome,
     SelectionRejectionCode,
 )
+from sage_harness.capabilities.telemetry import (
+    CapabilityFailureCategory,
+    CapabilityTelemetryMiddleware,
+)
 
 __all__ = [
     "CapabilityAvailability",
     "CapabilityBinding",
     "CapabilityDescriptor",
+    "CapabilityFailureCategory",
     "CapabilityKind",
     "CapabilityMatch",
     "CapabilityOrigin",
@@ -33,5 +38,6 @@ __all__ = [
     "CapabilitySelectionIndex",
     "CapabilitySelectionOutcome",
     "CapabilitySurface",
+    "CapabilityTelemetryMiddleware",
     "SelectionRejectionCode",
 ]
