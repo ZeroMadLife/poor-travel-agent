@@ -2,6 +2,7 @@ import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
 import type { HarnessReviewBundle } from '../../../harness/reviewBundle'
 import type { HarnessProjection } from '../../../harness/types'
+import type { CodingKnowledgeSourceProposal } from '../../../types/api'
 import CodingHarnessWorkbench from './CodingHarnessWorkbench.vue'
 
 function projection(): HarnessProjection {
@@ -55,6 +56,18 @@ function reviewBundle(): HarnessReviewBundle {
       status: 'review', proposalId: 'proposal-1', revision: 2,
       items: ['把恢复边界写入长期记忆'], source: 'run-a',
     },
+  }
+}
+
+function sourceProposal(): CodingKnowledgeSourceProposal {
+  return {
+    proposal_id: 'ksprop_1', thread_id: 'session-1', run_id: 'run-a',
+    artifact_ref: 'sage://coding/session-1/run-a/artifacts/fetch', source_kind: 'web',
+    canonical_url: 'https://example.com/official', title: '官方证据', media_type: 'text/html',
+    retrieved_at: '', content_hash: 'a'.repeat(64), reason: '补齐证据',
+    evidence_refs: ['wcite_1'], status: 'pending', revision: 1,
+    target_root_id: 'sage-learning', target_relative_path: '', job_id: null,
+    last_error: null, decided_by: null, decided_at: null, created_at: '', updated_at: '',
   }
 }
 
@@ -120,6 +133,39 @@ describe('CodingHarnessWorkbench', () => {
     expect(wrapper.get('.review-surface').text()).toContain('确认哪些内容进入长期系统')
     expect(wrapper.get('.review-surface').text()).toContain('1 条可追溯证据')
     expect(wrapper.get('.review-surface').text()).toContain('批准沉淀')
+  })
+
+  it('enters deposit review for a real knowledge source proposal', async () => {
+    const source = sourceProposal()
+    const wrapper = mount(CodingHarnessWorkbench, {
+      props: {
+        projection: { ...projection(), status: 'completed' },
+        sessionTitle: '来源审阅', reviewBundle: {
+          ...reviewBundle(), deposit: { status: 'empty', proposalId: '', revision: 0, items: [], source: '' },
+        },
+        sourceProposals: [source],
+      },
+    })
+
+    expect(wrapper.attributes('data-journey')).toBe('review')
+    expect(wrapper.get('.review-surface').text()).toContain('官方证据')
+    await wrapper.get('[data-action="approve-source"]').trigger('click')
+    expect(wrapper.emitted('approveSource')).toEqual([[source.proposal_id, source.revision]])
+  })
+
+  it('keeps proposal errors next to the review item instead of duplicating them', () => {
+    const wrapper = mount(CodingHarnessWorkbench, {
+      props: {
+        projection: { ...projection(), status: 'completed' },
+        sessionTitle: '来源审阅', reviewBundle: {
+          ...reviewBundle(), deposit: { status: 'empty', proposalId: '', revision: 0, items: [], source: '' },
+        },
+        sourceProposals: [sourceProposal()],
+        sourceError: '知识来源提案已发生变化，请刷新后重试',
+      },
+    })
+
+    expect(wrapper.findAll('[role="alert"]')).toHaveLength(1)
   })
 
   it('prioritizes connection recovery and shows the last sequence', () => {

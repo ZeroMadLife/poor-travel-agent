@@ -73,6 +73,9 @@ const harnessDepositBusy = computed(() => Boolean(
   harnessReviewBundle.value.deposit.proposalId
   && store.memoryProposalBusy[harnessReviewBundle.value.deposit.proposalId],
 ))
+const harnessSourceProposals = computed(() => store.knowledgeSourceProposals.slice().sort(
+  (left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at),
+))
 const codingContext = computed<HarnessSurfaceContext | null>(() => {
   if (!store.workspaceId) return null
   const workspaceLabel = store.workspaceRoot.split('/').filter(Boolean).at(-1) || 'coding'
@@ -390,8 +393,16 @@ onBeforeUnmount(() => {
                 :connection-state="store.connectionState"
                 :review-bundle="harnessReviewBundle"
                 :deposit-busy="harnessDepositBusy"
+                :source-proposals="harnessSourceProposals"
+                :source-details="store.knowledgeSourceProposalDetails"
+                :source-busy="store.knowledgeSourceProposalBusy"
+                :source-detail-busy="store.knowledgeSourceProposalDetailBusy"
+                :source-error="store.knowledgeSourceProposalError"
                 @approve-deposit="store.approveMemoryProposal"
                 @reject-deposit="store.rejectMemoryProposal"
+                @approve-source="store.approveKnowledgeSourceProposal"
+                @reject-source="store.rejectKnowledgeSourceProposal"
+                @load-source-detail="store.loadKnowledgeSourceProposalDetail"
                 @open-operation="openHarnessOperation"
               />
             </section>

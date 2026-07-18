@@ -11,17 +11,35 @@ import {
   X,
 } from 'lucide-vue-next'
 import type { HarnessReviewBundle } from '../../harness/reviewBundle'
+import type {
+  CodingKnowledgeSourceProposal,
+  CodingKnowledgeSourceProposalDetail,
+} from '../../types/api'
+import KnowledgeSourceProposalReviewList from './KnowledgeSourceProposalReviewList.vue'
 
 const props = withDefaults(defineProps<{
   bundle: HarnessReviewBundle
   depositBusy?: boolean
+  sourceProposals?: readonly CodingKnowledgeSourceProposal[]
+  sourceDetails?: Readonly<Record<string, CodingKnowledgeSourceProposalDetail | undefined>>
+  sourceBusy?: Readonly<Record<string, boolean | undefined>>
+  sourceDetailBusy?: Readonly<Record<string, boolean | undefined>>
+  sourceError?: string
 }>(), {
   depositBusy: false,
+  sourceProposals: () => [],
+  sourceDetails: () => ({}),
+  sourceBusy: () => ({}),
+  sourceDetailBusy: () => ({}),
+  sourceError: '',
 })
 
 const emit = defineEmits<{
   approveDeposit: [proposalId: string, revision: number]
   rejectDeposit: [proposalId: string, revision: number]
+  approveSource: [proposalId: string, revision: number]
+  rejectSource: [proposalId: string, revision: number]
+  loadSourceDetail: [proposalId: string]
 }>()
 
 function durationLabel(durationMs?: number) {
@@ -88,11 +106,11 @@ function durationLabel(durationMs?: number) {
         <p v-else class="review-empty">运行尚未产生可验证的实践结果。</p>
       </section>
 
-      <section class="review-section review-deposit" :data-status="bundle.deposit.status">
+      <section class="review-section review-deposit" :data-status="bundle.deposit.status === 'review' || sourceProposals.length ? 'review' : bundle.deposit.status">
         <header>
           <span class="review-icon"><NotebookPen :size="17" /></span>
-          <div><h3>沉淀提案</h3><small>确认后才进入长期记忆</small></div>
-          <AlertCircle v-if="bundle.deposit.status === 'review'" :size="16" class="status-icon" />
+          <div><h3>沉淀提案</h3><small>确认后才进入 Knowledge 或 Memory</small></div>
+          <AlertCircle v-if="bundle.deposit.status === 'review' || sourceProposals.length" :size="16" class="status-icon" />
         </header>
         <template v-if="bundle.deposit.status === 'review'">
           <p class="deposit-copy">{{ bundle.deposit.items[0] || '提案已生成，等待查看。' }}</p>
@@ -102,7 +120,18 @@ function durationLabel(durationMs?: number) {
             <button data-action="approve" type="button" :disabled="props.depositBusy" @click="emit('approveDeposit', bundle.deposit.proposalId, bundle.deposit.revision)"><Check :size="14" />批准沉淀</button>
           </footer>
         </template>
-        <p v-else class="review-empty">本轮尚无待确认的 Wiki 或 Memory 增量。</p>
+        <KnowledgeSourceProposalReviewList
+          v-if="sourceProposals.length"
+          :proposals="sourceProposals"
+          :details="sourceDetails"
+          :busy="sourceBusy"
+          :detail-busy="sourceDetailBusy"
+          :error="sourceError"
+          @approve="emit('approveSource', $event, sourceProposals.find((item) => item.proposal_id === $event)?.revision ?? 0)"
+          @reject="emit('rejectSource', $event, sourceProposals.find((item) => item.proposal_id === $event)?.revision ?? 0)"
+          @load-detail="emit('loadSourceDetail', $event)"
+        />
+        <p v-if="bundle.deposit.status !== 'review' && !sourceProposals.length" class="review-empty">本轮尚无待确认的 Wiki、Knowledge 来源或 Memory 增量。</p>
       </section>
     </div>
   </section>
