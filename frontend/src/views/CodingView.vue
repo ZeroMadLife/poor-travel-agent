@@ -369,7 +369,7 @@ onBeforeUnmount(() => {
       </aside>
 
       <main class="pane-center" :class="{ 'is-inert': mainInert }" :inert="mainInert || undefined" :aria-hidden="mainInert ? 'true' : undefined">
-        <ChatHarnessLayout class="coding-harness-layout" surface-label="Coding" chat-label="主对话" :show-details="false">
+        <ChatHarnessLayout class="coding-harness-layout" surface-label="主对话" chat-label="主对话" :show-details="false">
           <template #canvas>
             <section class="harness-workbench-pane">
               <header class="session-titlebar">
@@ -387,6 +387,7 @@ onBeforeUnmount(() => {
                 :projection="harnessProjection"
                 :session-title="currentSessionTitle"
                 :tool-call-count="harnessToolCallCount"
+                :connection-state="store.connectionState"
                 :review-bundle="harnessReviewBundle"
                 :deposit-busy="harnessDepositBusy"
                 @approve-deposit="store.approveMemoryProposal"
@@ -400,6 +401,7 @@ onBeforeUnmount(() => {
             <ChatDock
               :projection="harnessProjection"
               :connection-state="store.connectionState"
+              surface-label="main"
               :context="codingContext"
               :output-signature="outputSignature"
               :message-count="store.messages.length"

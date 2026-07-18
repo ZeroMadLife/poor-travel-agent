@@ -27,6 +27,7 @@ const props = withDefaults(defineProps<{
   loading?: boolean
   isEmpty?: boolean
   compactStatus?: boolean
+  surfaceLabel?: string
   emptyTitle?: string
   emptyDescription?: string
   loadOlder?: () => Promise<void>
@@ -37,6 +38,7 @@ const props = withDefaults(defineProps<{
   loading: false,
   isEmpty: false,
   compactStatus: false,
+  surfaceLabel: '',
   emptyTitle: 'Sage 已就绪',
   emptyDescription: '输入目标，Sage 会保留本轮运行证据。',
   loadOlder: undefined,
@@ -64,6 +66,22 @@ const contextLabel = computed(() => (
   || props.context?.resource?.label
   || (props.context?.surface === 'knowledge' ? 'Knowledge 图谱' : '当前工作区')
 ))
+const contextReceipt = computed(() => {
+  if (!props.context || props.context.surface !== 'knowledge') return ''
+  const parts: string[] = []
+  const shortRef = (value: string) => value.length > 12 ? `${value.slice(0, 12)}...` : value
+  const revisionRef = (revision?: string) => revision ? `@${shortRef(revision)}` : ''
+  if (props.context.graphRevision) parts.push(`graph ${shortRef(props.context.graphRevision)}`)
+  if (props.context.selection) {
+    const type = props.context.selection.type === 'graph_node' ? 'node' : props.context.selection.type
+    parts.push(`${type} ${shortRef(props.context.selection.id)}${revisionRef(props.context.selection.revision)}`)
+  }
+  if (props.context.resource) {
+    const type = props.context.resource.type === 'knowledge_page' ? 'page' : 'source'
+    parts.push(`${type} ${shortRef(props.context.resource.id)}${revisionRef(props.context.resource.revision)}`)
+  }
+  return parts.join(' · ')
+})
 const completedStages = computed(() => props.projection.stages.filter(
   (stage) => stage.status === 'completed',
 ).length)
@@ -126,8 +144,11 @@ function handleAnchorChange(eventId: string, offset: number) {
 
     <div class="chat-dock-composer"><slot name="composer" /></div>
     <footer v-if="context" class="surface-context-bar">
-      <span>{{ context.surface }} · {{ contextLabel }}</span>
-      <code>surface_context 已冻结</code>
+      <span class="surface-context-copy">
+        <b>{{ surfaceLabel || context.surface }} · {{ contextLabel }}</b>
+        <small v-if="contextReceipt">{{ contextReceipt }}</small>
+      </span>
+      <code>surface_context 提交时冻结</code>
     </footer>
   </section>
 </template>
@@ -172,8 +193,11 @@ function handleAnchorChange(eventId: string, offset: number) {
 .chat-attention { min-width: 0; border-bottom: 1px solid color-mix(in srgb, var(--sage-warning) 48%, var(--sage-border)); background: var(--sage-warning-bg); }
 .chat-dock-timeline { padding: 14px 12px 16px; }
 .chat-dock-composer { min-width: 0; }
-.surface-context-bar { display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 28px; padding: 0 11px; border-top: 1px solid var(--sage-border); color: var(--sage-text-muted); font-size: 10px; }
-.surface-context-bar span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.surface-context-bar { display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 28px; padding: 5px 11px; border-top: 1px solid var(--sage-border); color: var(--sage-text-muted); font-size: 10px; }
+.surface-context-copy { display: grid; min-width: 0; gap: 2px; }
+.surface-context-copy b,.surface-context-copy small { min-width: 0; overflow: hidden; font: inherit; text-overflow: ellipsis; white-space: nowrap; }
+.surface-context-copy b { color: var(--sage-text-secondary); }
+.surface-context-copy small { color: var(--sage-text-muted); }
 .surface-context-bar code { margin-left: auto; color: var(--sage-text-muted); white-space: nowrap; }
 .chat-empty-state { display: flex; min-height: 100%; flex-direction: column; align-items: center; justify-content: center; gap: 5px; color: var(--sage-text-muted); text-align: center; }
 .chat-empty-state strong { color: var(--sage-text-secondary); font-size: var(--sage-font-md); }

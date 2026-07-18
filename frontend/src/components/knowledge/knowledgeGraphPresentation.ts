@@ -380,3 +380,12 @@ export function communitySeedPositions(
 
   return positions
 }
+
+export function selectedNodePresentation(baseColor: string, baseSize: number) {
+  return {
+    color: baseColor,
+    size: baseSize * 1.38,
+    highlighted: false,
+    zIndex: 6,
+  }
+}

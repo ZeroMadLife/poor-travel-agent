@@ -8,6 +8,7 @@ import type {
 } from '../../types/api'
 import KnowledgeGraphCanvas from './KnowledgeGraphCanvas.vue'
 import KnowledgeInspector from './KnowledgeInspector.vue'
+import { selectedNodePresentation } from './knowledgeGraphPresentation'
 
 vi.mock('../../api/knowledge', () => ({
   fetchKnowledgeCitation: vi.fn(),
@@ -97,6 +98,14 @@ beforeEach(() => {
     },
     content: '# Agent Harness\n\n可恢复执行。\n\n<script>alert(1)</script>', truncated: false,
   })
+})
+
+it('keeps the selected node color and disables Sigma white highlight overlays', () => {
+  const presentation = selectedNodePresentation('#16a085', 5)
+  expect(presentation.color).toBe('#16a085')
+  expect(presentation.size).toBeCloseTo(6.9)
+  expect(presentation.highlighted).toBe(false)
+  expect(presentation.zIndex).toBe(6)
 })
 
 it('keeps the interactive graph on mobile within the compact performance budget', async () => {
