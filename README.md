@@ -107,6 +107,7 @@ State and infrastructure
 ### 环境要求
 
 - Python 3.12+
+- uv
 - Node.js 20+
 - Docker Engine + Docker Compose v2
 - macOS、Linux，或 Windows WSL
@@ -121,10 +122,8 @@ cd sage-agent
 ### 2. 安装依赖
 
 ```bash
-python -m venv .venv
+bash scripts/bootstrap-dev-env.sh
 source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
 
 cd frontend
 npm install
@@ -150,6 +149,9 @@ DEEPSEEK_API_KEY=your_key
 ```bash
 bash scripts/dev.sh
 ```
+
+IDE 统一使用 `${workspaceFolder}/.venv/bin/python`。不要继续使用旧的
+`tour-agent-phase1` Conda 环境；该环境是 Python 3.11，无法运行 Harness 2.0。
 
 脚本会启动 PostgreSQL/pgvector、Redis、FastAPI 和 Vite：
 
