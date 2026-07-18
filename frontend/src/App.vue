@@ -57,6 +57,7 @@ watch(
           <CloudAuthGate
             v-if="cloudAuthRequired && !cloudAuthenticated"
             :checking="cloudAuthChecking"
+            @authenticated="cloudAuthenticated = true"
           />
           <div v-else class="app-shell">
             <AssistantNavigation v-if="usesAssistantShell">

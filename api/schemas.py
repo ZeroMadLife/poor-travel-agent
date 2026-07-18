@@ -1386,12 +1386,34 @@ class CloudDevelopmentLoginRequest(BaseModel):
         return value.strip()
 
 
+class CloudCanaryInviteLoginRequest(BaseModel):
+    """One-time private-Canary invite exchanged for a device session."""
+
+    invite_code: str = Field(min_length=1, max_length=256)
+    device_name: str = Field(default="Unknown device", max_length=120)
+
+    @field_validator("invite_code", "device_name")
+    @classmethod
+    def strip_canary_login_values(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("value must not be blank")
+        return value
+
+
 class CloudCurrentUserResponse(BaseModel):
     """Authenticated cloud identity without exposing its browser session token."""
 
     user_id: str
     email: str
     display_name: str
+
+
+class CloudAuthOptionsResponse(BaseModel):
+    """Public login methods enabled by the trusted server configuration."""
+
+    canary_invite_login: bool
+    github_login: bool
 
 
 class CloudGitHubOAuthStartRequest(BaseModel):

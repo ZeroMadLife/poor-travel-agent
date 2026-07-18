@@ -85,6 +85,26 @@ def test_production_cloud_settings_accept_distinct_configured_secrets() -> None:
     settings.validate_cloud_production_secrets()
 
 
+def test_production_rejects_canary_invite_login_on_public_hostname() -> None:
+    import pytest
+
+    settings = Settings(
+        app_env="production",
+        app_secret_key="application-secret-that-is-not-a-placeholder",
+        github_oauth_client_id="client-id",
+        github_oauth_client_secret="github-client-secret-that-is-long-enough-value",
+        github_oauth_transaction_secret="transaction-secret-that-is-long-enough",
+        github_token_encryption_secret="token-secret-that-is-long-enough-value",
+        model_provider_encryption_secret="provider-secret-that-is-long-enough-value",
+        cloud_frontend_url="https://sage.example.com",
+        github_oauth_redirect_uri="https://sage.example.com/api/v1/cloud/auth/github/callback",
+        cloud_canary_invite_login_enabled=True,
+    )
+
+    with pytest.raises(RuntimeError, match="outside private Canary"):
+        settings.validate_cloud_production_secrets()
+
+
 def test_resolve_llm_doubao(monkeypatch) -> None:
     """resolve_llm 正确解析 doubao provider。"""
     monkeypatch.setenv("DOUBAO_API_KEY", "test-doubao-key")

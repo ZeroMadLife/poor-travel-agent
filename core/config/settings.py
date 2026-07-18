@@ -4,6 +4,7 @@ Configuration is loaded from environment variables and an optional ``.env`` file
 """
 
 from functools import lru_cache
+from urllib.parse import urlparse
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -112,6 +113,7 @@ class Settings(BaseSettings):
     app_access_codes: str = ""
 
     cloud_dev_login_enabled: bool = False
+    cloud_canary_invite_login_enabled: bool = False
     # Local HTTP development needs a non-Secure cookie; non-development is
     # forced to Secure by the app factory regardless of this value.
     cloud_secure_cookies: bool = False
@@ -210,6 +212,9 @@ class Settings(BaseSettings):
             missing.append("GITHUB_OAUTH_REDIRECT_URI(HTTPS)")
         if self.cloud_dev_login_enabled:
             missing.append("CLOUD_DEV_LOGIN_ENABLED=false")
+        frontend_hostname = (urlparse(self.cloud_frontend_url).hostname or "").lower()
+        if self.cloud_canary_invite_login_enabled and not frontend_hostname.endswith(".ts.net"):
+            missing.append("CLOUD_CANARY_INVITE_LOGIN_ENABLED=false outside private Canary")
         if missing:
             raise RuntimeError(f"production cloud secrets are missing: {', '.join(missing)}")
 

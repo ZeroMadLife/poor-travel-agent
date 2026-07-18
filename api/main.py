@@ -196,6 +196,7 @@ def create_app(
     coding_web_search_port: WebSearchPort | None = None,
     cloud_repository: CloudRepository | None = None,
     cloud_dev_login_enabled: bool | None = None,
+    cloud_canary_invite_login_enabled: bool | None = None,
     cloud_secure_cookies: bool | None = None,
     cloud_app_env: str | None = None,
     cloud_github_oauth_service: GitHubOAuthService | None = None,
@@ -268,6 +269,11 @@ def create_app(
         settings.cloud_dev_login_enabled
         if cloud_dev_login_enabled is None
         else cloud_dev_login_enabled
+    )
+    app.state.cloud_canary_invite_login_enabled = (
+        settings.cloud_canary_invite_login_enabled
+        if cloud_canary_invite_login_enabled is None
+        else cloud_canary_invite_login_enabled
     )
     app.state.cloud_secure_cookies = (
         True

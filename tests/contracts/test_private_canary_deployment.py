@@ -32,6 +32,7 @@ def test_private_canary_environment_template_tracks_server_topology() -> None:
         "SAGE_CODING_SANDBOX_IMAGE=docker.m.daocloud.io/library/python:3.12-slim"
         in template
     )
+    assert "CLOUD_CANARY_INVITE_LOGIN_ENABLED=true" in template
 
 
 def test_private_canary_requires_a_rootless_sandbox_socket() -> None:

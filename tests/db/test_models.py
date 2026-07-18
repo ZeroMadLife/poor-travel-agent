@@ -121,6 +121,7 @@ async def test_init_db_records_the_v7_cloud_control_plane_revision() -> None:
         "20260716_v7_5_3_knowledge_sync",
         "20260716_v7_5_4_source_connectors",
         "20260718_h2_5b2_external_parse_tasks",
+        "20260718_v7_canary_invite_device_login",
     ]
     assert {
         "cloud_model_providers",
