@@ -395,7 +395,10 @@ class KnowledgeIngestJobRecord(Base):
         String(36), ForeignKey("knowledge_source_roots.id", ondelete="CASCADE"), index=True
     )
     sync_plan_id: Mapped[str | None] = mapped_column(
-        String(36), ForeignKey("knowledge_sync_plans.id", ondelete="SET NULL"), unique=True, nullable=True
+        String(36),
+        ForeignKey("knowledge_sync_plans.id", ondelete="SET NULL"),
+        unique=True,
+        nullable=True,
     )
     relative_directory: Mapped[str] = mapped_column(String(1024), default=".")
     pipeline_version: Mapped[str] = mapped_column(String(64))
@@ -448,6 +451,33 @@ class KnowledgeIngestItemRecord(Base):
     proposal_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class KnowledgeExternalParseRecord(Base):
+    """Server-only resumable parser ticket for one immutable ingest item."""
+
+    __tablename__ = "knowledge_external_parse_tasks"
+    __table_args__ = (
+        UniqueConstraint(
+            "adapter_id",
+            "task_id",
+            name="knowledge_external_parse_adapter_task_key",
+        ),
+    )
+
+    item_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("knowledge_ingest_items.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    adapter_id: Mapped[str] = mapped_column(String(64))
+    adapter_version: Mapped[str] = mapped_column(String(64))
+    task_id: Mapped[str] = mapped_column(String(128))
+    state: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
     )
