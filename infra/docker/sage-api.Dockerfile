@@ -5,7 +5,10 @@ FROM python:3.12.13-slim-bookworm
 ENV HOME=/tmp \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_INDEX_URL=https://pypi.org/simple \
+    PIP_DEFAULT_TIMEOUT=60 \
+    PIP_RETRIES=10
 
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 
@@ -13,8 +16,7 @@ WORKDIR /app
 
 COPY requirements.txt ./
 COPY packages ./packages
-RUN python -m pip install --no-cache-dir --upgrade pip \
-    && python -m pip install --no-cache-dir -r requirements.txt
+RUN python -m pip install --no-cache-dir -r requirements.txt
 
 COPY agents ./agents
 COPY api ./api

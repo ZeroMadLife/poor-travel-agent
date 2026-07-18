@@ -8,6 +8,7 @@ from scripts.deployctl import (
     DeployConfig,
     DeployController,
     DeployError,
+    deployment_visible_socket_requirements,
     parse_env_file,
     redact,
     validate_commit_tag,
@@ -125,3 +126,16 @@ def test_redaction_removes_every_configured_secret() -> None:
     message = " ".join(values[key] for key in ("APP_SECRET_KEY", "POSTGRES_PASSWORD"))
 
     assert redact(message, values) == "[REDACTED] [REDACTED]"
+
+
+def test_deploy_user_only_stats_sockets_visible_through_its_runtime() -> None:
+    requirements = deployment_visible_socket_requirements(
+        "unix:///run/user/1001/docker.sock",
+        "/run/user/1001/sage-sandbox.sock",
+    )
+
+    assert [path for _, path, _ in requirements] == [
+        "/run/user/1001/docker.sock",
+        "/run/user/1001/sage-sandbox.sock",
+    ]
+    assert "/run/user/1002/docker.sock" not in {path for _, path, _ in requirements}

@@ -61,7 +61,11 @@
    ```bash
    systemctl enable --now sage-sandbox-proxy.service
    stat -c '%U %G %a %n' /run/user/1001/sage-sandbox.sock
+   stat -c '%U %G %a %n' /run/user/1002/docker.sock
    ```
+
+   第二条由 root 在初始化阶段确认。日常预检只让 `sage-deploy` 检查自己的 daemon 和代理
+   socket，再通过代理执行 `docker info`；它不需要、也不应获得 sandbox 私有 socket 的目录权限。
 
 7. `sage-deploy` 的 rootless daemon 运行 Compose；`sage-sandbox` daemon 只运行 Coding
    sandbox。禁止把任一用户加入 `docker` 组，禁止保留 `/var/run/docker.sock` 挂载。

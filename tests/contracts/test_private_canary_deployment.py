@@ -33,6 +33,23 @@ def test_private_canary_requires_a_rootless_sandbox_socket() -> None:
     assert "UNIX-CONNECT:/run/user/1002/docker.sock" in proxy
 
 
+def test_api_image_uses_the_official_retrying_package_index() -> None:
+    dockerfile = (ROOT / "infra/docker/sage-api.Dockerfile").read_text(encoding="utf-8")
+
+    assert "PIP_INDEX_URL=https://pypi.org/simple" in dockerfile
+    assert "PIP_RETRIES=10" in dockerfile
+    assert "pip install --no-cache-dir --upgrade pip" not in dockerfile
+
+
+def test_web_image_cannot_disable_the_production_login_gate() -> None:
+    dockerfile = (ROOT / "infra/docker/sage-web.Dockerfile").read_text(encoding="utf-8")
+    compose = (ROOT / "infra/compose/private-canary.yml").read_text(encoding="utf-8")
+
+    assert "RUN VITE_CLOUD_AUTH_REQUIRED=true npm run build" in dockerfile
+    assert "ARG VITE_CLOUD_AUTH_REQUIRED" not in dockerfile
+    assert "VITE_CLOUD_AUTH_REQUIRED:" not in compose
+
+
 def test_production_paths_can_live_on_persistent_volumes(
     tmp_path: Path,
     monkeypatch,

@@ -196,6 +196,17 @@ def redact(text: str, values: Mapping[str, str]) -> str:
     return redacted
 
 
+def deployment_visible_socket_requirements(
+    deploy_host: str,
+    proxy_socket: str,
+) -> tuple[tuple[str, str, int], ...]:
+    """Return sockets the unprivileged deployment account must inspect directly."""
+    return (
+        ("部署", deploy_host.removeprefix("unix://"), os.getuid()),
+        ("sandbox 代理", proxy_socket, os.getuid()),
+    )
+
+
 class DeployController:
     """Preflight, apply, and roll back one immutable Canary source revision."""
 
@@ -271,12 +282,10 @@ class DeployController:
             raise DeployError("部署 daemon 必须是 /run/user 下的 rootless Docker socket")
         if len({deploy_host.removeprefix("unix://"), proxy_socket, sandbox_socket}) != 3:
             raise DeployError("部署 daemon、sandbox 代理和 sandbox daemon 必须隔离")
-        socket_owners = (
-            ("部署", deploy_host.removeprefix("unix://"), os.getuid()),
-            ("sandbox 代理", proxy_socket, os.getuid()),
-            ("sandbox", sandbox_socket, int(self.values["SAGE_SANDBOX_UID"])),
-        )
-        for label, socket_path, expected_uid in socket_owners:
+        for label, socket_path, expected_uid in deployment_visible_socket_requirements(
+            deploy_host,
+            proxy_socket,
+        ):
             path = Path(socket_path)
             if not path.exists() or not stat.S_ISSOCK(path.stat().st_mode):
                 raise DeployError(f"{label} rootless Docker socket 不可用")

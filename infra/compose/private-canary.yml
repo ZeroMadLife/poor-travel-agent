@@ -91,8 +91,6 @@ services:
     build:
       context: ../..
       dockerfile: infra/docker/sage-web.Dockerfile
-      args:
-        VITE_CLOUD_AUTH_REQUIRED: "true"
     restart: unless-stopped
     depends_on:
       api:
