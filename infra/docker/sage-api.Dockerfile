@@ -1,0 +1,34 @@
+FROM docker:27.5.1-cli AS docker-cli
+
+FROM python:3.12.13-slim-bookworm
+
+ENV HOME=/tmp \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+
+WORKDIR /app
+
+COPY requirements.txt ./
+COPY packages ./packages
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir -r requirements.txt
+
+COPY agents ./agents
+COPY api ./api
+COPY config ./config
+COPY core ./core
+COPY data ./data
+COPY db ./db
+COPY mcp_servers ./mcp_servers
+COPY models ./models
+COPY infra/docker/sage-api-entrypoint.sh /usr/local/bin/sage-api-entrypoint
+RUN chmod 0755 /usr/local/bin/sage-api-entrypoint
+
+USER 0:0
+
+EXPOSE 8000
+
+ENTRYPOINT ["/usr/local/bin/sage-api-entrypoint"]

@@ -1,6 +1,6 @@
 # Sage 私有 Canary 部署与公网迁移设计
 
-> 状态：已确认设计，待实现与服务器执行
+> 状态：部署骨架已实现，待服务器执行
 >
 > 日期：2026-07-18
 
@@ -73,8 +73,9 @@ sagecompanion.cn -> Caddy 80/443 -> 同一内部 Compose 网络
 - **Worker**：持久任务和知识摄取；与 API 共用内部网络，不提供外部端口。
 - **PostgreSQL/pgvector**：canonical 数据和向量；仅 Compose 内部网络访问，持久化卷和备份。
 - **Redis**：队列/事件短期状态，不保存 canonical 知识；仅内部网络访问。
-- **Container Sandbox**：无网络、只读 rootfs、CPU/RAM/PID 限制、受控 workspace 挂载，
-  不把 Docker socket 交给模型工具。
+- **Container Sandbox**：无网络、只读 rootfs、CPU/RAM/PID 限制、受控 workspace 挂载。
+  API 仅通过 `0600` Unix 代理访问独立 `sage-sandbox` rootless daemon；部署 daemon 和模型
+  工具都无法访问该 socket，sandbox daemon 也看不到 API 环境或服务容器。
 
 ## 5. 身份与安全边界
 
@@ -91,7 +92,8 @@ sagecompanion.cn -> Caddy 80/443 -> 同一内部 Compose 网络
 - 使用 GitHub OAuth 邀请制登录，HttpOnly、Secure、SameSite session cookie。
 - GitHub OAuth callback、`CLOUD_FRONTEND_URL` 和 Caddy hostname 全部使用备案后的 HTTPS 域名。
 - 所有 Coding、Knowledge、Assistant、Provider、Proposal 和 WebSocket 路由统一要求登录与
-  ownership；不能只保护部分详情路由。
+  ownership；不能只保护部分详情路由。当前私有 Canary 的 Knowledge 数据仍是单用户本地
+  store，只增加 session 门禁；完成 tenant scope 前不得切换到正式公网。
 - `main`、生产密钥、工作区路径、Cookie 原文、Provider token 和模型凭据不进入模型 prompt、
   timeline、PR、飞书通知或普通日志。
 
@@ -171,6 +173,9 @@ sagecompanion.cn -> Caddy 80/443 -> 同一内部 Compose 网络
 - API/Web/Worker Dockerfile、生产 Compose、loopback 网关和健康检查。
 - `deployctl preflight/apply/rollback` 只接受固定参数，默认 dry-run。
 
+实现说明：当前代码没有可独立启动的 Worker 入口，首个 Canary 不伪造第二个 API 进程；
+`KNOWLEDGE_JOBS_ENABLED=false`，待任务执行器拆出稳定入口后再加入 Compose Worker。
+
 ### Slice C：服务器私有 Canary
 
 - 需要用户完成 Tailscale 登录/ACL、GitHub OAuth/密钥注入等外部授权。
@@ -186,3 +191,5 @@ sagecompanion.cn -> Caddy 80/443 -> 同一内部 Compose 网络
 - 域名实名审核和 ICP 备案由用户完成。
 - Tailscale 账号、ACL、GitHub OAuth App 和生产密钥由用户在外部控制台授权。
 - 当前设计不会声称已经部署；只有服务器 smoke、备份恢复和回滚证据齐全后才算 Canary 交付。
+- Knowledge store 尚未 tenant scope；私有 Canary 仅允许唯一受邀用户，正式公网切换前必须
+  完成按 owner/workspace 隔离和跨用户回归测试。
