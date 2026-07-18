@@ -524,6 +524,7 @@ def create_app(
     )
 
     app.include_router(assistant.router)
+    app.include_router(routes.health_router)
     app.include_router(routes.router)
     app.include_router(ws.router)
     app.include_router(coding.router)

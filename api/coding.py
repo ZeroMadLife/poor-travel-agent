@@ -21,8 +21,6 @@ from fastapi import (
     Request,
     Response,
     WebSocket,
-    WebSocketException,
-    status,
 )
 from langchain_core.tools import BaseTool
 from sage_harness import (
@@ -41,7 +39,10 @@ from sage_harness import (
 from starlette.requests import HTTPConnection
 from starlette.websockets import WebSocketDisconnect
 
-from api.cloud_dependencies import SESSION_COOKIE
+from api.cloud_dependencies import (
+    SESSION_COOKIE,
+    require_cloud_authentication_in_production,
+)
 from api.cloud_model_context import (
     combined_capabilities,
     combined_catalog,
@@ -223,38 +224,9 @@ async def _enforce_coding_session_owner(connection: HTTPConnection) -> None:
         raise HTTPException(status_code=404, detail=f"Unknown coding session: {session_id}")
 
 
-async def _require_coding_authentication_in_production(
-    connection: HTTPConnection,
-) -> None:
-    """Fail closed for every Coding route once the cloud app is in production."""
-    app_env = str(getattr(connection.app.state, "cloud_app_env", "development")).lower()
-    if app_env != "production":
-        return
-
-    cloud = getattr(connection.app.state, "cloud_repository", None)
-    is_websocket = connection.scope.get("type") == "websocket"
-    if not isinstance(cloud, CloudRepository):
-        if is_websocket:
-            raise WebSocketException(
-                code=status.WS_1011_INTERNAL_ERROR,
-                reason="cloud control plane is unavailable",
-            )
-        raise HTTPException(status_code=503, detail="cloud control plane is unavailable")
-
-    user = await cloud.authenticated_user(connection.cookies.get(SESSION_COOKIE, ""))
-    if user is not None:
-        return
-    if is_websocket:
-        raise WebSocketException(
-            code=status.WS_1008_POLICY_VIOLATION,
-            reason="cloud authentication is required",
-        )
-    raise HTTPException(status_code=401, detail="cloud authentication is required")
-
-
 router = APIRouter(
     dependencies=[
-        Depends(_require_coding_authentication_in_production),
+        Depends(require_cloud_authentication_in_production),
         Depends(_enforce_coding_session_owner),
     ]
 )
