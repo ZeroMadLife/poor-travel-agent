@@ -82,6 +82,16 @@ async def init_db(engine: AsyncEngine | None = None) -> None:
                 ")"
             )
         )
+        await connection.execute(
+            text(
+                "INSERT INTO schema_migrations (revision, applied_at) "
+                "SELECT '20260718_h2_5b2_external_parse_tasks', CURRENT_TIMESTAMP "
+                "WHERE NOT EXISTS ("
+                "SELECT 1 FROM schema_migrations "
+                "WHERE revision = '20260718_h2_5b2_external_parse_tasks'"
+                ")"
+            )
+        )
 
 
 async def _upgrade_knowledge_sync_columns(connection: AsyncConnection) -> None:

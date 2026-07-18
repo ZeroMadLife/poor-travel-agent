@@ -120,6 +120,7 @@ async def test_init_db_records_the_v7_cloud_control_plane_revision() -> None:
         "20260715_v7_2_knowledge_jobs",
         "20260716_v7_5_3_knowledge_sync",
         "20260716_v7_5_4_source_connectors",
+        "20260718_h2_5b2_external_parse_tasks",
     ]
     assert {
         "cloud_model_providers",
@@ -129,6 +130,7 @@ async def test_init_db_records_the_v7_cloud_control_plane_revision() -> None:
         "knowledge_source_roots",
         "knowledge_ingest_jobs",
         "knowledge_ingest_items",
+        "knowledge_external_parse_tasks",
         "knowledge_ingest_idempotency",
         "knowledge_job_events",
         "knowledge_source_manifests",
@@ -181,9 +183,7 @@ async def test_init_db_upgrades_legacy_knowledge_job_tables_in_place() -> None:
             }
         )
         indexes = await connection.run_sync(
-            lambda sync_connection: inspect(sync_connection).get_indexes(
-                "knowledge_ingest_jobs"
-            )
+            lambda sync_connection: inspect(sync_connection).get_indexes("knowledge_ingest_jobs")
         )
 
     await engine.dispose()
@@ -191,6 +191,5 @@ async def test_init_db_upgrades_legacy_knowledge_job_tables_in_place() -> None:
     assert "sync_plan_id" in job_columns
     assert "change_kind" in item_columns
     assert any(
-        index["name"] == "knowledge_job_sync_plan_key" and index["unique"]
-        for index in indexes
+        index["name"] == "knowledge_job_sync_plan_key" and index["unique"] for index in indexes
     )
