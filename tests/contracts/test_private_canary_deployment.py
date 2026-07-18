@@ -92,6 +92,19 @@ def test_web_image_cannot_disable_the_production_login_gate() -> None:
     assert "SAGE_DOCKER_REGISTRY: ${SAGE_DOCKER_REGISTRY:-docker.io}" in compose
 
 
+def test_private_proxy_routes_backend_before_the_spa_fallback() -> None:
+    caddyfile = (ROOT / "infra/proxy/Caddyfile.private").read_text(encoding="utf-8")
+    dockerfile = (ROOT / "infra/docker/sage-web.Dockerfile").read_text(
+        encoding="utf-8"
+    )
+
+    assert "handle /api/*" in caddyfile
+    assert "handle /health" in caddyfile
+    assert caddyfile.index("handle /health") < caddyfile.index("try_files")
+    assert "@backend" not in caddyfile
+    assert "caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile" in dockerfile
+
+
 def test_deployctl_uses_python_310_compatible_utc() -> None:
     source = (ROOT / "scripts/deployctl.py").read_text(encoding="utf-8")
 

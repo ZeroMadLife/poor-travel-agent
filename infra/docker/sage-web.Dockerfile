@@ -13,6 +13,7 @@ RUN setcap -r /usr/bin/caddy \
     && test -z "$(getcap /usr/bin/caddy)"
 
 COPY infra/proxy/Caddyfile.private /etc/caddy/Caddyfile
+RUN caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 COPY --from=build /src/dist /srv
 
 EXPOSE 8080
