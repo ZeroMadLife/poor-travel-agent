@@ -16,15 +16,15 @@ function projection(status: HarnessProjection['status'], activeStageId: string |
 }
 
 describe('ChatDock', () => {
-  it('shows tool and frozen context state from supplied facts', () => {
+  it('shows tool state and the context that will be frozen on submit', () => {
     const wrapper = mount(ChatDock, {
       props: {
         projection: projection('running', 'act'),
         connectionState: 'connected',
         context: {
           surface: 'knowledge', workspaceId: 'knowledge-local',
-          resource: { type: 'knowledge_page', id: 'page-1', label: 'Agent Harness' },
-          selection: { type: 'graph_node', id: 'node-1', label: 'Agent Harness' },
+          resource: { type: 'knowledge_page', id: 'page-1', revision: 'page-rev-3', label: 'Agent Harness' },
+          selection: { type: 'graph_node', id: 'node-1', revision: 'node-rev-7', label: 'Agent Harness' },
           graphRevision: 'graph-1', operationRefs: [],
         },
         outputSignature: 'one', messageCount: 0, sessionKey: 'session-1',
@@ -35,7 +35,33 @@ describe('ChatDock', () => {
     expect(wrapper.attributes('data-run-state')).toBe('tool')
     expect(wrapper.get('.run-strip-title').text()).toContain('调用工具')
     expect(wrapper.get('.surface-context-bar').text()).toContain('Agent Harness')
-    expect(wrapper.get('.surface-context-bar').text()).toContain('已冻结')
+    expect(wrapper.get('.surface-context-copy small').text()).toBe(
+      'graph graph-1 · node node-1@node-rev-7 · page page-1@page-rev-3',
+    )
+    expect(wrapper.get('.surface-context-bar').text()).toContain('提交时冻结')
+  })
+
+  it('uses a product-facing surface label without mutating the context payload', () => {
+    const context = {
+      surface: 'coding' as const,
+      workspaceId: 'workspace-1',
+      resource: { type: 'coding_workspace' as const, id: 'workspace-1', label: 'tour-agent' },
+      selection: null,
+      operationRefs: [],
+    }
+    const wrapper = mount(ChatDock, {
+      props: {
+        projection: projection('running', 'act'),
+        connectionState: 'connected',
+        context,
+        surfaceLabel: 'main',
+        outputSignature: 'main', messageCount: 0, sessionKey: 'session-1',
+        timelineReady: true,
+      },
+    })
+
+    expect(wrapper.get('.surface-context-bar').text()).toContain('main · tour-agent')
+    expect(wrapper.props('context')).toEqual(context)
   })
 
   it('prioritizes a factual recovery state over the active timeline stage', () => {

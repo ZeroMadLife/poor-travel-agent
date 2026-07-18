@@ -237,7 +237,7 @@ it('renders the versioned graph workspace without a duplicate RAG question form'
   expect(wrapper.find('[aria-label="Knowledge 主画布"]').exists()).toBe(true)
   expect(wrapper.get('.workbench-dock [role="tab"][aria-selected="true"]').text()).toContain('对话')
   expect(wrapper.text()).toContain('还没有可复用的对话')
-  expect(wrapper.get('.surface-context-bar').text()).toContain('surface_context 已冻结')
+  expect(wrapper.get('.surface-context-bar').text()).toContain('surface_context 提交时冻结')
   expect(wrapper.find('input[aria-label="知识库问题"]').exists()).toBe(false)
   wrapper.unmount()
 })
@@ -250,7 +250,7 @@ it('loads revision-bound evidence when a graph node is selected', async () => {
 
   expect(fetchKnowledgeGraphNeighborhood).toHaveBeenCalledWith('node-page')
   expect(wrapper.get('.surface-context-bar').text()).toContain('Agent Harness')
-  expect(wrapper.get('.surface-context-bar').text()).toContain('surface_context 已冻结')
+  expect(wrapper.get('.surface-context-bar').text()).toContain('surface_context 提交时冻结')
   expect(wrapper.get('.knowledge-harness').attributes('data-active-tab')).toBe('chat')
   await wrapper.findAll('.workbench-dock [role="tab"]')[1].trigger('click')
   expect(wrapper.get('.inspector-stub').text()).toContain('Agent Harness')

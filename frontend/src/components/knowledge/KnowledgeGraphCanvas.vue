@@ -17,6 +17,7 @@ import {
   graphLegendItems,
   graphPerformanceProfile,
   graphScopeNodeIds,
+  selectedNodePresentation,
   shortestGraphPath,
   type KnowledgeGraphScopeMode,
 } from './knowledgeGraphPresentation'
@@ -50,6 +51,7 @@ const rendererError = ref('')
 const themeRevision = ref(0)
 let renderer: Sigma | null = null
 let sigmaGraph: Graph | null = null
+let selectionContext: CanvasRenderingContext2D | null = null
 let themeObserver: MutationObserver | null = null
 let resizeObserver: ResizeObserver | null = null
 let layoutSupervisor: { start(): void; stop(): void; kill(): void } | null = null
@@ -280,15 +282,16 @@ function applyPresentation() {
     const onGoalPath = Boolean(goalPath.value?.nodeIds.includes(nodeId))
     const baseColor = String(attributes.baseColor)
     const baseSize = Number(attributes.baseSize)
+    const selectedStyle = selected ? selectedNodePresentation(baseColor, baseSize) : null
     sigmaGraph?.setNodeAttribute(
       nodeId,
       'color',
-      focusNodeId && !focused && !connected && !onGoalPath ? dimNodeColor : baseColor,
+      selectedStyle?.color ?? (focusNodeId && !focused && !connected && !onGoalPath ? dimNodeColor : baseColor),
     )
     sigmaGraph?.setNodeAttribute(
       nodeId,
       'size',
-      selected ? baseSize * 1.38 : focused ? baseSize * 1.22 : onGoalPath ? baseSize * 1.14 : connected || hovered ? baseSize * 1.08 : baseSize,
+      selectedStyle?.size ?? (focused ? baseSize * 1.22 : onGoalPath ? baseSize * 1.14 : connected || hovered ? baseSize * 1.08 : baseSize),
     )
     sigmaGraph?.setNodeAttribute(
       nodeId,
@@ -297,8 +300,8 @@ function applyPresentation() {
         ? focusValue.labelNodeIds.has(nodeId)
         : featuredLabels.value.has(nodeId)),
     )
-    sigmaGraph?.setNodeAttribute(nodeId, 'highlighted', false)
-    sigmaGraph?.setNodeAttribute(nodeId, 'zIndex', selected ? 6 : focused ? 5 : onGoalPath ? 4 : connected || hovered ? 3 : 1)
+    sigmaGraph?.setNodeAttribute(nodeId, 'highlighted', selectedStyle?.highlighted ?? false)
+    sigmaGraph?.setNodeAttribute(nodeId, 'zIndex', selectedStyle?.zIndex ?? (focused ? 5 : onGoalPath ? 4 : connected || hovered ? 3 : 1))
   })
 
   sigmaGraph.forEachEdge((edgeId, attributes) => {
@@ -332,6 +335,30 @@ function applyPresentation() {
   renderer?.refresh()
 }
 
+function drawSelectionHalo() {
+  if (!renderer || !selectionContext) return
+  const { width, height } = renderer.getDimensions()
+  selectionContext.clearRect(0, 0, width, height)
+  if (!props.selectedNodeId) return
+  const data = renderer.getNodeDisplayData(props.selectedNodeId)
+  if (!data || data.hidden) return
+  const position = renderer.framedGraphToViewport(data)
+  const size = renderer.scaleSize(data.size)
+
+  selectionContext.save()
+  selectionContext.beginPath()
+  selectionContext.arc(position.x, position.y, size + 3.5, 0, Math.PI * 2)
+  selectionContext.lineWidth = 3
+  selectionContext.strokeStyle = hoverSurfaceColor
+  selectionContext.stroke()
+  selectionContext.beginPath()
+  selectionContext.arc(position.x, position.y, size + 5.5, 0, Math.PI * 2)
+  selectionContext.lineWidth = 1.75
+  selectionContext.strokeStyle = data.color
+  selectionContext.stroke()
+  selectionContext.restore()
+}
+
 function hasRenderableArea() {
   if (!container.value) return false
   const bounds = container.value.getBoundingClientRect()
@@ -346,6 +373,7 @@ function destroyRenderer() {
   renderer?.kill()
   renderer = null
   sigmaGraph = null
+  selectionContext = null
   hoveredNodeId = null
 }
 
@@ -477,8 +505,14 @@ async function mountRenderer(requestId: number) {
       zoomDuration: 260,
       zIndex: true,
     })
+    renderer.createCanvasContext('selection', {
+      style: { pointerEvents: 'none' },
+    })
+    selectionContext = container.value.querySelector<HTMLCanvasElement>('.sigma-selection')
+      ?.getContext('2d') ?? null
     sigmaGraph = graph
     hoveredNodeId = null
+    renderer.on('afterRender', drawSelectionHalo)
     applyPresentation()
     renderer.on('clickNode', ({ node }) => emit('select', node))
     renderer.on('clickStage', () => emit('select', null))
