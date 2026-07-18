@@ -5,6 +5,8 @@ x-api-common: &api-common
   build:
     context: ../..
     dockerfile: infra/docker/sage-api.Dockerfile
+    args:
+      SAGE_DOCKER_REGISTRY: ${SAGE_DOCKER_REGISTRY:-docker.io}
   env_file:
     - ${SAGE_ENV_FILE:-/etc/sage/env}
   environment:
@@ -36,7 +38,7 @@ x-api-common: &api-common
 
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    image: ${SAGE_DOCKER_REGISTRY:-docker.io}/pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
@@ -53,7 +55,7 @@ services:
       - sage
 
   redis:
-    image: redis:7.2-alpine
+    image: ${SAGE_DOCKER_REGISTRY:-docker.io}/library/redis:7.2-alpine
     restart: unless-stopped
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
@@ -91,6 +93,8 @@ services:
     build:
       context: ../..
       dockerfile: infra/docker/sage-web.Dockerfile
+      args:
+        SAGE_DOCKER_REGISTRY: ${SAGE_DOCKER_REGISTRY:-docker.io}
     restart: unless-stopped
     depends_on:
       api:

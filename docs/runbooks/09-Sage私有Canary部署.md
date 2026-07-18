@@ -25,25 +25,39 @@
 2. 创建两个无 sudo 用户，固定 UID：
 
    ```bash
-   useradd --create-home --uid 1001 --shell /bin/bash sage-deploy
-   useradd --create-home --uid 1002 --shell /bin/bash sage-sandbox
+   useradd --create-home --uid 1002 --shell /bin/bash sage-deploy
+   useradd --create-home --uid 1003 --shell /bin/bash sage-sandbox
    loginctl enable-linger sage-deploy
    loginctl enable-linger sage-sandbox
    ```
 
 3. 确认 `/etc/subuid` 和 `/etc/subgid` 分别为两个用户提供不重叠的至少 `65536` UID/GID 区间。
-4. 分别以两个用户运行 `dockerd-rootless-setuptool.sh install`，并启用 user service：
+4. Ubuntu 22.04 的 `user@.service` 默认只委派 `pids memory`。把
+   `infra/systemd/sage-rootless-user-delegation.conf` 安装为 sandbox 用户的实例级 drop-in，
+   不要改成影响所有登录用户的全局覆盖：
 
    ```bash
+   install -d -m 0755 /etc/systemd/system/user@1003.service.d
+   install -m 0644 infra/systemd/sage-rootless-user-delegation.conf \
+     /etc/systemd/system/user@1003.service.d/50-sage-rootless-delegation.conf
+   systemctl daemon-reload
+   ```
+
+5. 分别以两个用户运行 `dockerd-rootless-setuptool.sh install`，并启用 user service。安装 drop-in
+   后重启 `sage-sandbox` user manager，再检查控制器与 daemon：
+
+   ```bash
+   systemctl restart user@1003.service
    systemctl --user enable --now docker
+   cat /sys/fs/cgroup/user.slice/user-1003.slice/user@1003.service/cgroup.controllers
    docker info --format '{{.CgroupDriver}} {{json .SecurityOptions}}'
    ```
 
-   两个 daemon 都必须包含 `rootless`；`sage-sandbox` 必须显示 `systemd` cgroup driver，否则
-   CPU、内存和 PID 限制可能被忽略，部署必须阻断。
+   sandbox controller 列表必须包含 `cpu memory pids`；两个 daemon 都必须包含 `rootless`；
+   `sage-sandbox` 必须显示 `systemd` cgroup driver。任一条件不满足时部署必须阻断。
    rootless daemon 稳定运行后，可将 `sage-sandbox` 登录 shell 改为 `/usr/sbin/nologin`。
 
-5. 创建应用目录。仓库和密钥只给 `sage-deploy`；workspace 通过 ACL 只额外给
+6. 创建应用目录。仓库和密钥只给 `sage-deploy`；workspace 通过 ACL 只额外给
    `sage-sandbox`：
 
    ```bash
@@ -54,22 +68,22 @@
    setfacl -m u:sage-sandbox:rwx,d:u:sage-sandbox:rwx /opt/sage/data/workspaces
    ```
 
-6. 把 `infra/systemd/sage-sandbox-proxy.service` 安装到 `/etc/systemd/system/`。该固定代理由
+7. 把 `infra/systemd/sage-sandbox-proxy.service` 安装到 `/etc/systemd/system/`。该固定代理由
    root 启动，但输出 socket 属于 `sage-deploy`、权限 `0600`，只连接独立 sandbox daemon。
    启用后确认：
 
    ```bash
    systemctl enable --now sage-sandbox-proxy.service
-   stat -c '%U %G %a %n' /run/user/1001/sage-sandbox.sock
-   stat -c '%U %G %a %n' /run/user/1002/docker.sock
+   stat -c '%U %G %a %n' /run/user/1002/sage-sandbox.sock
+   stat -c '%U %G %a %n' /run/user/1003/docker.sock
    ```
 
    第二条由 root 在初始化阶段确认。日常预检只让 `sage-deploy` 检查自己的 daemon 和代理
    socket，再通过代理执行 `docker info`；它不需要、也不应获得 sandbox 私有 socket 的目录权限。
 
-7. `sage-deploy` 的 rootless daemon 运行 Compose；`sage-sandbox` daemon 只运行 Coding
+8. `sage-deploy` 的 rootless daemon 运行 Compose；`sage-sandbox` daemon 只运行 Coding
    sandbox。禁止把任一用户加入 `docker` 组，禁止保留 `/var/run/docker.sock` 挂载。
-8. 防火墙只保留受控 SSH 和 Tailscale 所需流量；此阶段不开放 80/443/8000/8080/5432/6379。
+9. 防火墙只保留受控 SSH 和 Tailscale 所需流量；此阶段不开放 80/443/8000/8080/5432/6379。
 
 ## 3. 应用与密钥准备
 
@@ -79,8 +93,11 @@
    `sage-deploy:sage-deploy` 并执行 `chmod 600 /etc/sage/env`。用户在编辑器或控制台中输入，
    不让 Codex/Claude 读取原文。
 3. Tailscale DNS 名写入 `CLOUD_FRONTEND_URL` 和 GitHub OAuth callback。生产不允许 dev login。
-4. 当前首发不启用独立 Worker：保持 `KNOWLEDGE_JOBS_ENABLED=false`。
-5. 首次 migration 完成后，由用户本人在服务器终端创建一次性邀请码。不要截屏、写入群聊或让
+4. 阿里云 ECS 直连 Docker Hub 不稳定时，将 `SAGE_DOCKER_REGISTRY` 保持为
+   `docker.m.daocloud.io`，并使用同源 `SAGE_CODING_SANDBOX_IMAGE`；其他网络环境可以显式改回
+   `docker.io`。不要在服务器临时改 Dockerfile。
+5. 当前首发不启用独立 Worker：保持 `KNOWLEDGE_JOBS_ENABLED=false`。
+6. 首次 migration 完成后，由用户本人在服务器终端创建一次性邀请码。不要截屏、写入群聊或让
    Codex/Claude 读取输出；使用后该邀请码自动失效：
 
    ```bash
@@ -110,11 +127,15 @@ tailscale serve status
 所有命令由 `sage-deploy` 执行，并显式连接它自己的 rootless daemon：
 
 ```bash
-export DOCKER_HOST=unix:///run/user/1001/docker.sock
+export DOCKER_HOST=unix:///run/user/1002/docker.sock
 python scripts/deployctl.py --env-file /etc/sage/env preflight
 python scripts/deployctl.py --env-file /etc/sage/env apply --tag <40位commit-sha>
 python scripts/deployctl.py --env-file /etc/sage/env --execute apply --tag <40位commit-sha>
 ```
+
+`preflight` 会通过 0600 代理启动一个无网络、只读、无 capabilities 的一次性 sandbox，实际验证
+CPU、内存和 PID 限额。探针使用 `--pull=never`，所以要先把 `SAGE_CODING_SANDBOX_IMAGE` 拉到
+独立 sandbox daemon；探针失败时禁止部署。
 
 不加 `--execute` 时只输出计划，不运行构建、迁移或切换。执行路径依次为：预检、构建不可变
 SHA 镜像、启动数据服务、PostgreSQL 备份、幂等 migration、API/Web 健康检查、状态落盘。

@@ -42,6 +42,9 @@ REQUIRED_KEYS = SECRET_KEYS | {
     "POSTGRES_USER",
     "SAGE_API_GID",
     "SAGE_API_UID",
+    "SAGE_CODING_SANDBOX_IMAGE",
+    "SAGE_CODING_SANDBOX_PROVIDER",
+    "SAGE_DOCKER_REGISTRY",
     "SAGE_ROOTLESS_DOCKER_SOCKET",
     "SAGE_SANDBOX_DOCKER_SOCKET",
     "SAGE_SANDBOX_UID",
@@ -184,6 +187,17 @@ def validate_environment(path: Path, values: Mapping[str, str]) -> None:
     for key in ("SAGE_API_UID", "SAGE_API_GID", "SAGE_SANDBOX_UID"):
         if not values[key].isdigit() or not 0 <= int(values[key]) <= 65535:
             raise DeployError(f"{key} 不是有效数字 ID")
+    registry = values["SAGE_DOCKER_REGISTRY"]
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,252}", registry) is None:
+        raise DeployError("SAGE_DOCKER_REGISTRY 不是安全 registry host")
+    sandbox_image = values["SAGE_CODING_SANDBOX_IMAGE"]
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@-]{0,511}", sandbox_image) is None:
+        raise DeployError("SAGE_CODING_SANDBOX_IMAGE 不是安全镜像引用")
+    expected_sandbox_socket = (
+        f"/run/user/{values['SAGE_SANDBOX_UID']}/docker.sock"
+    )
+    if values["SAGE_SANDBOX_DOCKER_SOCKET"] != expected_sandbox_socket:
+        raise DeployError("sandbox daemon 路径与 SAGE_SANDBOX_UID 不一致")
 
 
 def redact(text: str, values: Mapping[str, str]) -> str:
@@ -205,6 +219,35 @@ def deployment_visible_socket_requirements(
         ("部署", deploy_host.removeprefix("unix://"), os.getuid()),
         ("sandbox 代理", proxy_socket, os.getuid()),
     )
+
+
+def sandbox_limit_probe_command(docker_host: str, image: str) -> list[str]:
+    """Build a no-network probe that exercises every required sandbox limit."""
+    return [
+        "docker",
+        "--host",
+        docker_host,
+        "run",
+        "--rm",
+        "--pull=never",
+        "--network",
+        "none",
+        "--read-only",
+        "--pids-limit",
+        "32",
+        "--memory",
+        "64m",
+        "--cpus",
+        "0.25",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        image,
+        "python",
+        "-c",
+        "print('sage-sandbox-limits-ok')",
+    ]
 
 
 class DeployController:
@@ -314,6 +357,15 @@ class DeployController:
                 raise DeployError(f"{label} Docker 不是 rootless 模式")
             if label == "sandbox" and not result.startswith("systemd "):
                 raise DeployError("sandbox Docker 必须使用 systemd cgroup driver")
+
+        self._run(
+            sandbox_limit_probe_command(
+                f"unix://{proxy_socket}",
+                self.values["SAGE_CODING_SANDBOX_IMAGE"],
+            ),
+            label="检查 sandbox CPU、内存和 PID 限额",
+            timeout=60,
+        )
 
         status_result = self._run(
             ["git", "status", "--porcelain"], label="读取 Git 状态"

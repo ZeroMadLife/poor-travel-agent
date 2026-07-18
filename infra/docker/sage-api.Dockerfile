@@ -1,6 +1,7 @@
-FROM docker:27.5.1-cli AS docker-cli
+ARG SAGE_DOCKER_REGISTRY=docker.io
+FROM ${SAGE_DOCKER_REGISTRY}/library/docker:27.5.1-cli AS docker-cli
 
-FROM python:3.12.13-slim-bookworm
+FROM ${SAGE_DOCKER_REGISTRY}/library/python:3.12.13-slim-bookworm
 
 ENV HOME=/tmp \
     PYTHONDONTWRITEBYTECODE=1 \

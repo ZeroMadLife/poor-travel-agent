@@ -11,6 +11,7 @@ from scripts.deployctl import (
     deployment_visible_socket_requirements,
     parse_env_file,
     redact,
+    sandbox_limit_probe_command,
     validate_commit_tag,
     validate_environment,
 )
@@ -35,10 +36,12 @@ def _valid_environment() -> dict[str, str]:
         "REDIS_PASSWORD": secret,
         "SAGE_API_GID": "0",
         "SAGE_API_UID": "0",
+        "SAGE_CODING_SANDBOX_IMAGE": "docker.m.daocloud.io/library/python:3.12-slim",
         "SAGE_CODING_SANDBOX_PROVIDER": "container",
-        "SAGE_ROOTLESS_DOCKER_SOCKET": "/run/user/1001/sage-sandbox.sock",
-        "SAGE_SANDBOX_DOCKER_SOCKET": "/run/user/1002/docker.sock",
-        "SAGE_SANDBOX_UID": "1002",
+        "SAGE_DOCKER_REGISTRY": "docker.m.daocloud.io",
+        "SAGE_ROOTLESS_DOCKER_SOCKET": "/run/user/1002/sage-sandbox.sock",
+        "SAGE_SANDBOX_DOCKER_SOCKET": "/run/user/1003/docker.sock",
+        "SAGE_SANDBOX_UID": "1003",
     }
 
 
@@ -72,6 +75,32 @@ def test_environment_validation_accepts_private_production_file(tmp_path: Path) 
     _write_env(env_file, values)
 
     validate_environment(env_file, parse_env_file(env_file))
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "message"),
+    [
+        ("SAGE_CODING_SANDBOX_IMAGE", "--privileged", "安全镜像引用"),
+        (
+            "SAGE_SANDBOX_DOCKER_SOCKET",
+            "/run/user/1002/docker.sock",
+            "SAGE_SANDBOX_UID",
+        ),
+    ],
+)
+def test_environment_validation_rejects_ambiguous_sandbox_config(
+    tmp_path: Path,
+    key: str,
+    value: str,
+    message: str,
+) -> None:
+    values = _valid_environment()
+    values[key] = value
+    env_file = tmp_path / "env"
+    _write_env(env_file, values)
+
+    with pytest.raises(DeployError, match=message):
+        validate_environment(env_file, parse_env_file(env_file))
 
 
 def test_environment_validation_rejects_a_symlink(tmp_path: Path) -> None:
@@ -130,12 +159,33 @@ def test_redaction_removes_every_configured_secret() -> None:
 
 def test_deploy_user_only_stats_sockets_visible_through_its_runtime() -> None:
     requirements = deployment_visible_socket_requirements(
-        "unix:///run/user/1001/docker.sock",
-        "/run/user/1001/sage-sandbox.sock",
+        "unix:///run/user/1002/docker.sock",
+        "/run/user/1002/sage-sandbox.sock",
     )
 
     assert [path for _, path, _ in requirements] == [
-        "/run/user/1001/docker.sock",
-        "/run/user/1001/sage-sandbox.sock",
+        "/run/user/1002/docker.sock",
+        "/run/user/1002/sage-sandbox.sock",
     ]
-    assert "/run/user/1002/docker.sock" not in {path for _, path, _ in requirements}
+    assert "/run/user/1003/docker.sock" not in {path for _, path, _ in requirements}
+
+
+def test_sandbox_probe_exercises_every_required_limit_without_network() -> None:
+    command = sandbox_limit_probe_command(
+        "unix:///run/user/1002/sage-sandbox.sock",
+        "registry.example/python:3.12-slim",
+    )
+
+    assert command[:4] == [
+        "docker",
+        "--host",
+        "unix:///run/user/1002/sage-sandbox.sock",
+        "run",
+    ]
+    assert "--pull=never" in command
+    assert command[command.index("--network") + 1] == "none"
+    assert command[command.index("--pids-limit") + 1] == "32"
+    assert command[command.index("--memory") + 1] == "64m"
+    assert command[command.index("--cpus") + 1] == "0.25"
+    assert command[command.index("--cap-drop") + 1] == "ALL"
+    assert "no-new-privileges" in command

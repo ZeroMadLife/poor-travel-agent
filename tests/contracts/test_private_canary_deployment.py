@@ -18,6 +18,21 @@ def test_private_canary_exposes_only_the_loopback_gateway() -> None:
     assert "APP_ENV: production" in compose
 
 
+def test_private_canary_environment_template_tracks_server_topology() -> None:
+    template = (ROOT / "infra/env/private-canary.env.example").read_text(
+        encoding="utf-8"
+    )
+
+    assert "SAGE_DOCKER_REGISTRY=docker.m.daocloud.io" in template
+    assert "SAGE_ROOTLESS_DOCKER_SOCKET=/run/user/1002/sage-sandbox.sock" in template
+    assert "SAGE_SANDBOX_DOCKER_SOCKET=/run/user/1003/docker.sock" in template
+    assert "SAGE_SANDBOX_UID=1003" in template
+    assert (
+        "SAGE_CODING_SANDBOX_IMAGE=docker.m.daocloud.io/library/python:3.12-slim"
+        in template
+    )
+
+
 def test_private_canary_requires_a_rootless_sandbox_socket() -> None:
     compose = (ROOT / "infra/compose/private-canary.yml").read_text(encoding="utf-8")
 
@@ -30,7 +45,14 @@ def test_private_canary_requires_a_rootless_sandbox_socket() -> None:
         encoding="utf-8"
     )
     assert "mode=0600,user=sage-deploy,group=sage-deploy" in proxy
-    assert "UNIX-CONNECT:/run/user/1002/docker.sock" in proxy
+    assert "UNIX-CONNECT:/run/user/1003/docker.sock" in proxy
+    assert "ProtectHome=false" in proxy
+    assert "InaccessiblePaths=/home /root" in proxy
+
+    delegation = (ROOT / "infra/systemd/sage-rootless-user-delegation.conf").read_text(
+        encoding="utf-8"
+    )
+    assert "Delegate=cpu cpuset io memory pids" in delegation
 
 
 def test_api_image_uses_the_official_retrying_package_index() -> None:
@@ -40,6 +62,8 @@ def test_api_image_uses_the_official_retrying_package_index() -> None:
     assert "PIP_RETRIES=10" in dockerfile
     assert "pip install --no-cache-dir --upgrade pip" not in dockerfile
     assert "apt-get install --no-install-recommends -y git" in dockerfile
+    assert "ARG SAGE_DOCKER_REGISTRY=docker.io" in dockerfile
+    assert "${SAGE_DOCKER_REGISTRY}/library/python:3.12.13-slim-bookworm" in dockerfile
 
 
 def test_web_image_cannot_disable_the_production_login_gate() -> None:
@@ -49,6 +73,7 @@ def test_web_image_cannot_disable_the_production_login_gate() -> None:
     assert "RUN VITE_CLOUD_AUTH_REQUIRED=true npm run build" in dockerfile
     assert "ARG VITE_CLOUD_AUTH_REQUIRED" not in dockerfile
     assert "VITE_CLOUD_AUTH_REQUIRED:" not in compose
+    assert "SAGE_DOCKER_REGISTRY: ${SAGE_DOCKER_REGISTRY:-docker.io}" in compose
 
 
 def test_production_paths_can_live_on_persistent_volumes(
