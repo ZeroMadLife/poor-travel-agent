@@ -33,7 +33,7 @@ export type CodingConnectionState =
 const OPEN = 1
 const MAX_SEEN_EVENT_IDS = 2_048
 const TIMELINE_KINDS = new Set([
-  'user', 'assistant', 'model', 'tool', 'approval', 'context', 'memory',
+  'user', 'assistant', 'model', 'tool', 'approval', 'context', 'memory', 'proposal',
   'agent', 'terminal', 'system', 'run', 'harness',
 ])
 const TIMELINE_STATUSES = new Set([

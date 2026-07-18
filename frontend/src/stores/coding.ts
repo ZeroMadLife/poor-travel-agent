@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref, toRef } from 'vue'
 import {
+  approveKnowledgeSourceProposal as approveKnowledgeSourceProposalRequest,
   approveCodingPlan,
   approveMemoryProposal,
   buildCodingStreamUrl,
@@ -15,6 +16,8 @@ import {
   fetchCloudModelProviders,
   fetchCodingUsage,
   fetchMemoryProposals,
+  fetchKnowledgeSourceProposal,
+  fetchKnowledgeSourceProposals,
   fetchCodingRun,
   fetchCodingRunDiff,
   fetchCodingRuns,
@@ -26,6 +29,7 @@ import {
   fetchOlderCodingTimeline,
   rejectCodingPlan,
   rejectMemoryProposal,
+  rejectKnowledgeSourceProposal as rejectKnowledgeSourceProposalRequest,
   requestCodingCompaction,
   respondCodingApproval,
   resumeCodingSession,
@@ -44,6 +48,8 @@ import type {
   CodingDiffLine,
   CodingFileEntry,
   CodingGitStatusResponse,
+  CodingKnowledgeSourceProposal,
+  CodingKnowledgeSourceProposalDetail,
   CodingMcpServer,
   CodingModel,
   CodingProviderSettings,
@@ -123,6 +129,9 @@ export type CodingSessionUiState = {
   contextRequestGeneration: number
   memoryRequestGeneration: number
   memoryMutationGeneration: number
+  knowledgeSourceProposalRequestGeneration: number
+  knowledgeSourceProposalMutationGeneration: Record<string, number>
+  knowledgeSourceProposalDetailGeneration: Record<string, number>
   compactionGeneration: number
   modelMutationGeneration: number
   permissionMutationGeneration: number
@@ -151,6 +160,12 @@ export type CodingSessionUiState = {
   memoryProposalBusy: Record<string, boolean>
   memoryProposalError: string
   memoryProposalRefresh: number
+  knowledgeSourceProposals: CodingKnowledgeSourceProposal[]
+  knowledgeSourceProposalDetails: Record<string, CodingKnowledgeSourceProposalDetail>
+  knowledgeSourceProposalBusy: Record<string, boolean>
+  knowledgeSourceProposalDetailBusy: Record<string, boolean>
+  knowledgeSourceProposalError: string
+  knowledgeSourceProposalRefresh: number
 }
 
 function createSessionUiState(): CodingSessionUiState {
@@ -175,6 +190,9 @@ function createSessionUiState(): CodingSessionUiState {
     contextRequestGeneration: 0,
     memoryRequestGeneration: 0,
     memoryMutationGeneration: 0,
+    knowledgeSourceProposalRequestGeneration: 0,
+    knowledgeSourceProposalMutationGeneration: {},
+    knowledgeSourceProposalDetailGeneration: {},
     compactionGeneration: 0,
     modelMutationGeneration: 0,
     permissionMutationGeneration: 0,
@@ -203,6 +221,12 @@ function createSessionUiState(): CodingSessionUiState {
     memoryProposalBusy: {},
     memoryProposalError: '',
     memoryProposalRefresh: 0,
+    knowledgeSourceProposals: [],
+    knowledgeSourceProposalDetails: {},
+    knowledgeSourceProposalBusy: {},
+    knowledgeSourceProposalDetailBusy: {},
+    knowledgeSourceProposalError: '',
+    knowledgeSourceProposalRefresh: 0,
   }
 }
 
@@ -323,6 +347,12 @@ export const useCodingStore = defineStore('coding', () => {
   const memoryProposalBusy = sessionField('memoryProposalBusy')
   const memoryProposalError = sessionField('memoryProposalError')
   const memoryProposalRefresh = sessionField('memoryProposalRefresh')
+  const knowledgeSourceProposals = sessionField('knowledgeSourceProposals')
+  const knowledgeSourceProposalDetails = sessionField('knowledgeSourceProposalDetails')
+  const knowledgeSourceProposalBusy = sessionField('knowledgeSourceProposalBusy')
+  const knowledgeSourceProposalDetailBusy = sessionField('knowledgeSourceProposalDetailBusy')
+  const knowledgeSourceProposalError = sessionField('knowledgeSourceProposalError')
+  const knowledgeSourceProposalRefresh = sessionField('knowledgeSourceProposalRefresh')
   const timeline = sessionField('timeline')
   const olderTimeline = sessionField('olderTimeline')
   const visibleTimeline = computed(() => mergeTimelineEvents(olderTimeline.value, timeline.value))
@@ -390,6 +420,7 @@ export const useCodingStore = defineStore('coding', () => {
   const dirCache = new Map<string, CodingFileEntry[]>()
   const liveRefreshPending = new Set<string>()
   const memoryRefreshPending = new Set<string>()
+  const sourceProposalRefreshPending = new Set<string>()
   const terminalRefreshPending = new Set<string>()
   const scheduledTimeouts = new Set<number>()
   let approvalPollSessionId = ''
@@ -527,6 +558,7 @@ export const useCodingStore = defineStore('coding', () => {
           diffInfoByRun: toRef(state, 'diffInfoByRun'),
           memoryProposals: toRef(state, 'memoryProposals'),
           memoryProposalRefresh: toRef(state, 'memoryProposalRefresh'),
+          knowledgeSourceProposalRefresh: toRef(state, 'knowledgeSourceProposalRefresh'),
         },
         event.payload as unknown as CodingServerEvent,
       )
@@ -552,6 +584,7 @@ export const useCodingStore = defineStore('coding', () => {
       startApprovalPolling(targetSessionId)
     }
     if (effect.memoryProposalReady) scheduleMemoryRefresh(targetSessionId)
+    if (effect.knowledgeSourceProposalReady) scheduleSourceProposalRefresh(targetSessionId)
     if (effect.toolResult && !effect.toolResult.is_error &&
       ['write_file', 'patch_file', 'run_shell'].includes(effect.toolResult.tool)) {
       scheduleWorkspaceRefresh(targetSessionId)
@@ -590,6 +623,15 @@ export const useCodingStore = defineStore('coding', () => {
     schedule(() => {
       memoryRefreshPending.delete(targetSessionId)
       void loadMemoryProposals(targetSessionId)
+    })
+  }
+
+  function scheduleSourceProposalRefresh(targetSessionId: string) {
+    if (sourceProposalRefreshPending.has(targetSessionId)) return
+    sourceProposalRefreshPending.add(targetSessionId)
+    schedule(() => {
+      sourceProposalRefreshPending.delete(targetSessionId)
+      void loadKnowledgeSourceProposals(targetSessionId)
     })
   }
 
@@ -788,6 +830,7 @@ export const useCodingStore = defineStore('coding', () => {
     const targetSessionId = sessionId.value
     const state = ensureSession(targetSessionId)
     void loadMemoryProposals()
+    void loadKnowledgeSourceProposals()
     stream?.disconnect()
     stream = new CodingStream({
       onEvent: handleTimelineEvent,
@@ -840,10 +883,12 @@ export const useCodingStore = defineStore('coding', () => {
         diffInfoByRun,
         memoryProposals,
         memoryProposalRefresh,
+        knowledgeSourceProposalRefresh,
       },
       event,
     )
     if (effect.memoryProposalReady) void loadMemoryProposals()
+    if (effect.knowledgeSourceProposalReady) void loadKnowledgeSourceProposals()
     if (event.type === 'turn_finished') {
       schedule(() => void loadContext(targetSessionId))
     }
@@ -1311,6 +1356,123 @@ export const useCodingStore = defineStore('coding', () => {
     return transitionMemoryProposal(proposalId, expectedRevision, 'reject')
   }
 
+  async function loadKnowledgeSourceProposals(targetSessionId = sessionId.value) {
+    if (!targetSessionId) return
+    const state = ensureSession(targetSessionId)
+    const generation = ++state.knowledgeSourceProposalRequestGeneration
+    try {
+      const response = await fetchKnowledgeSourceProposals(targetSessionId, null)
+      if (generation !== state.knowledgeSourceProposalRequestGeneration) return
+      state.knowledgeSourceProposals = response.proposals
+        .filter((proposal) => proposal.status === 'pending' || proposal.status === 'applying')
+        .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at))
+      state.knowledgeSourceProposalError = ''
+    } catch (error) {
+      if (generation === state.knowledgeSourceProposalRequestGeneration) {
+        state.knowledgeSourceProposalError = error instanceof Error ? error.message : String(error)
+      }
+    }
+  }
+
+  async function loadKnowledgeSourceProposalDetail(
+    proposalId: string,
+    targetSessionId = sessionId.value,
+  ) {
+    if (!targetSessionId || !proposalId) return
+    const state = ensureSession(targetSessionId)
+    const generation = (state.knowledgeSourceProposalDetailGeneration[proposalId] ?? 0) + 1
+    state.knowledgeSourceProposalDetailGeneration = {
+      ...state.knowledgeSourceProposalDetailGeneration,
+      [proposalId]: generation,
+    }
+    state.knowledgeSourceProposalDetailBusy = {
+      ...state.knowledgeSourceProposalDetailBusy,
+      [proposalId]: true,
+    }
+    try {
+      const detail = await fetchKnowledgeSourceProposal(targetSessionId, proposalId)
+      if (state.knowledgeSourceProposalDetailGeneration[proposalId] !== generation) return
+      state.knowledgeSourceProposalDetails = {
+        ...state.knowledgeSourceProposalDetails,
+        [proposalId]: detail,
+      }
+      state.knowledgeSourceProposalError = ''
+    } catch (error) {
+      if (state.knowledgeSourceProposalDetailGeneration[proposalId] === generation) {
+        state.knowledgeSourceProposalError = error instanceof Error ? error.message : String(error)
+      }
+    } finally {
+      if (state.knowledgeSourceProposalDetailGeneration[proposalId] !== generation) return
+      const next = { ...state.knowledgeSourceProposalDetailBusy }
+      delete next[proposalId]
+      state.knowledgeSourceProposalDetailBusy = next
+    }
+  }
+
+  async function transitionKnowledgeSourceProposal(
+    proposalId: string,
+    expectedRevision: number,
+    action: 'approve' | 'reject',
+  ) {
+    if (!sessionId.value || !proposalId) return
+    const targetSessionId = sessionId.value
+    const state = ensureSession(targetSessionId)
+    if (state.knowledgeSourceProposalBusy[proposalId]) return
+    const generation = (state.knowledgeSourceProposalMutationGeneration[proposalId] ?? 0) + 1
+    state.knowledgeSourceProposalMutationGeneration = {
+      ...state.knowledgeSourceProposalMutationGeneration,
+      [proposalId]: generation,
+    }
+    state.knowledgeSourceProposalBusy = {
+      ...state.knowledgeSourceProposalBusy,
+      [proposalId]: true,
+    }
+    state.knowledgeSourceProposalError = ''
+    try {
+      let transitioned: CodingKnowledgeSourceProposal
+      if (action === 'approve') {
+        transitioned = await approveKnowledgeSourceProposalRequest(
+          targetSessionId, proposalId, expectedRevision,
+        )
+      } else {
+        transitioned = await rejectKnowledgeSourceProposalRequest(
+          targetSessionId, proposalId, expectedRevision,
+        )
+      }
+      if (state.knowledgeSourceProposalMutationGeneration[proposalId] !== generation) return
+      state.knowledgeSourceProposalRequestGeneration += 1
+      if (transitioned.status === 'pending' || transitioned.status === 'applying') {
+        state.knowledgeSourceProposals = state.knowledgeSourceProposals.map(
+          (proposal) => proposal.proposal_id === proposalId ? transitioned : proposal,
+        )
+      } else {
+        state.knowledgeSourceProposals = state.knowledgeSourceProposals.filter(
+          (proposal) => proposal.proposal_id !== proposalId,
+        )
+      }
+      const details = { ...state.knowledgeSourceProposalDetails }
+      delete details[proposalId]
+      state.knowledgeSourceProposalDetails = details
+    } catch (error) {
+      if (state.knowledgeSourceProposalMutationGeneration[proposalId] === generation) {
+        state.knowledgeSourceProposalError = error instanceof Error ? error.message : String(error)
+      }
+    } finally {
+      if (state.knowledgeSourceProposalMutationGeneration[proposalId] !== generation) return
+      const next = { ...state.knowledgeSourceProposalBusy }
+      delete next[proposalId]
+      state.knowledgeSourceProposalBusy = next
+    }
+  }
+
+  function approveKnowledgeSourceProposalAction(proposalId: string, expectedRevision: number) {
+    return transitionKnowledgeSourceProposal(proposalId, expectedRevision, 'approve')
+  }
+
+  function rejectKnowledgeSourceProposalAction(proposalId: string, expectedRevision: number) {
+    return transitionKnowledgeSourceProposal(proposalId, expectedRevision, 'reject')
+  }
+
   async function loadSessions() {
     const generation = ++sessionsRequestGeneration
     try {
@@ -1714,6 +1876,11 @@ export const useCodingStore = defineStore('coding', () => {
     memoryProposals,
     memoryProposalBusy,
     memoryProposalError,
+    knowledgeSourceProposals,
+    knowledgeSourceProposalDetails,
+    knowledgeSourceProposalBusy,
+    knowledgeSourceProposalDetailBusy,
+    knowledgeSourceProposalError,
     skills,
     mcpServers,
     models,
@@ -1773,6 +1940,10 @@ export const useCodingStore = defineStore('coding', () => {
     loadMemoryProposals,
     approveMemoryProposal: approveMemoryProposalAction,
     rejectMemoryProposal: rejectMemoryProposalAction,
+    loadKnowledgeSourceProposals,
+    loadKnowledgeSourceProposalDetail,
+    approveKnowledgeSourceProposal: approveKnowledgeSourceProposalAction,
+    rejectKnowledgeSourceProposal: rejectKnowledgeSourceProposalAction,
     loadRunDetail,
     loadRunDiff,
     openDiffDrawer,

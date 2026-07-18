@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {
   Activity,
+  AlertCircle,
   BarChart3,
   BookOpen,
   Braces,
@@ -24,6 +25,10 @@ import {
 import { computed } from 'vue'
 import type { CodingConnectionState } from '../../../stores/codingStream'
 import type {
+  CodingKnowledgeSourceProposal,
+  CodingKnowledgeSourceProposalDetail,
+} from '../../../types/api'
+import type {
   HarnessOperationRef,
   HarnessProjection,
   HarnessStageStatus,
@@ -38,11 +43,21 @@ const props = withDefaults(defineProps<{
   toolCallCount?: number
   reviewBundle?: HarnessReviewBundleViewModel | null
   depositBusy?: boolean
+  sourceProposals?: readonly CodingKnowledgeSourceProposal[]
+  sourceDetails?: Readonly<Record<string, CodingKnowledgeSourceProposalDetail | undefined>>
+  sourceBusy?: Readonly<Record<string, boolean | undefined>>
+  sourceDetailBusy?: Readonly<Record<string, boolean | undefined>>
+  sourceError?: string
   connectionState?: CodingConnectionState
 }>(), {
   toolCallCount: 0,
   reviewBundle: null,
   depositBusy: false,
+  sourceProposals: () => [],
+  sourceDetails: () => ({}),
+  sourceBusy: () => ({}),
+  sourceDetailBusy: () => ({}),
+  sourceError: '',
   connectionState: 'idle',
 })
 
@@ -50,6 +65,9 @@ const emit = defineEmits<{
   openOperation: [operation: HarnessOperationRef]
   approveDeposit: [proposalId: string, revision: number]
   rejectDeposit: [proposalId: string, revision: number]
+  approveSource: [proposalId: string, revision: number]
+  rejectSource: [proposalId: string, revision: number]
+  loadSourceDetail: [proposalId: string]
 }>()
 
 const statusLabel = computed(() => ({
@@ -63,7 +81,7 @@ const statusLabel = computed(() => ({
 type LearningJourney = 'contract' | 'active' | 'review' | 'recovery'
 const journey = computed<LearningJourney>(() => {
   if (props.connectionState === 'recovering') return 'recovery'
-  if (props.reviewBundle?.deposit.status === 'review') return 'review'
+  if (props.reviewBundle?.deposit.status === 'review' || props.sourceProposals.length) return 'review'
   if (!props.projection.runId && props.projection.status === 'idle') return 'contract'
   return 'active'
 })
@@ -160,6 +178,7 @@ function eventTime(value?: string) {
     </header>
 
     <div class="journey-canvas">
+      <p v-if="sourceError && !sourceProposals.length" class="source-review-error" role="alert"><AlertCircle :size="14" />{{ sourceError }}</p>
       <section v-if="journey === 'contract'" class="journey-surface contract-surface">
         <header class="surface-heading">
           <p><Target :size="15" />Goal Contract</p>
@@ -196,8 +215,16 @@ function eventTime(value?: string) {
           v-if="reviewBundle"
           :bundle="reviewBundle"
           :deposit-busy="depositBusy"
+          :source-proposals="sourceProposals"
+          :source-details="sourceDetails"
+          :source-busy="sourceBusy"
+          :source-detail-busy="sourceDetailBusy"
+          :source-error="sourceError"
           @approve-deposit="emit('approveDeposit', $event, reviewBundle.deposit.revision)"
           @reject-deposit="emit('rejectDeposit', $event, reviewBundle.deposit.revision)"
+          @approve-source="emit('approveSource', $event, sourceProposals.find((item) => item.proposal_id === $event)?.revision ?? 0)"
+          @reject-source="emit('rejectSource', $event, sourceProposals.find((item) => item.proposal_id === $event)?.revision ?? 0)"
+          @load-source-detail="emit('loadSourceDetail', $event)"
         />
       </section>
 
@@ -251,6 +278,7 @@ function eventTime(value?: string) {
 .workbench-title { display:flex; align-items:center; gap:9px; min-width:0; }.workbench-mark { display:grid; place-items:center; flex:none; width:30px; height:30px; border:1px solid var(--sage-border); border-radius:var(--sage-radius); color:var(--sage-text-muted); background:var(--sage-surface-raised); }.workbench-mark.running,.workbench-mark.completed { color:var(--sage-success); }.workbench-mark.blocked { color:var(--sage-warning); }.workbench-mark.failed,.workbench-mark.cancelled { color:var(--sage-danger); }.workbench-title-copy { display:grid; min-width:0; }.workbench-title-copy strong { font-size:var(--sage-font-md); }.workbench-title-copy span { max-width:220px; overflow:hidden; color:var(--sage-text-muted); font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
 .workbench-metrics { display:flex; align-self:stretch; min-width:0; margin:0 0 0 auto; }.workbench-metrics>div { display:grid; align-content:center; min-width:66px; padding:0 9px; border-left:1px solid var(--sage-border); }.workbench-metrics dt,.workbench-metrics dd { margin:0; }.workbench-metrics dt { display:flex; align-items:center; gap:4px; color:var(--sage-text-muted); font-size:9px; }.workbench-metrics dd { margin-top:2px; color:var(--sage-text-secondary); font-family:var(--sage-font-mono); font-size:var(--sage-font-xs); }.metric-state.running dd,.metric-state.completed dd { color:var(--sage-success); }.metric-state.blocked dd { color:var(--sage-warning); }.metric-state.failed dd,.metric-state.cancelled dd { color:var(--sage-danger); }.workbench-metrics .metric-context { min-width:130px; max-width:190px; }.metric-context dd { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .journey-canvas { min-width:0; min-height:0; overflow:auto; scrollbar-gutter:stable; }
+.source-review-error { display:flex; align-items:center; gap:7px; margin:0; padding:8px 14px; border-bottom:1px solid color-mix(in srgb,var(--sage-danger) 35%,var(--sage-border)); color:var(--sage-danger); background:var(--sage-danger-bg); font-size:10px; }
 .journey-surface { min-height:100%; padding:clamp(22px,3vw,40px) clamp(20px,3.5vw,46px) 34px; }
 .surface-heading p,.goal-heading p { display:flex; align-items:center; gap:7px; margin:0 0 7px; color:var(--sage-brand-strong); font-size:10px; font-weight:750; text-transform:uppercase; }.surface-heading h1,.goal-heading h1 { margin:0; color:var(--sage-text); font-size:clamp(21px,2.35cqw,28px); line-height:1.22; letter-spacing:0; }.surface-heading>span,.goal-heading>div>span { display:block; max-width:760px; margin-top:7px; color:var(--sage-text-muted); font-size:var(--sage-font-xs); line-height:1.55; }
 .goal-heading { display:grid; grid-template-columns:minmax(0,1fr) 150px; align-items:start; gap:24px; padding-bottom:20px; border-bottom:1px solid var(--sage-border); }.evidence-summary { display:grid; align-content:center; min-height:72px; padding-left:16px; border-left:1px solid var(--sage-border); }.evidence-summary small,.evidence-summary span { color:var(--sage-text-muted); font-size:9px; }.evidence-summary strong { margin:3px 0; color:var(--sage-text-secondary); font-size:16px; }.evidence-summary span { margin:0; }

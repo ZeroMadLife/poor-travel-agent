@@ -130,6 +130,26 @@ describe('CodingStream', () => {
     expect(onEvent).toHaveBeenCalledWith('coding_1', event)
   })
 
+  it('forwards browser-safe knowledge proposal envelopes', () => {
+    const socket = new FakeSocket()
+    const onEvent = vi.fn()
+    const stream = new CodingStream({ createSocket: () => socket, onEvent, onError: vi.fn() })
+    const event: CodingTimelineEvent = {
+      ...envelope(2),
+      kind: 'proposal',
+      status: 'pending',
+      payload: {
+        type: 'knowledge_source_proposal_created', proposal_id: 'ksprop_1',
+        content_hash: 'a'.repeat(64), revision: 1, requires_user_confirmation: true,
+      },
+    }
+
+    stream.connect('coding_1', 'ws://local/stream')
+    socket.emit(event)
+
+    expect(onEvent).toHaveBeenCalledWith('coding_1', event)
+  })
+
   it('disconnect closes the active socket and prevents sending', () => {
     const sockets: FakeSocket[] = []
     const stream = new CodingStream({

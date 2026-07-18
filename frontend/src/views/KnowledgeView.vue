@@ -56,7 +56,12 @@ import {
   shortestGraphPath,
   type KnowledgeGraphScopeMode,
 } from '../components/knowledge/knowledgeGraphPresentation'
-import { ChatConversation, ChatDock, ChatHarnessLayout } from '../components/harness'
+import {
+  ChatConversation,
+  ChatDock,
+  ChatHarnessLayout,
+  KnowledgeSourceProposalReviewList,
+} from '../components/harness'
 import { CodingApprovalCard, CodingComposer, CodingPlanApproval } from '../components/coding'
 import { projectLatestCodingHarness } from '../harness/surfaces/coding'
 import { knowledgeSurfaceAdapter } from '../harness/surfaces/knowledge'
@@ -961,13 +966,28 @@ onBeforeUnmount(() => {
             empty-description="选择节点后提问，本轮会冻结 graph、page 与 revision。"
             @anchor-change="chat.setScrollAnchor"
           >
-            <template v-if="chat.pendingApproval" #attention>
-              <CodingApprovalCard
-                :approval="chat.pendingApproval"
-                :busy="chat.approvalBusy"
-                compact
-                @respond="chat.respondApproval"
-              />
+            <template v-if="chat.pendingApproval || chat.knowledgeSourceProposals.length || chat.knowledgeSourceProposalError" #attention>
+              <div class="knowledge-chat-attention">
+                <CodingApprovalCard
+                  v-if="chat.pendingApproval"
+                  :approval="chat.pendingApproval"
+                  :busy="chat.approvalBusy"
+                  compact
+                  @respond="chat.respondApproval"
+                />
+                <KnowledgeSourceProposalReviewList
+                  v-if="chat.knowledgeSourceProposals.length || chat.knowledgeSourceProposalError"
+                  :proposals="chat.knowledgeSourceProposals"
+                  :details="chat.knowledgeSourceProposalDetails"
+                  :busy="chat.knowledgeSourceProposalBusy"
+                  :detail-busy="chat.knowledgeSourceProposalDetailBusy"
+                  :error="chat.knowledgeSourceProposalError"
+                  compact
+                  @approve="chat.approveKnowledgeSourceProposal"
+                  @reject="chat.rejectKnowledgeSourceProposal"
+                  @load-detail="chat.loadKnowledgeSourceProposalDetail"
+                />
+              </div>
             </template>
             <ChatConversation
               :legacy-messages="chat.legacyMessages"
@@ -1112,6 +1132,7 @@ onBeforeUnmount(() => {
 .workspace-footer { display:flex; align-items:center; gap:18px; min-width:0; padding:0 14px; border-top:1px solid var(--sage-border); color:var(--sage-text-muted); background:var(--sage-surface); font-size:11px; }.workspace-footer span { display:flex; align-items:center; gap:5px; white-space:nowrap; }.workspace-footer i { width:7px; height:7px; border-radius:50%; background:var(--sage-success); }.workspace-footer i.active { background:var(--sage-review); }.footer-spacer { flex:1; }
 .panel-backdrop,.modal-backdrop { position:fixed; z-index:54; inset:0; background:var(--sage-overlay); }.modal-backdrop { z-index:80; display:grid; place-items:center; padding:20px; }.import-dialog { width:min(680px,100%); max-height:min(720px,calc(100dvh - 40px)); overflow:auto; border:1px solid var(--sage-border); border-radius:var(--sage-radius-lg); background:var(--sage-surface); box-shadow:var(--sage-shadow-drawer); }.import-dialog>header,.import-dialog>header>div { display:flex; align-items:flex-start; }.import-dialog>header { justify-content:space-between; gap:14px; padding:18px 20px; border-bottom:1px solid var(--sage-border); }.import-dialog>header>div { gap:11px; }.import-dialog>header>div>span { display:grid; place-items:center; width:34px; height:34px; border-radius:var(--sage-radius); color:var(--sage-brand-strong); background:var(--sage-brand-bg); }.import-dialog h2 { margin:0; font-size:18px; }.import-dialog header p { margin:3px 0 0; color:var(--sage-text-muted); font-size:var(--sage-font-xs); }.field-label { display:grid; gap:6px; margin:16px 20px; color:var(--sage-text-secondary); font-size:var(--sage-font-xs); }.field-label select,.import-options input { min-width:0; height:38px; border:1px solid var(--sage-border); border-radius:var(--sage-radius); padding:0 10px; outline:0; color:var(--sage-text); background:var(--sage-surface); }.field-label select:focus,.import-options input:focus { border-color:var(--sage-source); }.import-options { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; padding:0 20px 20px; }.import-options form { display:grid; grid-template-rows:auto auto auto auto; align-content:start; gap:10px; padding:15px; border:1px solid var(--sage-border); border-radius:var(--sage-radius); }.import-options form>svg { color:var(--sage-source); }.import-options strong { font-size:var(--sage-font-md); }.import-options p { min-height:38px; margin:3px 0 0; color:var(--sage-text-muted); font-size:var(--sage-font-xs); line-height:1.5; }.import-dialog>footer { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:12px 20px; border-top:1px solid var(--sage-border); color:var(--sage-text-muted); background:var(--sage-surface-muted); font-size:11px; }.import-dialog>footer span { display:flex; align-items:center; gap:5px; }.import-dialog>footer p { margin:0; text-align:right; }
 .sync-preview { display:grid; gap:9px; min-width:0; padding:11px; border:1px solid var(--sage-border); border-radius:var(--sage-radius); background:var(--sage-surface-muted); }.sync-preview>header { display:flex; align-items:center; justify-content:space-between; gap:8px; }.sync-preview>header strong { display:flex; align-items:center; gap:5px; font-size:var(--sage-font-sm); }.sync-preview>header code,.sync-preview>small { color:var(--sage-text-muted); font-size:10px; }.sync-counts { display:flex; flex-wrap:wrap; gap:6px; }.sync-counts span { padding:3px 6px; border:1px solid var(--sage-border); border-radius:var(--sage-radius-sm); color:var(--sage-text-secondary); background:var(--sage-surface); font-size:10px; }.sync-preview ul { max-height:150px; overflow:auto; margin:0; padding:0; list-style:none; }.sync-preview li { display:grid; grid-template-columns:34px minmax(0,1fr); align-items:center; gap:7px; min-height:28px; border-top:1px solid var(--sage-border); }.sync-preview li em { color:var(--sage-source); font-size:10px; font-style:normal; }.sync-preview li em[data-kind="deleted"] { color:var(--sage-danger); }.sync-preview li em[data-kind="modified"] { color:var(--sage-review-strong); }.sync-preview li code { overflow:hidden; color:var(--sage-text-secondary); font-size:10px; text-overflow:ellipsis; white-space:nowrap; }.sync-preview>.primary-button { width:100%; }
+.knowledge-chat-attention { display:grid; min-width:0; background:var(--sage-surface); }.knowledge-chat-attention>*+* { border-top:1px solid var(--sage-border); }
 .knowledge-chat-empty { display:flex; min-height:100%; flex-direction:column; align-items:center; justify-content:center; gap:7px; padding:24px; color:var(--sage-text-muted); text-align:center; }.knowledge-chat-empty strong { color:var(--sage-text-secondary); font-size:var(--sage-font-md); }.knowledge-chat-empty span { max-width:280px; font-size:var(--sage-font-sm); line-height:1.55; }.knowledge-chat-empty button { min-height:34px; margin-top:7px; padding:0 12px; border:1px solid var(--sage-border-strong); border-radius:var(--sage-radius); color:var(--sage-surface); background:var(--sage-brand-strong); font-size:var(--sage-font-sm); }.knowledge-chat-empty button:disabled { color:var(--sage-text-muted); background:var(--sage-surface-muted); }
 .spinning { animation:spin .9s linear infinite; }@keyframes spin { to { transform:rotate(360deg); } }
 @media (max-width:1359px) {

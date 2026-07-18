@@ -190,7 +190,7 @@ function handleAnchorChange(eventId: string, offset: number) {
 .run-stage-track i.running { background: var(--sage-success); }
 .run-stage-track i.blocked { background: var(--sage-warning); }
 .run-stage-track i.failed,.run-stage-track i.cancelled { background: var(--sage-danger); }
-.chat-attention { min-width: 0; border-bottom: 1px solid color-mix(in srgb, var(--sage-warning) 48%, var(--sage-border)); background: var(--sage-warning-bg); }
+.chat-attention { min-width: 0; max-height:min(44dvh,420px); overflow:auto; border-bottom: 1px solid color-mix(in srgb, var(--sage-warning) 48%, var(--sage-border)); background: var(--sage-warning-bg); }
 .chat-dock-timeline { padding: 14px 12px 16px; }
 .chat-dock-composer { min-width: 0; }
 .surface-context-bar { display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 28px; padding: 5px 11px; border-top: 1px solid var(--sage-border); color: var(--sage-text-muted); font-size: 10px; }
