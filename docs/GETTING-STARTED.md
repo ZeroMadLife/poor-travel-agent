@@ -14,6 +14,9 @@
 python3 --version
 # 预期输出: Python 3.12.x 或更高
 
+# uv（负责创建统一的项目 .venv）
+uv --version
+
 # Docker + Docker Compose
 docker --version
 docker compose version
@@ -28,8 +31,12 @@ node --version
 
 ```bash
 cd /Users/zeromadlife/Desktop/tour-agent
-pip install -r requirements.txt
+bash scripts/bootstrap-dev-env.sh
+source .venv/bin/activate
 ```
+
+PyCharm 和 VS Code 都应选择项目内的 `.venv/bin/python`。Harness 2.0 依赖
+Python 3.12 与 LangChain 1.x，旧的 `tour-agent-phase1` Python 3.11 环境不再兼容。
 
 ### 1.3 验证代码质量工具链
 
