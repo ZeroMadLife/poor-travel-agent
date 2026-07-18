@@ -8,9 +8,32 @@ export interface CloudUser {
   display_name: string
 }
 
+export interface CloudAuthOptions {
+  canary_invite_login: boolean
+  github_login: boolean
+}
+
+const defaultOptions: CloudAuthOptions = {
+  canary_invite_login: false,
+  github_login: true,
+}
+
 export function useCloudAuth() {
   const user = ref<CloudUser | null>(null)
   const error = ref('')
+
+  async function options(): Promise<CloudAuthOptions> {
+    try {
+      const response = await fetch(new URL('/api/v1/cloud/auth/options', API_BASE_URL), {
+        credentials: 'include',
+        headers: { Accept: 'application/json' },
+      })
+      if (!response.ok) return defaultOptions
+      return (await response.json()) as CloudAuthOptions
+    } catch {
+      return defaultOptions
+    }
+  }
 
   async function check(): Promise<boolean> {
     try {
@@ -51,5 +74,21 @@ export function useCloudAuth() {
     return authorizationUrl.toString()
   }
 
-  return { user, error, check, startGitHubLogin }
+  async function loginWithInvite(inviteCode: string, deviceName: string): Promise<CloudUser> {
+    error.value = ''
+    const response = await fetch(new URL('/api/v1/cloud/auth/canary/login', API_BASE_URL), {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ invite_code: inviteCode, device_name: deviceName }),
+    })
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => ({}))) as { detail?: string }
+      throw new Error(payload.detail || '邀请码登录暂时不可用')
+    }
+    user.value = (await response.json()) as CloudUser
+    return user.value
+  }
+
+  return { user, error, check, options, loginWithInvite, startGitHubLogin }
 }

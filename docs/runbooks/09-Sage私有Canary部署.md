@@ -92,21 +92,36 @@
 2. 复制 `infra/env/private-canary.env.example` 到 `/etc/sage/env`，写入真实值后让文件归属
    `sage-deploy:sage-deploy` 并执行 `chmod 600 /etc/sage/env`。用户在编辑器或控制台中输入，
    不让 Codex/Claude 读取原文。
-3. Tailscale DNS 名写入 `CLOUD_FRONTEND_URL` 和 GitHub OAuth callback。生产不允许 dev login。
+3. Tailscale DNS 名写入 `CLOUD_FRONTEND_URL` 和 GitHub OAuth callback。私有阶段显式设置
+   `CLOUD_CANARY_INVITE_LOGIN_ENABLED=true`，生产不允许 dev login；非 `.ts.net` 地址误开
+   Canary 邀请登录时 API 必须拒绝启动。
 4. 阿里云 ECS 直连 Docker Hub 不稳定时，将 `SAGE_DOCKER_REGISTRY` 保持为
    `docker.m.daocloud.io`，并使用同源 `SAGE_CODING_SANDBOX_IMAGE`；其他网络环境可以显式改回
    `docker.io`。不要在服务器临时改 Dockerfile。
 5. 当前首发不启用独立 Worker：保持 `KNOWLEDGE_JOBS_ENABLED=false`。
 6. 首次 migration 完成后，由用户本人在服务器终端创建一次性邀请码。不要截屏、写入群聊或让
-   Codex/Claude 读取输出；使用后该邀请码自动失效：
+   Codex/Claude 读取输出；使用后该邀请码自动失效，并换取当前设备 30 天的 HttpOnly session：
 
    ```bash
    docker compose --env-file /etc/sage/env -f infra/compose/private-canary.yml \
-     exec -T api python -m core.cloud.auth.cli create-invite --email <GitHub主邮箱>
+     exec -T api python -m core.cloud.auth.cli create-invite --email <账号邮箱>
    ```
 
-   如果不传 `--email`，任何拿到邀请码且能完成 GitHub OAuth 的人都能首次注册，因此私有
-   Canary 默认必须绑定邮箱。
+   私有 Canary 直接登录只接受绑定邮箱的邀请码，同一邮箱最多保留 3 个活动设备。新增设备时
+   再创建一个绑定同邮箱的邀请码；GitHub OAuth 后续接入时复用同一账号，不新建重复用户。
+
+7. 丢失设备或停止体验时，运维人员使用以下命令查看、撤销或停用。命令只显示设备元数据，
+   不显示 session token：
+
+   ```bash
+   docker compose --env-file /etc/sage/env -f infra/compose/private-canary.yml \
+     exec -T api python -m core.cloud.auth.cli list-devices --email <账号邮箱>
+   docker compose --env-file /etc/sage/env -f infra/compose/private-canary.yml \
+     exec -T api python -m core.cloud.auth.cli revoke-device \
+     --email <账号邮箱> --session-id <设备会话ID>
+   docker compose --env-file /etc/sage/env -f infra/compose/private-canary.yml \
+     exec -T api python -m core.cloud.auth.cli disable-account --email <账号邮箱>
+   ```
 
 ## 4. Tailscale 私有入口
 

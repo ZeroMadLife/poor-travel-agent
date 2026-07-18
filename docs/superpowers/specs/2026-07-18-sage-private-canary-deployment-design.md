@@ -83,8 +83,10 @@ sagecompanion.cn -> Caddy 80/443 -> 同一内部 Compose 网络
 
 - Tailscale ACL 是网络第一层，只允许用户自己的 Mac、手机和服务器节点。
 - Sage 仍使用服务端 session；不把 Tailnet 身份当作应用 user ID。
-- Canary 可先关闭公开注册，但不允许匿名创建 Coding Session；测试账号使用明确的
-  本地 invite/dev 方式，仅在私有入口存在期间启用。
+- Canary 关闭公开注册，使用绑定邮箱的一次性邀请码直接换取 30 天 HttpOnly、Secure、
+  SameSite session；同一账号最多 3 台活动设备，支持单设备撤销和整账号停用。
+- 该登录方式只能在显式开关开启且 `CLOUD_FRONTEND_URL` 为 `.ts.net` 私有入口时启动；正式
+  公网默认关闭。GitHub OAuth 后续绑定同邮箱时复用原账号。
 - 手机 smoke test 必须从蜂窝网络执行，验证 Tailnet 外无法访问。
 
 ### 正式公网

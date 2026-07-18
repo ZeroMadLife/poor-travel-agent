@@ -62,6 +62,53 @@ describe('useCloudAuth', () => {
     )
   })
 
+  it('exchanges an invite for a same-origin device session', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          user_id: 'user-1',
+          email: 'owner@example.com',
+          display_name: 'owner',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { loginWithInvite, user } = useCloudAuth()
+    const loggedIn = await loginWithInvite('one-time-code', 'iPhone Safari')
+
+    expect(loggedIn.email).toBe('owner@example.com')
+    expect(user.value).toEqual(loggedIn)
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.objectContaining({ pathname: '/api/v1/cloud/auth/canary/login' }),
+      expect.objectContaining({
+        method: 'POST',
+        credentials: 'include',
+        body: JSON.stringify({ invite_code: 'one-time-code', device_name: 'iPhone Safari' }),
+      }),
+    )
+  })
+
+  it('reads the enabled login methods from the server', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({ canary_invite_login: true, github_login: true }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      ),
+    )
+
+    const { options } = useCloudAuth()
+
+    await expect(options()).resolves.toEqual({
+      canary_invite_login: true,
+      github_login: true,
+    })
+  })
+
   it('rejects a non-GitHub authorization URL', async () => {
     vi.stubGlobal(
       'fetch',

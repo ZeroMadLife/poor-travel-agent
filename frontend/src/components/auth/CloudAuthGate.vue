@@ -1,28 +1,66 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { KeyRound, LogIn, LoaderCircle } from 'lucide-vue-next'
+import { computed, onMounted, ref } from 'vue'
+import { Github, KeyRound, LogIn, LoaderCircle } from 'lucide-vue-next'
 import { useRoute } from 'vue-router'
 import { useCloudAuth } from '../../composables/useCloudAuth'
 
 defineProps<{ checking: boolean }>()
+const emit = defineEmits<{ authenticated: [] }>()
 const route = useRoute()
-const { startGitHubLogin } = useCloudAuth()
+const { loginWithInvite, options, startGitHubLogin } = useCloudAuth()
 const inviteCode = ref('')
 const error = ref('')
 const submitting = ref(false)
+const githubSubmitting = ref(false)
+const methodsChecking = ref(true)
+const canaryInviteLogin = ref(false)
+const githubLogin = ref(true)
 const returnTo = computed(() => `/#${route.fullPath}`)
+const busy = computed(() => submitting.value || githubSubmitting.value)
+
+onMounted(async () => {
+  try {
+    const enabled = await options()
+    canaryInviteLogin.value = enabled.canary_invite_login
+    githubLogin.value = enabled.github_login
+  } finally {
+    methodsChecking.value = false
+  }
+})
+
+function deviceName(): string {
+  const userAgent = navigator.userAgent
+  if (/iPhone/i.test(userAgent)) return 'iPhone Safari'
+  if (/iPad/i.test(userAgent)) return 'iPad Safari'
+  if (/Android/i.test(userAgent)) return 'Android 浏览器'
+  const platform = navigator.platform?.trim()
+  return platform ? `${platform} 浏览器` : '浏览器设备'
+}
 
 async function submit() {
-  if (!inviteCode.value.trim() || submitting.value) return
+  if (!inviteCode.value.trim() || busy.value) return
   submitting.value = true
+  error.value = ''
+  try {
+    await loginWithInvite(inviteCode.value.trim(), deviceName())
+    emit('authenticated')
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : '登录失败，请稍后重试'
+  } finally {
+    submitting.value = false
+  }
+}
+
+async function submitGitHub() {
+  if (!inviteCode.value.trim() || busy.value) return
+  githubSubmitting.value = true
   error.value = ''
   try {
     const authorizationUrl = await startGitHubLogin(inviteCode.value.trim(), returnTo.value)
     window.location.assign(authorizationUrl)
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : '登录失败，请稍后重试'
-  } finally {
-    submitting.value = false
+    error.value = cause instanceof Error ? cause.message : 'GitHub 登录失败，请稍后重试'
+    githubSubmitting.value = false
   }
 }
 </script>
@@ -35,26 +73,37 @@ async function submit() {
       </div>
       <p class="cloud-auth-eyebrow">SAGE PRIVATE CANARY</p>
       <h1 id="cloud-auth-title">登录 Sage</h1>
-      <p class="cloud-auth-copy">这是邀请制私有环境，请输入邀请码后使用 GitHub 完成登录。</p>
+      <p class="cloud-auth-copy">这是邀请制私有环境。首次输入邀请码，之后此设备会保持登录。</p>
 
-      <div v-if="checking" class="cloud-auth-checking" role="status">
+      <div v-if="checking || methodsChecking" class="cloud-auth-checking" role="status">
         <LoaderCircle class="cloud-auth-spinner" :size="18" />
-        <span>正在检查登录状态</span>
+        <span>{{ checking ? '正在检查登录状态' : '正在准备登录方式' }}</span>
       </div>
-      <form v-else class="cloud-auth-form" @submit.prevent="submit">
+      <form v-else class="cloud-auth-form" @submit.prevent="canaryInviteLogin ? submit() : submitGitHub()">
         <label for="cloud-invite-code">邀请码</label>
         <input
           id="cloud-invite-code"
           v-model="inviteCode"
           autocomplete="one-time-code"
           placeholder="输入一次性邀请码"
-          :disabled="submitting"
+          :disabled="busy"
         />
         <p v-if="error" class="cloud-auth-error" role="alert">{{ error }}</p>
-        <button type="submit" :disabled="!inviteCode.trim() || submitting">
+        <button v-if="canaryInviteLogin" type="submit" :disabled="!inviteCode.trim() || busy">
           <LoaderCircle v-if="submitting" class="cloud-auth-spinner" :size="17" />
           <LogIn v-else :size="17" />
-          <span>{{ submitting ? '正在跳转' : '使用 GitHub 登录' }}</span>
+          <span>{{ submitting ? '正在登录' : '使用邀请码进入' }}</span>
+        </button>
+        <button
+          v-if="githubLogin"
+          type="button"
+          class="cloud-auth-secondary"
+          :disabled="!inviteCode.trim() || busy"
+          @click="submitGitHub"
+        >
+          <LoaderCircle v-if="githubSubmitting" class="cloud-auth-spinner" :size="17" />
+          <Github v-else :size="17" />
+          <span>{{ githubSubmitting ? '正在跳转' : '改用 GitHub 登录' }}</span>
         </button>
       </form>
     </section>
@@ -156,6 +205,18 @@ button {
 button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+.cloud-auth-secondary {
+  margin-top: 0;
+  border: 1px solid var(--sage-border-strong);
+  color: var(--sage-text-secondary);
+  background: var(--sage-surface-raised);
+}
+
+.cloud-auth-secondary:hover:not(:disabled) {
+  color: var(--sage-text);
+  background: var(--sage-surface-muted);
 }
 
 .cloud-auth-error {
