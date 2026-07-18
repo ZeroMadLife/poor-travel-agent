@@ -12,6 +12,7 @@ from sage_harness import McpConfigSnapshot, McpManager, McpScope, McpServerConfi
 
 from api.main import create_app
 from core.cloud.auth.repository import CloudRepository
+from core.cloud.model_providers import ModelProviderRepository
 from core.coding.memory import workspace_id_from_path
 from db.database import create_engine, create_session_factory
 from db.migrations import init_db
@@ -64,11 +65,20 @@ class CountingTransport:
 
 
 @pytest.fixture
-async def cloud_repository() -> AsyncIterator[CloudRepository]:
+async def cloud_repositories() -> AsyncIterator[
+    tuple[CloudRepository, ModelProviderRepository]
+]:
     engine = create_engine("sqlite+aiosqlite:///:memory:")
+    factory = create_session_factory(engine)
     await init_db(engine)
     try:
-        yield CloudRepository(create_session_factory(engine))
+        yield (
+            CloudRepository(factory),
+            ModelProviderRepository(
+                factory,
+                encryption_secret="test-provider-secret-" * 4,
+            ),
+        )
     finally:
         await engine.dispose()
 
@@ -180,12 +190,14 @@ def test_capability_api_rejects_unknown_session_and_invalid_filters(tmp_path: Pa
 
 async def test_capability_api_hides_guessed_session_from_another_owner(
     tmp_path: Path,
-    cloud_repository: CloudRepository,
+    cloud_repositories: tuple[CloudRepository, ModelProviderRepository],
 ) -> None:
+    cloud_repository, model_provider_repository = cloud_repositories
     await cloud_repository.create_invite("owner-invite", email="owner@example.com")
     await cloud_repository.create_invite("other-invite", email="other@example.com")
     options = {
         "cloud_repository": cloud_repository,
+        "cloud_model_provider_repository": model_provider_repository,
         "cloud_dev_login_enabled": True,
         "cloud_app_env": "development",
         "coding_model_factory": FakeModel,
