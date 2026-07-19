@@ -70,9 +70,25 @@ def test_api_image_uses_the_configurable_canary_package_index() -> None:
     assert "--mount=type=cache,target=/root/.cache/pip" in dockerfile
     assert "pip install -r requirements.txt" in dockerfile
     assert "pip install --no-cache-dir --upgrade pip" not in dockerfile
-    assert "apt-get install --no-install-recommends -y git" in dockerfile
+    assert "Acquire::ForceIPv4=true install --no-install-recommends -y git" in dockerfile
     assert "ARG SAGE_DOCKER_REGISTRY=docker.io" in dockerfile
     assert "${SAGE_DOCKER_REGISTRY}/library/python:3.12.13-slim-bookworm" in dockerfile
+
+
+def test_api_image_uses_configurable_debian_mirrors_and_ipv4() -> None:
+    dockerfile = (ROOT / "infra/docker/sage-api.Dockerfile").read_text(encoding="utf-8")
+    compose = (ROOT / "infra/compose/private-canary.yml").read_text(encoding="utf-8")
+
+    assert "ARG SAGE_DEBIAN_MIRROR=https://mirrors.aliyun.com/debian" in dockerfile
+    assert (
+        "ARG SAGE_DEBIAN_SECURITY_MIRROR=https://mirrors.aliyun.com/debian-security"
+        in dockerfile
+    )
+    assert "http://deb.debian.org/debian-security" in dockerfile
+    assert "Acquire::ForceIPv4=true update" in dockerfile
+    assert "Acquire::ForceIPv4=true install" in dockerfile
+    assert "SAGE_DEBIAN_MIRROR: ${SAGE_DEBIAN_MIRROR:-" in compose
+    assert "SAGE_DEBIAN_SECURITY_MIRROR: ${SAGE_DEBIAN_SECURITY_MIRROR:-" in compose
 
 
 def test_api_entrypoint_runs_explicit_migration_commands() -> None:

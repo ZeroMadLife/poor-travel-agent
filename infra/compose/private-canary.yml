@@ -8,6 +8,8 @@ x-api-common: &api-common
     args:
       SAGE_DOCKER_REGISTRY: ${SAGE_DOCKER_REGISTRY:-docker.io}
       SAGE_PIP_INDEX_URL: ${SAGE_PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}
+      SAGE_DEBIAN_MIRROR: ${SAGE_DEBIAN_MIRROR:-https://mirrors.aliyun.com/debian}
+      SAGE_DEBIAN_SECURITY_MIRROR: ${SAGE_DEBIAN_SECURITY_MIRROR:-https://mirrors.aliyun.com/debian-security}
   env_file:
     - ${SAGE_ENV_FILE:-/etc/sage/env}
   environment:
