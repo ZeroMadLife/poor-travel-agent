@@ -35,6 +35,7 @@ SECRET_KEYS = {
     "GITHUB_TOKEN_ENCRYPTION_SECRET",
     "MODEL_PROVIDER_ENCRYPTION_SECRET",
 }
+EXPECTED_SERVICES = {"api", "web", "postgres", "redis"}
 REQUIRED_KEYS = SECRET_KEYS | {
     "APP_ENV",
     "CLOUD_FRONTEND_URL",
@@ -385,6 +386,57 @@ class DeployController:
             "secrets": "validated-not-disclosed",
         }
 
+    def status(self) -> dict[str, object]:
+        """Return a bounded runtime summary without exposing environment values."""
+        state = self._load_state()
+        services_result = self._run(
+            self._compose("ps", "--format", "json"), label="读取服务状态"
+        )
+        services: list[dict[str, str]] = []
+        raw = services_result.stdout.strip()
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                rows = parsed if isinstance(parsed, list) else [parsed]
+            except json.JSONDecodeError:
+                try:
+                    rows = [json.loads(line) for line in raw.splitlines()]
+                except json.JSONDecodeError as exc:
+                    raise DeployError("服务状态响应格式无效") from exc
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                services.append(
+                    {
+                        "service": str(row.get("Service", row.get("Name", ""))),
+                        "state": str(row.get("State", "")),
+                        "health": str(row.get("Health", "")),
+                    }
+                )
+        try:
+            self._gateway_health()
+            gateway = "healthy"
+        except DeployError:
+            gateway = "unhealthy"
+        service_map = {row["service"]: row for row in services}
+        services_healthy = EXPECTED_SERVICES.issubset(service_map) and all(
+            row["state"] == "running" and row["health"] in {"", "healthy"}
+            for name, row in service_map.items()
+            if name in EXPECTED_SERVICES
+        )
+        healthy = gateway == "healthy" and services_healthy
+        return {
+            "status": "healthy" if healthy else "degraded",
+            "commit": self._run(
+                ["git", "rev-parse", "HEAD"], label="读取 Git commit"
+            ).stdout.strip(),
+            "current": state.get("current"),
+            "previous": state.get("previous"),
+            "deployed_at": state.get("deployed_at", state.get("rolled_back_at")),
+            "gateway": gateway,
+            "services": services,
+        }
+
     def apply(self, tag: str, *, execute: bool) -> dict[str, object]:
         tag = validate_commit_tag(tag)
         if not execute:
@@ -543,6 +595,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--execute", action="store_true", help="显式允许 apply/rollback 写操作")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("preflight")
+    subparsers.add_parser("status")
     apply_parser = subparsers.add_parser("apply")
     apply_parser.add_argument("--tag", required=True)
     rollback_parser = subparsers.add_parser("rollback")
@@ -564,6 +617,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         controller = DeployController(config)
         if args.command == "preflight":
             result = controller.preflight()
+        elif args.command == "status":
+            result = controller.status()
         elif args.command == "apply":
             result = controller.apply(args.tag, execute=args.execute)
         else:

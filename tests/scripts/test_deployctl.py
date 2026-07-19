@@ -1,10 +1,14 @@
 """Tests for the bounded private Canary deployment controller."""
 
+# ruff: noqa: I001 - Ruff 0.8 and 0.15 disagree on the tests/scripts import section.
+
+import json
 from pathlib import Path
 
 import pytest
 
 from scripts.deployctl import (
+    CommandResult,
     DeployConfig,
     DeployController,
     DeployError,
@@ -148,6 +152,85 @@ def test_dry_run_plan_never_calls_external_commands(tmp_path: Path) -> None:
         "migration",
         "health",
     ]
+
+
+def test_status_returns_bounded_service_summary_without_environment_values(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / "env"
+    _write_env(env_file, _valid_environment())
+
+    def runner(command, **_kwargs):
+        if command and command[0] == "git":
+            return CommandResult(0, "a" * 40 + "\n")
+        if command[:2] == ["docker", "compose"]:
+            return CommandResult(
+                0,
+                "\n".join(
+                    json.dumps(
+                        {
+                            "Service": service,
+                            "State": "running",
+                            "Health": "healthy",
+                        }
+                    )
+                    for service in ("api", "web", "postgres", "redis")
+                ),
+            )
+        raise AssertionError(command)
+
+    controller = DeployController(
+        DeployConfig(
+            repo_root=tmp_path,
+            compose_file=tmp_path / "compose.yml",
+            env_file=env_file,
+            state_file=tmp_path / "state.json",
+            backup_root=tmp_path / "backups",
+            gateway_url="http://127.0.0.1:9/health",
+        ),
+        runner=runner,
+    )
+
+    result = controller.status()
+
+    assert result["status"] == "degraded"
+    assert result["commit"] == "a" * 40
+    assert result["services"] == [
+        {"service": service, "state": "running", "health": "healthy"}
+        for service in ("api", "web", "postgres", "redis")
+    ]
+    assert "APP_SECRET_KEY" not in json.dumps(result)
+
+
+def test_status_is_degraded_when_one_expected_service_is_missing(tmp_path: Path) -> None:
+    env_file = tmp_path / "env"
+    _write_env(env_file, _valid_environment())
+
+    def runner(command, **_kwargs):
+        if command and command[0] == "git":
+            return CommandResult(0, "a" * 40 + "\n")
+        if command[:2] == ["docker", "compose"]:
+            return CommandResult(
+                0,
+                json.dumps(
+                    {"Service": "api", "State": "running", "Health": "healthy"}
+                ),
+            )
+        raise AssertionError(command)
+
+    controller = DeployController(
+        DeployConfig(
+            repo_root=tmp_path,
+            compose_file=tmp_path / "compose.yml",
+            env_file=env_file,
+            state_file=tmp_path / "state.json",
+            backup_root=tmp_path / "backups",
+            gateway_url="http://127.0.0.1:9/health",
+        ),
+        runner=runner,
+    )
+
+    assert controller.status()["status"] == "degraded"
 
 
 def test_redaction_removes_every_configured_secret() -> None:
