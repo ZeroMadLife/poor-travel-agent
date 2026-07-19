@@ -1,5 +1,9 @@
 # Sage 私有 Canary 部署 Runbook
 
+> 本地自动同步、服务器可用性巡检和飞书告警见
+> [本地 CI/CD 与 Canary 可用性](10-Sage本地CI-CD与Canary可用性.md)。本文件保留服务器
+> 初始化、手工部署、回滚和高危数据恢复边界。
+
 > 适用：Ubuntu 22.04 单机、Tailscale 私有 HTTPS、`dev/sage-v7` 已合并版本。
 >
 > 原则：先 dry-run；不使用 root Docker socket；不在命令行传密码或密钥；不开放公网应用端口。
