@@ -532,16 +532,7 @@ class CanaryController:
         q = shlex.quote
         return "\n".join(
             (
-                " ".join(
-                    (
-                        "DOCKER_HOST=" + q(self.config.docker_host),
-                        "python3",
-                        q(deployctl),
-                        "--env-file",
-                        q(self.config.env_file),
-                        "preflight",
-                    )
-                ),
+                'test -z "$(git -C ' + q(self.config.remote_app) + ' status --porcelain)"',
                 "fetched=0",
                 "attempt=1",
                 "while [ \"$attempt\" -le 3 ]; do",
@@ -576,6 +567,27 @@ class CanaryController:
                 + q(self.config.remote_app)
                 + " rev-parse HEAD)\" = "
                 + q(sha),
+                " ".join(
+                    (
+                        "DOCKER_HOST=" + q(self.config.docker_host),
+                        "python3",
+                        q(deployctl),
+                        "--env-file",
+                        q(self.config.env_file),
+                        "--execute",
+                        "cleanup",
+                    )
+                ),
+                " ".join(
+                    (
+                        "DOCKER_HOST=" + q(self.config.docker_host),
+                        "python3",
+                        q(deployctl),
+                        "--env-file",
+                        q(self.config.env_file),
+                        "preflight",
+                    )
+                ),
                 " ".join(
                     (
                         "DOCKER_HOST=" + q(self.config.docker_host),

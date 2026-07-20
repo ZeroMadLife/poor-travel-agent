@@ -3,6 +3,7 @@
 # ruff: noqa: I001 - Ruff 0.8 and 0.15 disagree on the tests/scripts import section.
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -154,6 +155,96 @@ def test_dry_run_plan_never_calls_external_commands(tmp_path: Path) -> None:
         "migration",
         "health",
     ]
+
+
+def test_cleanup_removes_only_rebuildable_data_and_retains_release_images(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / "env"
+    _write_env(env_file, _valid_environment())
+    socket_path = Path("/run/user/1002/docker.sock")
+    state_file = tmp_path / "state.json"
+    current = "a" * 40
+    previous = "b" * 40
+    old = "c" * 40
+    state_file.write_text(
+        json.dumps({"current": current, "previous": previous}), encoding="utf-8"
+    )
+    commands: list[list[str]] = []
+    deploy_uid = os.getuid()
+
+    real_exists = Path.exists
+    real_stat = Path.stat
+    monkeypatch.setenv("DOCKER_HOST", f"unix://{socket_path}")
+    monkeypatch.setattr(
+        Path,
+        "exists",
+        lambda self, *args, **kwargs: (
+            True if self == socket_path else real_exists(self, *args, **kwargs)
+        ),
+    )
+    monkeypatch.setattr(
+        Path,
+        "stat",
+        lambda self, *args, **kwargs: (
+            type("Stat", (), {"st_mode": 0o140600, "st_uid": deploy_uid})()
+            if self == socket_path
+            else real_stat(self, *args, **kwargs)
+        ),
+    )
+    monkeypatch.setattr(
+        "scripts.deployctl.shutil.disk_usage",
+        lambda _path: type("Usage", (), {"free": 9 * 1024**3})(),
+    )
+
+    def runner(command, **_kwargs):
+        commands.append(list(command))
+        if command[:2] == ["docker", "info"]:
+            return CommandResult(0, '["name=rootless"]')
+        if command[:3] == ["docker", "image", "ls"]:
+            return CommandResult(
+                0,
+                "\n".join(
+                    (
+                        f"sage-api:{current}",
+                        f"sage-web:{previous}",
+                        f"sage-api:{old}",
+                        f"sage-web:{old}",
+                        "other:latest",
+                    )
+                ),
+            )
+        return CommandResult(0)
+
+    controller = DeployController(
+        DeployConfig(
+            repo_root=tmp_path,
+            compose_file=tmp_path / "compose.yml",
+            env_file=env_file,
+            state_file=state_file,
+            backup_root=tmp_path / "backups",
+            gateway_url="http://127.0.0.1:9/health",
+        ),
+        runner=runner,
+    )
+
+    result = controller.cleanup(execute=True)
+
+    assert result["removed_sage_images"] == 2
+    assert result["volumes"] == "untouched"
+    assert ["docker", "builder", "prune", "--force"] in commands
+    assert ["docker", "image", "prune", "--force"] in commands
+    remove = next(
+        command for command in commands if command[:3] == ["docker", "image", "rm"]
+    )
+    assert remove == ["docker", "image", "rm", f"sage-api:{old}", f"sage-web:{old}"]
+    assert all("volume" not in command for command in commands)
+    assert all(
+        current not in command and previous not in command
+        for command in commands
+        if command[:3] == ["docker", "image", "rm"]
+    )
 
 
 def test_run_command_returns_bounded_timeout(monkeypatch, tmp_path: Path) -> None:
