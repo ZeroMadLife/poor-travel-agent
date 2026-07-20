@@ -80,6 +80,37 @@ it('opens the public Sage preview with source-scoped answers', async () => {
   await wrapper.get('.agent-prompts button').trigger('click')
   await wrapper.get('.agent-form').trigger('submit')
   expect(wrapper.text()).toContain('Sage 是一个 Personal AI Learning Companion')
+  expect(wrapper.text()).toContain('回答依据')
+  expect(wrapper.get('.agent-source').attributes('data-target')).toBe('work')
   expect(wrapper.text()).not.toContain('/Users/')
+  wrapper.unmount()
+})
+
+it('keeps internal section navigation inside the hash-router public route', async () => {
+  const router = createTestRouter()
+  await router.push('/public')
+  const wrapper = mount(PublicProfileView, { global: { plugins: [router] } })
+
+  await wrapper.get('[data-section="writing"]').trigger('click')
+
+  expect(router.currentRoute.value.path).toBe('/public')
+  expect(wrapper.get('[data-section="writing"]').classes()).toContain('active')
+  wrapper.unmount()
+})
+
+it('lets a visitor inspect project evidence before leaving the public profile', async () => {
+  const router = createTestRouter()
+  await router.push('/public')
+  const wrapper = mount(PublicProfileView, { global: { plugins: [router] } })
+
+  const firstWork = wrapper.get('[data-work-id="sage"]')
+  expect(firstWork.attributes('aria-expanded')).toBe('false')
+  await firstWork.trigger('click')
+
+  expect(firstWork.attributes('aria-expanded')).toBe('true')
+  expect(wrapper.get('[data-work-evidence="sage"]').text()).toContain('为什么做')
+  expect(wrapper.get('[data-work-evidence="sage"]').text()).toContain('怎么判断有效')
+  expect(wrapper.get('[data-work-evidence="sage"]').text()).toContain('当前边界')
+  expect(wrapper.get('[data-work-evidence="sage"] a').attributes('target')).toBe('_blank')
   wrapper.unmount()
 })
