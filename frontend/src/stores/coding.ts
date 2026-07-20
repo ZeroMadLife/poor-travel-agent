@@ -6,6 +6,8 @@ import {
   approveCodingPlan,
   approveMemoryProposal,
   buildCodingStreamUrl,
+  clearCodingThreadGoal,
+  evaluateCodingThreadGoal,
   fetchCodingFile,
   fetchCodingFiles,
   fetchCodingApprovalPending,
@@ -27,10 +29,12 @@ import {
   fetchCodingSkills,
   fetchCodingTimeline,
   fetchCodingTimelineTail,
+  fetchCodingThreadGoal,
   fetchOlderCodingTimeline,
   rejectCodingPlan,
   rejectMemoryProposal,
   rejectKnowledgeSourceProposal as rejectKnowledgeSourceProposalRequest,
+  prepareCodingThreadGoalContinue,
   requestCodingCompaction,
   respondCodingApproval,
   resumeCodingSession,
@@ -41,6 +45,7 @@ import {
   switchPermissionMode,
   updateCodingSessionMetadata,
   updateCodingProviderSettings as saveCodingProviderSettings,
+  upsertCodingThreadGoal,
 } from '../api/coding'
 import type {
   CodingApproval,
@@ -64,6 +69,7 @@ import type {
   CodingSkillSummary,
   CodingToolResultEvent,
   CodingTimelineEvent,
+  CodingThreadGoal,
   CodingContextSnapshot,
   CodingUsageSummary,
   CloudModelProvider,
@@ -167,6 +173,10 @@ export type CodingSessionUiState = {
   knowledgeSourceProposalDetailBusy: Record<string, boolean>
   knowledgeSourceProposalError: string
   knowledgeSourceProposalRefresh: number
+  threadGoal: CodingThreadGoal | null
+  threadGoalRevision: number
+  threadGoalBusy: boolean
+  threadGoalError: string
 }
 
 function createSessionUiState(): CodingSessionUiState {
@@ -228,6 +238,10 @@ function createSessionUiState(): CodingSessionUiState {
     knowledgeSourceProposalDetailBusy: {},
     knowledgeSourceProposalError: '',
     knowledgeSourceProposalRefresh: 0,
+    threadGoal: null,
+    threadGoalRevision: 0,
+    threadGoalBusy: false,
+    threadGoalError: '',
   }
 }
 
@@ -354,6 +368,10 @@ export const useCodingStore = defineStore('coding', () => {
   const knowledgeSourceProposalDetailBusy = sessionField('knowledgeSourceProposalDetailBusy')
   const knowledgeSourceProposalError = sessionField('knowledgeSourceProposalError')
   const knowledgeSourceProposalRefresh = sessionField('knowledgeSourceProposalRefresh')
+  const threadGoal = sessionField('threadGoal')
+  const threadGoalRevision = sessionField('threadGoalRevision')
+  const threadGoalBusy = sessionField('threadGoalBusy')
+  const threadGoalError = sessionField('threadGoalError')
   const timeline = sessionField('timeline')
   const olderTimeline = sessionField('olderTimeline')
   const visibleTimeline = computed(() => mergeTimelineEvents(olderTimeline.value, timeline.value))
@@ -527,6 +545,19 @@ export const useCodingStore = defineStore('coding', () => {
   ) {
     const payloadType = typeof event.payload.type === 'string' ? event.payload.type : ''
     state.errorMessage = ''
+    if (
+      (payloadType === 'thread_goal_updated' || payloadType === 'thread_goal_evaluated') &&
+      event.payload.goal &&
+      typeof event.payload.goal === 'object'
+    ) {
+      state.threadGoal = event.payload.goal as CodingThreadGoal
+      state.threadGoalRevision = state.threadGoal.revision
+      state.threadGoalError = ''
+    } else if (payloadType === 'thread_goal_cleared') {
+      state.threadGoal = null
+      if (typeof event.payload.revision === 'number') state.threadGoalRevision = event.payload.revision
+      state.threadGoalError = ''
+    }
     if (event.payload.event === 'run_started') {
       state.activeRun = { run_id: event.run_id, status: 'running' }
       state.isThinking = true
@@ -817,6 +848,7 @@ export const useCodingStore = defineStore('coding', () => {
       loadModels(),
       loadTimeline(session.session_id),
       loadContext(),
+      loadThreadGoal(session.session_id),
       loadGitStatus(),
       loadFiles('.'),
       loadSessions().catch(() => {}),
@@ -914,6 +946,7 @@ export const useCodingStore = defineStore('coding', () => {
   function sendMessage(
     content: string,
     surfaceContext?: HarnessSurfaceContext | null,
+    threadGoalRevision?: number,
   ): boolean {
     if (!content.trim()) return false
     if (!stream || connectionState.value !== 'connected') {
@@ -921,7 +954,7 @@ export const useCodingStore = defineStore('coding', () => {
       if (!stream || connectionState.value === 'disconnected') connectSocket()
       return false
     }
-    const sent = stream.send(content, surfaceContext)
+    const sent = stream.send(content, surfaceContext, threadGoalRevision)
     if (!sent) return false
     const optimistic = {
       id: `optimistic:${sessionId.value}:${Date.now()}`,
@@ -1293,6 +1326,125 @@ export const useCodingStore = defineStore('coding', () => {
     }
   }
 
+  async function loadThreadGoal(targetSessionId = sessionId.value) {
+    if (!targetSessionId) return
+    const state = ensureSession(targetSessionId)
+    try {
+      const response = await fetchCodingThreadGoal(targetSessionId)
+      if (targetSessionId !== sessionId.value) return
+      state.threadGoal = response.goal
+      state.threadGoalRevision = response.revision ?? response.goal?.revision ?? 0
+      state.threadGoalError = ''
+    } catch (error) {
+      if (targetSessionId !== sessionId.value) return
+      state.threadGoalError = error instanceof Error ? error.message : String(error)
+    }
+  }
+
+  async function saveThreadGoal(description: string, completionCriteria: string[]) {
+    const targetSessionId = sessionId.value
+    if (!targetSessionId || threadGoalBusy.value) return false
+    threadGoalBusy.value = true
+    threadGoalError.value = ''
+    try {
+      const response = await upsertCodingThreadGoal(
+        targetSessionId,
+        threadGoalRevision.value,
+        description,
+        completionCriteria,
+      )
+      if (targetSessionId !== sessionId.value) return false
+      threadGoal.value = response.goal
+      threadGoalRevision.value = response.revision
+      return response.goal !== null
+    } catch (error) {
+      if (targetSessionId === sessionId.value) {
+        const message = error instanceof Error ? error.message : String(error)
+        await loadThreadGoal(targetSessionId)
+        threadGoalError.value = message
+      }
+      return false
+    } finally {
+      if (targetSessionId === sessionId.value) threadGoalBusy.value = false
+    }
+  }
+
+  async function evaluateThreadGoal() {
+    const targetSessionId = sessionId.value
+    const goal = threadGoal.value
+    if (!targetSessionId || !goal || threadGoalBusy.value) return false
+    threadGoalBusy.value = true
+    threadGoalError.value = ''
+    try {
+      const response = await evaluateCodingThreadGoal(targetSessionId, goal.revision)
+      if (targetSessionId !== sessionId.value) return false
+      threadGoal.value = response.goal
+      threadGoalRevision.value = response.revision
+      return response.goal !== null
+    } catch (error) {
+      if (targetSessionId === sessionId.value) {
+        const message = error instanceof Error ? error.message : String(error)
+        await loadThreadGoal(targetSessionId)
+        threadGoalError.value = message
+      }
+      return false
+    } finally {
+      if (targetSessionId === sessionId.value) threadGoalBusy.value = false
+    }
+  }
+
+  async function continueThreadGoal(surfaceContext?: HarnessSurfaceContext | null) {
+    const targetSessionId = sessionId.value
+    const goal = threadGoal.value
+    if (!targetSessionId || !goal || threadGoalBusy.value) return false
+    threadGoalBusy.value = true
+    threadGoalError.value = ''
+    try {
+      const continuation = await prepareCodingThreadGoalContinue(targetSessionId, goal.revision)
+      if (targetSessionId !== sessionId.value) return false
+      const sent = sendMessage(
+        continuation.prompt,
+        surfaceContext,
+        continuation.goal_revision,
+      )
+      if (!sent) threadGoalError.value = errorMessage.value || '当前无法继续目标'
+      return sent
+    } catch (error) {
+      if (targetSessionId === sessionId.value) {
+        const message = error instanceof Error ? error.message : String(error)
+        await loadThreadGoal(targetSessionId)
+        threadGoalError.value = message
+      }
+      return false
+    } finally {
+      if (targetSessionId === sessionId.value) threadGoalBusy.value = false
+    }
+  }
+
+  async function removeThreadGoal() {
+    const targetSessionId = sessionId.value
+    const goal = threadGoal.value
+    if (!targetSessionId || !goal || threadGoalBusy.value) return false
+    threadGoalBusy.value = true
+    threadGoalError.value = ''
+    try {
+      await clearCodingThreadGoal(targetSessionId, goal.revision)
+      if (targetSessionId !== sessionId.value) return false
+      threadGoal.value = null
+      threadGoalRevision.value = goal.revision + 1
+      return true
+    } catch (error) {
+      if (targetSessionId === sessionId.value) {
+        const message = error instanceof Error ? error.message : String(error)
+        await loadThreadGoal(targetSessionId)
+        threadGoalError.value = message
+      }
+      return false
+    } finally {
+      if (targetSessionId === sessionId.value) threadGoalBusy.value = false
+    }
+  }
+
   async function loadRuns(targetSessionId = sessionId.value) {
     if (!targetSessionId) return
     const generation = ++runsRequestGeneration
@@ -1544,6 +1696,7 @@ export const useCodingStore = defineStore('coding', () => {
       loadSessions().catch(() => {}),
       loadRuns(),
       loadContext(),
+      loadThreadGoal(targetSessionId),
     ])
     if (selection !== selectionGeneration || sessionId.value !== targetSessionId) return
     connectSocket()
@@ -1582,6 +1735,7 @@ export const useCodingStore = defineStore('coding', () => {
       loadSessions().catch(() => {}),
       loadRuns(),
       loadContext(),
+      loadThreadGoal(session.session_id),
     ])
     if (selection !== selectionGeneration || sessionId.value !== session.session_id) return ''
     if (initialPrompt) {
@@ -1619,6 +1773,7 @@ export const useCodingStore = defineStore('coding', () => {
       loadSessions().catch(() => {}),
       loadRuns(),
       loadContext(targetSessionId),
+      loadThreadGoal(targetSessionId),
     ])
     if (selection !== selectionGeneration || sessionId.value !== targetSessionId) return
     connectSocket()
@@ -1891,6 +2046,10 @@ export const useCodingStore = defineStore('coding', () => {
     knowledgeSourceProposalBusy,
     knowledgeSourceProposalDetailBusy,
     knowledgeSourceProposalError,
+    threadGoal,
+    threadGoalRevision,
+    threadGoalBusy,
+    threadGoalError,
     skills,
     mcpServers,
     models,
@@ -1915,6 +2074,11 @@ export const useCodingStore = defineStore('coding', () => {
     breadcrumb,
     initialize,
     sendMessage,
+    loadThreadGoal,
+    saveThreadGoal,
+    evaluateThreadGoal,
+    continueThreadGoal,
+    removeThreadGoal,
     handleServerEvent,
     handleTimelineEvent,
     mergeTimelinePage,

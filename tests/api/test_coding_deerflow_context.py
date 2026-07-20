@@ -230,6 +230,7 @@ async def test_v2_compacts_before_graph_and_injects_new_summary(
             content="new request",
             run_id="run-context",
             surface_context={"surface": "coding"},
+            thread_goal=None,
             checkpointer=object(),
             mcp_catalog=None,
         )
@@ -300,6 +301,7 @@ async def test_v2_subagent_approval_continues_without_graph_checkpoint_resume(
             content="practice",
             run_id="run-practice-approval",
             surface_context=None,
+            thread_goal=None,
             checkpointer=object(),
             mcp_catalog=None,
         )
@@ -329,6 +331,7 @@ async def test_v2_emergency_context_blocks_graph_model_request(
             content="new request",
             run_id="run-emergency",
             surface_context=None,
+            thread_goal=None,
             checkpointer=object(),
             mcp_catalog=None,
         )
@@ -368,6 +371,7 @@ async def test_v2_cancellation_releases_runtime_context_lease(
                 content="cancel me",
                 run_id="run-cancel",
                 surface_context=None,
+                thread_goal=None,
                 checkpointer=object(),
                 mcp_catalog=None,
             )

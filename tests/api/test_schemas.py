@@ -84,12 +84,19 @@ def test_user_message_accepts_bounded_surface_context() -> None:
                 "graph_revision": "graph-1",
                 "operation_refs": [{"kind": "knowledge_job", "id": "job-1"}],
             },
+            "thread_goal_revision": 3,
         }
     )
 
     assert message.surface_context is not None
     assert message.surface_context.workspace_id == "knowledge-local"
     assert message.surface_context.operation_refs[0].id == "job-1"
+    assert message.thread_goal_revision == 3
+
+
+def test_user_message_rejects_invalid_thread_goal_revision() -> None:
+    with pytest.raises(ValidationError):
+        UserMessage.model_validate({"content": "continue", "thread_goal_revision": 0})
 
 
 def test_surface_context_rejects_unknown_fields_and_unbounded_refs() -> None:
@@ -111,8 +118,7 @@ def test_surface_context_rejects_unknown_fields_and_unbounded_refs() -> None:
                 "surface_context": {
                     **base,
                     "operation_refs": [
-                        {"kind": "coding_run", "id": f"run-{index}"}
-                        for index in range(21)
+                        {"kind": "coding_run", "id": f"run-{index}"} for index in range(21)
                     ],
                 },
             }

@@ -30,12 +30,30 @@ _DATABASE_NAME = "timeline.sqlite3"
 _MAX_PAYLOAD_BYTES = 1024 * 1024
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 _KINDS = {
-    "user", "assistant", "model", "tool", "approval", "context", "memory",
-    "agent", "terminal", "system", "run", "harness",
+    "user",
+    "assistant",
+    "model",
+    "tool",
+    "approval",
+    "context",
+    "memory",
+    "agent",
+    "terminal",
+    "system",
+    "run",
+    "harness",
 }
 _STATUSES = {
-    "pending", "queued", "running", "blocked", "done", "completed", "cancelled",
-    "error", "interrupted", "retryable",
+    "pending",
+    "queued",
+    "running",
+    "blocked",
+    "done",
+    "completed",
+    "cancelled",
+    "error",
+    "interrupted",
+    "retryable",
 }
 TERMINAL_STATUSES = frozenset({"completed", "cancelled", "error", "interrupted"})
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
@@ -130,6 +148,14 @@ class SessionRunLeaseLostError(SessionEventJournalError):
     """The run owner or fencing token no longer owns the active lease."""
 
 
+class SessionThreadGoalConflictError(SessionEventJournalError):
+    """A Thread Goal mutation used a stale revision."""
+
+    def __init__(self, current_revision: int) -> None:
+        self.current_revision = current_revision
+        super().__init__(f"thread goal revision conflict: current revision is {current_revision}")
+
+
 @dataclass(frozen=True, slots=True)
 class SessionEvent:
     event_id: str
@@ -189,9 +215,7 @@ class SessionEventJournal:
         self._components = ("evidence", self.session_id)
         self.root = self._root.joinpath(*self._components)
         self.path = self.root / _DATABASE_NAME
-        directory_fd = _open_directory(
-            self._root, self._components, create=True, tighten=True
-        )
+        directory_fd = _open_directory(self._root, self._components, create=True, tighten=True)
         try:
             _prepare_database_file(directory_fd)
         finally:
@@ -365,6 +389,8 @@ class SessionEventJournal:
         owner_id: str = "legacy",
         owner_pid: int = -1,
         surface_context: Mapping[str, Any] | None = None,
+        thread_goal: Mapping[str, Any] | None = None,
+        expected_thread_goal_revision: int | None = None,
     ) -> BeginRunResult:
         """Acquire the singleton lease and persist run_started atomically."""
         validated_run = _validate_identifier("run_id", run_id)
@@ -374,6 +400,8 @@ class SessionEventJournal:
         payload: dict[str, Any] = {"event": "run_started"}
         if surface_context is not None:
             payload["surface_context"] = dict(surface_context)
+        if thread_goal is not None:
+            payload["thread_goal"] = dict(thread_goal)
         values = _validated_event_input(
             run_id=validated_run,
             kind="system",
@@ -385,6 +413,13 @@ class SessionEventJournal:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                if expected_thread_goal_revision is not None:
+                    current_revision = self._thread_goal_revision(connection)
+                    if current_revision != expected_thread_goal_revision:
+                        raise SessionThreadGoalConflictError(current_revision)
+                    frozen_revision = int(thread_goal.get("revision", 0)) if thread_goal else 0
+                    if frozen_revision != expected_thread_goal_revision:
+                        raise SessionThreadGoalConflictError(current_revision)
                 lease = connection.execute(
                     "SELECT run_id FROM active_run_lease WHERE lease_key = 1"
                 ).fetchone()
@@ -447,17 +482,13 @@ class SessionEventJournal:
                     (validated_run,),
                 ).fetchone()
                 if existing is None:
-                    raise SessionEventJournalError(
-                        f"run {validated_run} has no durable history"
-                    )
+                    raise SessionEventJournalError(f"run {validated_run} has no durable history")
                 terminal = connection.execute(
                     "SELECT 1 FROM session_events WHERE run_id = ? AND kind = 'terminal'",
                     (validated_run,),
                 ).fetchone()
                 if terminal is not None:
-                    raise SessionEventJournalError(
-                        f"run {validated_run} is already terminal"
-                    )
+                    raise SessionEventJournalError(f"run {validated_run} is already terminal")
                 token = _allocate_fencing_token(connection)
                 connection.execute(
                     "INSERT INTO active_run_lease "
@@ -485,9 +516,7 @@ class SessionEventJournal:
                 connection.rollback()
                 raise
 
-    def release_run_lease(
-        self, run_id: str, *, owner_id: str, fencing_token: int
-    ) -> bool:
+    def release_run_lease(self, run_id: str, *, owner_id: str, fencing_token: int) -> bool:
         """Release a matching lease, used when startup fails before task ownership."""
         validated_run = _validate_identifier("run_id", run_id)
         with self._connect() as connection:
@@ -552,9 +581,7 @@ class SessionEventJournal:
                     # Release the old owner without terminalizing the graph. The
                     # LangGraph checkpoint remains resumable and hydrate() will
                     # rebuild the approval queue from the durable event.
-                    connection.execute(
-                        "DELETE FROM active_run_lease WHERE lease_key = 1"
-                    )
+                    connection.execute("DELETE FROM active_run_lease WHERE lease_key = 1")
                     connection.commit()
                     return None
                 existing = connection.execute(
@@ -599,9 +626,7 @@ class SessionEventJournal:
             has_more=has_more,
         )
 
-    def replay_before(
-        self, *, before: int | None = None, limit: int = 100
-    ) -> BackwardReplayPage:
+    def replay_before(self, *, before: int | None = None, limit: int = 100) -> BackwardReplayPage:
         """Return a bounded tail or events older than an exclusive cursor."""
         if before is not None and (
             isinstance(before, bool) or not isinstance(before, int) or before <= 0
@@ -627,9 +652,7 @@ class SessionEventJournal:
                 ).fetchall()
         has_more = len(rows) > limit
         selected = rows[:limit]
-        items = tuple(
-            _event_from_row(row, self.session_id) for row in reversed(selected)
-        )
+        items = tuple(_event_from_row(row, self.session_id) for row in reversed(selected))
         return BackwardReplayPage(
             items=items,
             older_cursor=items[0].sequence if has_more and items else None,
@@ -726,9 +749,10 @@ class SessionEventJournal:
                     if tool_call_id and later_call_id == tool_call_id:
                         resolved = True
                         break
-                if later_type == "approval_required" and str(
-                    later_payload.get("approval_id", "")
-                ).strip() == approval_id:
+                if (
+                    later_type == "approval_required"
+                    and str(later_payload.get("approval_id", "")).strip() == approval_id
+                ):
                     resolved = False
                     break
             if not resolved:
@@ -742,8 +766,161 @@ class SessionEventJournal:
     def latest_sequence(self) -> int:
         """Return the durable high-water sequence for this session."""
         with self._connect() as connection:
-            row = connection.execute("SELECT COALESCE(MAX(sequence), 0) FROM session_events").fetchone()
+            row = connection.execute(
+                "SELECT COALESCE(MAX(sequence), 0) FROM session_events"
+            ).fetchone()
         return int(row[0])
+
+    def current_thread_goal(self) -> dict[str, Any] | None:
+        """Project the current primary Goal from its revisioned Harness events."""
+        with self._connect() as connection:
+            return self._current_thread_goal(connection)
+
+    def current_thread_goal_revision(self) -> int:
+        """Return the monotonic Goal revision, including a clear tombstone."""
+        with self._connect() as connection:
+            return self._thread_goal_revision(connection)
+
+    def thread_goal_context(self) -> dict[str, Any] | None:
+        """Return an active Goal or a tombstone that clears checkpoint state."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM session_events WHERE run_id = 'thread-goal' "
+                "AND kind = 'harness' ORDER BY sequence DESC LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return None
+        event = _event_from_row(row, self.session_id)
+        payload = event.payload
+        if payload.get("type") == "thread_goal_cleared":
+            return {
+                "goal_id": str(payload["goal_id"]),
+                "revision": int(payload["revision"]),
+                "description": "",
+                "completion_criteria": [],
+                "status": "cancelled",
+                "updated_at": event.timestamp,
+            }
+        goal = payload.get("goal")
+        return dict(goal) if isinstance(goal, Mapping) else None
+
+    def append_thread_goal(
+        self,
+        *,
+        event_type: str,
+        expected_revision: int,
+        goal: Mapping[str, Any],
+    ) -> SessionEvent:
+        """Append a full Goal snapshot with an atomic revision guard."""
+        if event_type not in {"thread_goal_updated", "thread_goal_evaluated"}:
+            raise ValueError("invalid Thread Goal event type")
+        if isinstance(expected_revision, bool) or expected_revision < 0:
+            raise ValueError("expected_revision must be non-negative")
+        goal_snapshot = dict(goal)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                active_run = connection.execute(
+                    "SELECT run_id FROM active_run_lease WHERE lease_key = 1"
+                ).fetchone()
+                if active_run is not None:
+                    raise SessionRunLeaseConflictError(str(active_run[0]))
+                current = self._current_thread_goal(connection)
+                current_revision = self._thread_goal_revision(connection)
+                if current_revision != expected_revision:
+                    raise SessionThreadGoalConflictError(current_revision)
+                next_revision = goal_snapshot.get("revision")
+                if isinstance(next_revision, bool) or next_revision != expected_revision + 1:
+                    raise ValueError("goal revision must increment expected_revision by one")
+                if current and goal_snapshot.get("goal_id") != current.get("goal_id"):
+                    raise ValueError("an active Thread Goal cannot change identity")
+                values = _validated_event_input(
+                    run_id="thread-goal",
+                    kind="harness",
+                    status="completed",
+                    payload={"type": event_type, "version": 1, "goal": goal_snapshot},
+                    event_id=None,
+                    timestamp=None,
+                )
+                stored = self._insert(connection, **values)
+                connection.commit()
+                return stored
+            except Exception:
+                connection.rollback()
+                raise
+
+    def clear_thread_goal(self, *, expected_revision: int) -> SessionEvent:
+        """Clear the current Goal using the same atomic revision contract."""
+        if isinstance(expected_revision, bool) or expected_revision < 1:
+            raise ValueError("expected_revision must be positive")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                active_run = connection.execute(
+                    "SELECT run_id FROM active_run_lease WHERE lease_key = 1"
+                ).fetchone()
+                if active_run is not None:
+                    raise SessionRunLeaseConflictError(str(active_run[0]))
+                current = self._current_thread_goal(connection)
+                current_revision = self._thread_goal_revision(connection)
+                if current_revision != expected_revision:
+                    raise SessionThreadGoalConflictError(current_revision)
+                if current is None:
+                    raise SessionThreadGoalConflictError(current_revision)
+                values = _validated_event_input(
+                    run_id="thread-goal",
+                    kind="harness",
+                    status="completed",
+                    payload={
+                        "type": "thread_goal_cleared",
+                        "version": 1,
+                        "goal_id": str(current["goal_id"]),
+                        "revision": expected_revision + 1,
+                    },
+                    event_id=None,
+                    timestamp=None,
+                )
+                stored = self._insert(connection, **values)
+                connection.commit()
+                return stored
+            except Exception:
+                connection.rollback()
+                raise
+
+    def latest_terminal_event(self) -> SessionEvent | None:
+        """Return the latest run terminal, excluding Goal lifecycle events."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM session_events WHERE kind = 'terminal' "
+                "ORDER BY sequence DESC LIMIT 1"
+            ).fetchone()
+        return _event_from_row(row, self.session_id) if row is not None else None
+
+    def events_for_run(self, run_id: str, *, limit: int = 1000) -> tuple[SessionEvent, ...]:
+        """Return a bounded run trace for deterministic server-side projections."""
+        validated_run = _validate_identifier("run_id", run_id)
+        if isinstance(limit, bool) or not 1 <= limit <= 5000:
+            raise ValueError("limit must be between 1 and 5000")
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM session_events WHERE run_id = ? ORDER BY sequence LIMIT ?",
+                (validated_run, limit),
+            ).fetchall()
+        return tuple(_event_from_row(row, self.session_id) for row in rows)
+
+    def run_thread_goal(self, run_id: str) -> dict[str, Any] | None:
+        """Return the Goal snapshot frozen by run_started."""
+        validated_run = _validate_identifier("run_id", run_id)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM session_events WHERE run_id = ? "
+                "AND kind = 'system' ORDER BY sequence LIMIT 1",
+                (validated_run,),
+            ).fetchone()
+        if row is None:
+            return None
+        value = _event_from_row(row, self.session_id).payload.get("thread_goal")
+        return dict(value) if isinstance(value, Mapping) else None
 
     def run_resume_context(self, run_id: str) -> tuple[str, dict[str, Any]] | None:
         """Return the original user message and surface context for a run."""
@@ -765,6 +942,42 @@ class SessionEventJournal:
             if str(row[0]) == "user" and isinstance(payload.get("content"), str):
                 content = str(payload["content"])
         return (content, surface_context) if content else None
+
+    def _current_thread_goal(self, connection: sqlite3.Connection) -> dict[str, Any] | None:
+        rows = connection.execute(
+            "SELECT * FROM session_events WHERE run_id = 'thread-goal' "
+            "AND kind = 'harness' ORDER BY sequence DESC"
+        ).fetchall()
+        for row in rows:
+            payload = _event_from_row(row, self.session_id).payload
+            event_type = payload.get("type")
+            if event_type == "thread_goal_cleared":
+                return None
+            if event_type in {"thread_goal_updated", "thread_goal_evaluated"}:
+                goal = payload.get("goal")
+                if not isinstance(goal, Mapping):
+                    raise SessionEventJournalCorruptionError(
+                        "Thread Goal event does not contain a goal snapshot"
+                    )
+                return dict(goal)
+        return None
+
+    def _thread_goal_revision(self, connection: sqlite3.Connection) -> int:
+        row = connection.execute(
+            "SELECT * FROM session_events WHERE run_id = 'thread-goal' "
+            "AND kind = 'harness' ORDER BY sequence DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return 0
+        payload = _event_from_row(row, self.session_id).payload
+        if payload.get("type") == "thread_goal_cleared":
+            revision = payload.get("revision")
+        else:
+            goal = payload.get("goal")
+            revision = goal.get("revision") if isinstance(goal, Mapping) else None
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+            raise SessionEventJournalCorruptionError("Thread Goal event has an invalid revision")
+        return revision
 
     def _insert(
         self,
@@ -952,9 +1165,7 @@ class SessionEventJournal:
 
     def _verify_connected_inode(self, expected: tuple[int, int]) -> None:
         if self._verify_database_and_sidecars() != expected:
-            raise SessionEventJournalCorruptionError(
-                "session event database changed while opening"
-            )
+            raise SessionEventJournalCorruptionError("session event database changed while opening")
 
 
 def _validated_event_input(
@@ -1090,10 +1301,7 @@ def _strict_json_value(value: Any) -> bool:
     if isinstance(value, list):
         return all(_strict_json_value(item) for item in value)
     if isinstance(value, dict):
-        return all(
-            isinstance(key, str) and _strict_json_value(item)
-            for key, item in value.items()
-        )
+        return all(isinstance(key, str) and _strict_json_value(item) for key, item in value.items())
     return False
 
 
@@ -1108,7 +1316,13 @@ def _validate_schema(
     connection: sqlite3.Connection, path: Path, *, lease_version: int = SCHEMA_VERSION
 ) -> None:
     expected_columns = [
-        "sequence", "event_id", "session_id", "run_id", "kind", "status", "timestamp",
+        "sequence",
+        "event_id",
+        "session_id",
+        "run_id",
+        "kind",
+        "status",
+        "timestamp",
         "payload_json",
     ]
     columns = [str(row[1]) for row in connection.execute("PRAGMA table_info(session_events)")]
@@ -1152,11 +1366,14 @@ def _validate_schema(
         object_sql[("table", "run_fence_state")]
     ) != _normalize_sql(_FENCE_SQL):
         raise SessionEventJournalError(f"non-canonical run fence schema at {path}")
-    run_columns = [row[2] for row in connection.execute("PRAGMA index_info(session_events_run_idx)")]
+    run_columns = [
+        row[2] for row in connection.execute("PRAGMA index_info(session_events_run_idx)")
+    ]
     if run_columns != ["run_id", "sequence"]:
         raise SessionEventJournalError(f"invalid session event run index at {path}")
     terminal_sql = next(
-        sql for kind, name, sql in _schema_objects(connection)
+        sql
+        for kind, name, sql in _schema_objects(connection)
         if kind == "index" and name == "session_events_terminal_idx"
     )
     normalized = re.sub(r"\s+", "", terminal_sql or "").casefold()
@@ -1207,9 +1424,7 @@ def _assert_run_lease(
         (run_id, validated_owner, fencing_token),
     ).fetchone()
     if row is None:
-        raise SessionRunLeaseLostError(
-            f"run lease owner or fencing token was lost for {run_id}"
-        )
+        raise SessionRunLeaseLostError(f"run lease owner or fencing token was lost for {run_id}")
 
 
 def _has_unresolved_approval(connection: sqlite3.Connection, run_id: str) -> bool:

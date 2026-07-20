@@ -70,10 +70,7 @@ class ToolBindingFakeModel(BindableFakeMessagesListChatModel):
 
     def bind_tools(self, tools, *, tool_choice=None, **kwargs):  # type: ignore[no-untyped-def]
         type(self).seen_tool_names.append(
-            {
-                str(getattr(item, "name", "") or item.get("name", ""))
-                for item in tools
-            }
+            {str(getattr(item, "name", "") or item.get("name", "")) for item in tools}
         )
         return super().bind_tools(tools, tool_choice=tool_choice, **kwargs)
 
@@ -100,7 +97,7 @@ def test_event_adapter_does_not_stream_legacy_tool_protocol_as_answer_text() -> 
     ai = AIMessage(
         content=(
             '<tool>{"name":"search_web","args":{"query":"private"}}</tool>'
-            '<final>Public answer only.</final>'
+            "<final>Public answer only.</final>"
         ),
         id="ai-legacy",
     )
@@ -372,9 +369,7 @@ def test_event_adapter_preserves_failed_tool_message_status() -> None:
         status="error",
     )
 
-    events = adapter.adapt(
-        HarnessStreamItem(1, "messages", (tool, {}), "source-timeout")
-    )
+    events = adapter.adapt(HarnessStreamItem(1, "messages", (tool, {}), "source-timeout"))
 
     assert len(events) == 1
     assert events[0].status == "error"
@@ -492,9 +487,7 @@ def test_message_payload_expands_structured_evidence_tool_content() -> None:
             name="knowledge_search",
         )
     )
-    web = message_payload(
-        ToolMessage(content=content, tool_call_id="call-web", name="search_web")
-    )
+    web = message_payload(ToolMessage(content=content, tool_call_id="call-web", name="search_web"))
 
     assert len(str(regular["content"])) == 4_000
     assert knowledge["content"] == content
@@ -515,13 +508,9 @@ def test_event_adapter_projects_only_scoped_tool_artifact_metadata() -> None:
         },
     )
 
-    event = adapter.adapt(
-        HarnessStreamItem(1, "messages", (message, {}), "source-artifact")
-    )[0]
+    event = adapter.adapt(HarnessStreamItem(1, "messages", (message, {}), "source-artifact"))[0]
 
-    assert event.payload["artifact_ref"] == (
-        "sage://coding/s1/runs/r1/tool-results/call-shell.txt"
-    )
+    assert event.payload["artifact_ref"] == ("sage://coding/s1/runs/r1/tool-results/call-shell.txt")
     assert event.payload["original_chars"] == 20_000
     assert event.payload["truncated"] is True
     assert "private_path" not in event.payload
@@ -609,9 +598,7 @@ def test_event_adapter_deduplicates_model_and_executor_tool_events() -> None:
         ],
     )
 
-    model_call = adapter.adapt(
-        HarnessStreamItem(1, "messages", (chunk, {}), "source-model")
-    )
+    model_call = adapter.adapt(HarnessStreamItem(1, "messages", (chunk, {}), "source-model"))
     duplicate_custom_call = adapter.adapt(
         HarnessStreamItem(
             2,
@@ -800,12 +787,10 @@ def test_runtime_adapter_keeps_model_budget_for_the_same_run_id(
                 "workspace_path": str(tmp_path),
             }
             first = [
-                event.payload
-                async for event in adapter.stream_turn(content="first", **common)
+                event.payload async for event in adapter.stream_turn(content="first", **common)
             ]
             second = [
-                event.payload
-                async for event in adapter.stream_turn(content="resume", **common)
+                event.payload async for event in adapter.stream_turn(content="resume", **common)
             ]
             return first, second
 
@@ -892,7 +877,9 @@ def test_runtime_adapter_reuses_sqlite_checkpoint_across_turns(tmp_path: Path) -
 
     first, second = asyncio.run(run())
     assert any(item.get("type") == "text_delta" and item.get("delta") == "first" for item in first)
-    assert any(item.get("type") == "text_delta" and item.get("delta") == "second" for item in second)
+    assert any(
+        item.get("type") == "text_delta" and item.get("delta") == "second" for item in second
+    )
 
 
 @pytest.mark.parametrize(
@@ -935,9 +922,7 @@ def test_runtime_adapter_rejects_cross_scope_checkpoint_before_model_call(
                         owner_id=second_owner,
                         workspace_id=second_workspace,
                         workspace_path=(
-                            str(tmp_path)
-                            if second_path == "same"
-                            else str(tmp_path / second_path)
+                            str(tmp_path) if second_path == "same" else str(tmp_path / second_path)
                         ),
                         content="second",
                     )
@@ -1120,8 +1105,7 @@ def test_runtime_adapter_promotes_deferred_tool_before_execution(tmp_path: Path)
     )
     assert "todo_list" in str(search_result["content"])
     assert any(
-        item.get("type") == "tool_result" and item.get("tool") == "todo_list"
-        for item in payloads
+        item.get("type") == "tool_result" and item.get("tool") == "todo_list" for item in payloads
     )
     promoted = state["promoted_tools"]
     assert isinstance(promoted, dict)
@@ -1251,7 +1235,10 @@ def test_deferred_promotion_survives_graph_rebuild_for_next_turn(tmp_path: Path)
                 ]
             )
             second_bundle = build_deerflow_coding_tool_bundle(runtime, run_id="r-second")
-            assert second_bundle.deferred_setup.catalog_hash == first_bundle.deferred_setup.catalog_hash
+            assert (
+                second_bundle.deferred_setup.catalog_hash
+                == first_bundle.deferred_setup.catalog_hash
+            )
             second_adapter = SageHarnessRuntimeAdapter(
                 model=second_model,
                 checkpointer=saver,
@@ -1274,8 +1261,7 @@ def test_deferred_promotion_survives_graph_rebuild_for_next_turn(tmp_path: Path)
 
     assert "todo_list" in first_visible
     assert any(
-        item.get("type") == "tool_result" and item.get("tool") == "todo_list"
-        for item in payloads
+        item.get("type") == "tool_result" and item.get("tool") == "todo_list" for item in payloads
     )
 
 
@@ -1437,9 +1423,7 @@ def test_event_adapter_binds_memory_proposal_to_current_run() -> None:
         ),
     )
 
-    events = adapter.adapt(
-        HarnessStreamItem(1, "messages", (tool, {}), "source-memory-tool")
-    )
+    events = adapter.adapt(HarnessStreamItem(1, "messages", (tool, {}), "source-memory-tool"))
 
     assert [event.payload["type"] for event in events] == [
         "tool_result",
@@ -1503,6 +1487,33 @@ def test_deerflow_context_projects_only_bounded_summary_todos_and_memory_refs(
     assert refs[0]["memory_id"].startswith("memory_")
     assert refs[0]["summary"] == "Use SQLite checkpoints"
     assert "history" not in projected
+
+
+def test_deerflow_context_projects_frozen_thread_goal_and_receipt(tmp_path: Path) -> None:
+    from core.coding.runtime import CodingRuntime
+
+    runtime = CodingRuntime(
+        session_id="s1",
+        workspace_root=tmp_path,
+        model=object(),
+        storage_root=tmp_path / ".coding",
+    )
+    goal = {
+        "goal_id": "goal-1",
+        "revision": 4,
+        "description": "验证 checkpoint 恢复",
+        "completion_criteria": ["恢复后不重复执行工具"],
+        "status": "active",
+        "updated_at": "2026-07-20T00:00:00+00:00",
+    }
+
+    projected = build_deerflow_durable_context(runtime, thread_goal=goal)
+    event = context_status_event(runtime, "r1", projected)
+
+    assert projected["goal"] == {**goal, "status": "in_progress"}
+    assert event is not None
+    assert event.payload["thread_goal_id"] == "goal-1"
+    assert event.payload["thread_goal_revision"] == 4
 
 
 def test_runtime_adapter_restores_durable_context_from_checkpoint(tmp_path: Path) -> None:
@@ -1774,10 +1785,10 @@ def test_runtime_adapter_streams_proposal_only_memory_tool(tmp_path: Path) -> No
 
     payloads, runtime = asyncio.run(run())
 
-    assert any(item.get("type") == "tool_call" and item.get("tool") == "remember" for item in payloads)
-    proposal_event = next(
-        item for item in payloads if item.get("type") == "memory_proposal_ready"
+    assert any(
+        item.get("type") == "tool_call" and item.get("tool") == "remember" for item in payloads
     )
+    proposal_event = next(item for item in payloads if item.get("type") == "memory_proposal_ready")
     assert proposal_event["candidate_count"] == 1
     assert "content" not in proposal_event
     assert any(item.get("type") == "tool_result" for item in payloads)

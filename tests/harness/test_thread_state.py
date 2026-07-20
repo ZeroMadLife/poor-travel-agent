@@ -149,6 +149,30 @@ def test_terminal_goal_and_delegation_cannot_be_downgraded() -> None:
         merge_delegations([delegation], [{"id": "d1", "status": "failed"}])
 
 
+def test_cancelled_goal_can_only_reopen_with_a_later_update() -> None:
+    cancelled = {
+        "goal_id": "g1",
+        "revision": 2,
+        "status": "cancelled",
+        "updated_at": "2026-07-20T08:00:00+00:00",
+    }
+    stale = {
+        "goal_id": "g1",
+        "revision": 1,
+        "status": "in_progress",
+        "updated_at": "2026-07-20T07:59:59+00:00",
+    }
+    reopened = {
+        "goal_id": "g1",
+        "revision": 3,
+        "status": "in_progress",
+        "updated_at": "2026-07-20T08:00:01+00:00",
+    }
+
+    assert merge_goal(cancelled, stale) == cancelled
+    assert merge_goal(cancelled, reopened) == {**cancelled, **reopened}
+
+
 def test_skill_refs_are_bounded_and_normalized() -> None:
     refs = [
         {"path": f"skills/{index}", "description": "a  long\n description"} for index in range(10)

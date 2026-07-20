@@ -64,7 +64,9 @@ class GoalState(TypedDict, total=False):
     """A single durable objective whose terminal state cannot be downgraded."""
 
     goal_id: str
+    revision: int
     description: str
+    completion_criteria: list[str]
     status: GoalStatus
     updated_at: str
 
@@ -250,6 +252,12 @@ def merge_goal(existing: GoalState | None, new: GoalState | None) -> GoalState |
 
     old_status = existing.get("status")
     new_status = new.get("status")
+    if (
+        old_status == "cancelled"
+        and new_status not in TERMINAL_GOAL_STATUSES
+        and str(new.get("updated_at", "")) > str(existing.get("updated_at", ""))
+    ):
+        return {**existing, **new}
     if old_status in TERMINAL_GOAL_STATUSES and new_status not in TERMINAL_GOAL_STATUSES:
         return existing
     if (

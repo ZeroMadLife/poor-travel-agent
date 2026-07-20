@@ -50,6 +50,27 @@ async def test_subscribe_bridges_history_and_live_without_gap_or_duplicate(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_start_run_freezes_thread_goal_in_run_started(tmp_path: Path) -> None:
+    journal = SessionEventJournal(tmp_path, "session-1")
+    coordinator = RunCoordinator(journal)
+    goal = {
+        "goal_id": "goal-1",
+        "revision": 4,
+        "description": "验证恢复",
+        "status": "active",
+    }
+
+    task = await coordinator.start_run(
+        "run-goal",
+        _events(RunEvent(kind="assistant", status="completed", payload={"content": "ok"})),
+        thread_goal=goal,
+    )
+    await task
+
+    assert journal.run_thread_goal("run-goal") == goal
+
+
+@pytest.mark.asyncio
 async def test_closing_subscription_does_not_cancel_run(tmp_path: Path) -> None:
     coordinator = RunCoordinator(SessionEventJournal(tmp_path, "session-1"))
     release = asyncio.Event()
@@ -304,7 +325,8 @@ async def test_repeated_cancel_waits_for_cleanup_and_closes_unowned_stream(
     assert stream.closed is True
     assert journal.active_run_id() is None
     assert [item.status for item in journal.replay(after=0, limit=10).items] == [
-        "running", "cancelled",
+        "running",
+        "cancelled",
     ]
 
 
@@ -351,9 +373,7 @@ async def test_active_run_repeated_cancel_waits_for_terminal_cleanup(
 async def test_new_owner_recovers_dead_process_lease(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    owner_a = RunCoordinator(
-        SessionEventJournal(tmp_path, "session-1"), owner_id="owner-a"
-    )
+    owner_a = RunCoordinator(SessionEventJournal(tmp_path, "session-1"), owner_id="owner-a")
     new_owner = RunCoordinator(SessionEventJournal(tmp_path, "session-1"), owner_id="owner-b")
     release = asyncio.Event()
 
@@ -363,18 +383,14 @@ async def test_new_owner_recovers_dead_process_lease(
             yield RunEvent(kind="tool", status="running", payload={})
 
     task = await owner_a.start_run("run-1", blocked())
-    contender = RunCoordinator(
-        SessionEventJournal(tmp_path, "session-1"), owner_id="owner-a"
-    )
+    contender = RunCoordinator(SessionEventJournal(tmp_path, "session-1"), owner_id="owner-a")
     with pytest.raises(ActiveRunConflictError, match="run-1"):
         await contender.start_run("run-2", _events())
 
     monkeypatch.setattr(
         journal_module,
         "_process_identity",
-        lambda _pid: journal_module._ProcessIdentity(
-            journal_module._ProcessIdentityState.ABSENT
-        ),
+        lambda _pid: journal_module._ProcessIdentity(journal_module._ProcessIdentityState.ABSENT),
     )
 
     assert await new_owner.recover_interrupted_runs() == ("run-1",)
@@ -410,9 +426,7 @@ async def test_recovery_does_not_take_lease_from_live_different_owner(tmp_path: 
 async def test_recovered_stale_owner_cannot_append_after_interrupted_terminal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    old_owner = RunCoordinator(
-        SessionEventJournal(tmp_path, "session-1"), owner_id="old"
-    )
+    old_owner = RunCoordinator(SessionEventJournal(tmp_path, "session-1"), owner_id="old")
     new_owner = RunCoordinator(SessionEventJournal(tmp_path, "session-1"), owner_id="new")
     release = asyncio.Event()
 
@@ -424,9 +438,7 @@ async def test_recovered_stale_owner_cannot_append_after_interrupted_terminal(
     monkeypatch.setattr(
         journal_module,
         "_process_identity",
-        lambda _pid: journal_module._ProcessIdentity(
-            journal_module._ProcessIdentityState.ABSENT
-        ),
+        lambda _pid: journal_module._ProcessIdentity(journal_module._ProcessIdentityState.ABSENT),
     )
     assert await new_owner.recover_interrupted_runs() == ("run-1",)
     release.set()
@@ -526,7 +538,9 @@ async def test_cancel_token_cancels_task_and_persists_one_terminal(tmp_path: Pat
     assert await coordinator.cancel("run-1") is False
 
     events = coordinator.journal.replay(after=0, limit=20).items
-    terminal = [item for item in events if item.status in {"completed", "cancelled", "error", "interrupted"}]
+    terminal = [
+        item for item in events if item.status in {"completed", "cancelled", "error", "interrupted"}
+    ]
     assert [item.status for item in terminal] == ["cancelled"]
 
 

@@ -2,7 +2,7 @@ import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
 import type { HarnessReviewBundle } from '../../../harness/reviewBundle'
 import type { HarnessProjection } from '../../../harness/types'
-import type { CodingKnowledgeSourceProposal } from '../../../types/api'
+import type { CodingKnowledgeSourceProposal, CodingThreadGoal } from '../../../types/api'
 import CodingHarnessWorkbench from './CodingHarnessWorkbench.vue'
 
 function projection(): HarnessProjection {
@@ -71,6 +71,18 @@ function sourceProposal(): CodingKnowledgeSourceProposal {
   }
 }
 
+function threadGoal(): CodingThreadGoal {
+  return {
+    goal_id: 'goal-1', revision: 3, description: '掌握 LangGraph checkpoint 恢复',
+    completion_criteria: ['解释 thread 与 checkpoint 的差异', '给出官方引用'],
+    status: 'active', created_at: '2026-07-20T08:00:00Z', updated_at: '2026-07-20T08:01:00Z',
+    evaluation: {
+      status: 'continue', blocker: 'goal_not_met_yet', evidence_refs: ['event-1'],
+      next_action: '继续补齐官方证据', source_run_id: 'run-a', evaluated_at: '2026-07-20T08:01:00Z',
+    },
+  }
+}
+
 describe('CodingHarnessWorkbench', () => {
   it('projects a running timeline as active learning without inventing mastery', () => {
     const wrapper = mount(CodingHarnessWorkbench, {
@@ -86,7 +98,7 @@ describe('CodingHarnessWorkbench', () => {
     expect(wrapper.get('.workbench-metrics').text()).toContain('3')
     expect(wrapper.get('[aria-current="step"]').text()).toContain('调用工具')
     expect(wrapper.get('.workbench-mark').classes()).toContain('running')
-    expect(wrapper.get('.evidence-summary').text()).toContain('尚未验证')
+    expect(wrapper.get('.evidence-summary').text()).toContain('尚未评估')
   })
 
   it('exposes failed and completed states on the workbench chrome', async () => {
@@ -103,7 +115,7 @@ describe('CodingHarnessWorkbench', () => {
     expect(wrapper.get('.metric-state').text()).toContain('已完成')
   })
 
-  it('uses an honest goal-contract surface before the first run', () => {
+  it('creates a durable goal contract before the first run', async () => {
     const current = projection()
     const wrapper = mount(CodingHarnessWorkbench, {
       props: {
@@ -117,8 +129,67 @@ describe('CodingHarnessWorkbench', () => {
 
     expect(wrapper.attributes('data-journey')).toBe('contract')
     expect(wrapper.get('.contract-surface').text()).toContain('目标尚未确认')
-    expect(wrapper.get('.contract-surface').text()).toContain('等待在对话中确认')
     expect(wrapper.get('.contract-surface').text()).not.toContain('42%')
+    await wrapper.get('textarea[aria-label="完成标准"]').setValue('完成一次恢复演练\n给出可追溯证据')
+    await wrapper.get('.goal-contract-form').trigger('submit')
+    expect(wrapper.emitted('saveGoal')).toEqual([[
+      '成为独立交付 AI Agent 的工程师',
+      ['完成一次恢复演练', '给出可追溯证据'],
+    ]])
+  })
+
+  it('uses the persisted goal revision and exposes manual continuation', async () => {
+    const current = projection()
+    const wrapper = mount(CodingHarnessWorkbench, {
+      props: {
+        projection: {
+          ...current, runId: '', status: 'idle', activeStageId: null,
+          stages: [], visitedPath: [], lastSequence: 0,
+        },
+        sessionTitle: '旧会话标题',
+        connectionState: 'connected',
+        threadGoal: threadGoal(),
+      },
+    })
+
+    expect(wrapper.attributes('data-journey')).toBe('active')
+    expect(wrapper.get('.goal-heading').text()).toContain('掌握 LangGraph checkpoint 恢复')
+    expect(wrapper.get('.goal-heading').text()).toContain('rev 3')
+    expect(wrapper.get('.evidence-summary').text()).toContain('目标尚未满足')
+    await wrapper.get('.goal-actions button.primary').trigger('click')
+    expect(wrapper.emitted('continueGoal')).toEqual([[]])
+  })
+
+  it('offers Goal setup to a completed legacy Thread without an existing Goal', () => {
+    const current = projection()
+    const wrapper = mount(CodingHarnessWorkbench, {
+      props: {
+        projection: { ...current, status: 'completed', activeStageId: null },
+        sessionTitle: '已有历史但尚未设置目标',
+      },
+    })
+
+    expect(wrapper.attributes('data-journey')).toBe('contract')
+    expect(
+      (wrapper.get('textarea[aria-label="目标结果"]').element as HTMLTextAreaElement).value,
+    ).toBe('已有历史但尚未设置目标')
+  })
+
+  it('edits an existing Goal through the same revisioned contract', async () => {
+    const wrapper = mount(CodingHarnessWorkbench, {
+      props: {
+        projection: { ...projection(), runId: '', status: 'idle', activeStageId: null },
+        sessionTitle: '会话', connectionState: 'connected', threadGoal: threadGoal(),
+      },
+    })
+
+    await wrapper.get('.goal-actions button').trigger('click')
+    await wrapper.get('textarea[aria-label="编辑目标结果"]').setValue('更新后的目标')
+    await wrapper.get('.goal-edit-form').trigger('submit')
+    expect(wrapper.emitted('saveGoal')?.[0]).toEqual([
+      '更新后的目标',
+      ['解释 thread 与 checkpoint 的差异', '给出官方引用'],
+    ])
   })
 
   it('shows deposit review only for a real pending proposal', () => {

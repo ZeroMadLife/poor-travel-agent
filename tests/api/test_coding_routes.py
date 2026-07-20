@@ -959,8 +959,8 @@ def test_resume_keeps_runtime_while_startup_lease_is_being_published(
         coordinator = app.state.coding_run_registry.get(session_id)
         original_begin = coordinator.journal.begin_run
 
-        def blocked_begin(run_id: str, *, owner_id: str, owner_pid: int):
-            result = original_begin(run_id, owner_id=owner_id, owner_pid=owner_pid)
+        def blocked_begin(run_id: str, **kwargs):
+            result = original_begin(run_id, **kwargs)
             lease_written.set()
             assert allow_start.wait(timeout=2)
             return result
