@@ -13,7 +13,7 @@
   + 知识检索
   + 受限子代理
   + 运行状态
-  + 可追溯证据
+  + 可追溯证据 
   + Web 交互
 = 一个能连接个人项目、笔记、文档，持续形成知识资产的系统
 ```
@@ -85,6 +85,12 @@ CHANGELOG 回答"改了什么"，learning 回答"**为什么这么设计**"。
 13. [[13-module-map]] - 模块速查表
 
 这一遍重点看：**哪些地方必须 fail-closed，哪些攻击面已经被覆盖，哪些还没有。**
+
+### 第五遍：框架深入（面试高频考点）
+
+14. [[14-create-agent-langchain-langgraph]] - create_agent 与 LangChain/LangGraph 深入
+
+这一遍重点看：**LangChain 和 LangGraph 的区别、create_agent 内部做了什么、State/reducer/checkpointer/middleware 的协作机制、为什么选这套而不是自研 XML 协议。** 面试必问。
 
 ## 一张图记住主线
 
