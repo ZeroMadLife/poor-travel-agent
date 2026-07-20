@@ -2,15 +2,19 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   approveCodingPlan,
   buildCodingStreamUrl,
+  clearCodingThreadGoal,
+  evaluateCodingThreadGoal,
   fetchCodingApprovalPending,
   fetchCodingRun,
   fetchCodingRuns,
   fetchCodingSessionMessages,
   fetchCodingTimeline,
   fetchCodingTimelineTail,
+  fetchCodingThreadGoal,
   fetchOlderCodingTimeline,
   fetchCodingSessions,
   rejectCodingPlan,
+  prepareCodingThreadGoalContinue,
   respondCodingApproval,
   resumeCodingSession,
   startCodingSession,
@@ -25,11 +29,44 @@ import {
   rejectKnowledgeSourceProposal,
   rejectMemoryProposal,
   updateCloudModelProvider,
+  upsertCodingThreadGoal,
 } from './coding'
 
 describe('coding API client', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
+  })
+
+  it('uses monotonic Goal revisions for create, evaluate, continue and clear', async () => {
+    const goal = {
+      goal_id: 'goal-1', revision: 4, description: '掌握 checkpoint 恢复',
+      completion_criteria: ['完成恢复演练'], status: 'active', evaluation: null,
+      created_at: '', updated_at: '',
+    }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ goal: null, revision: 3 }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ goal, revision: 4 }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ goal: { ...goal, revision: 5 }, revision: 5 }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({
+        goal_id: 'goal-1', goal_revision: 5, prompt: '继续目标',
+      }) })
+      .mockResolvedValueOnce({ ok: true, status: 204 })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(fetchCodingThreadGoal('c1')).resolves.toEqual({ goal: null, revision: 3 })
+    await upsertCodingThreadGoal('c1', 3, goal.description, goal.completion_criteria)
+    await evaluateCodingThreadGoal('c1', 4)
+    await prepareCodingThreadGoalContinue('c1', 5)
+    await clearCodingThreadGoal('c1', 5)
+
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1].body))).toEqual({
+      expected_revision: 3,
+      description: goal.description,
+      completion_criteria: goal.completion_criteria,
+    })
+    expect(JSON.parse(String(fetchMock.mock.calls[2][1].body))).toEqual({ expected_revision: 4 })
+    expect(JSON.parse(String(fetchMock.mock.calls[3][1].body))).toEqual({ expected_revision: 5 })
+    expect(JSON.parse(String(fetchMock.mock.calls[4][1].body))).toEqual({ expected_revision: 5 })
   })
 
   it('treats an unauthenticated account Provider catalog as a local-mode fallback', async () => {

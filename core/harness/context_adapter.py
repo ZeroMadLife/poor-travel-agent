@@ -32,9 +32,22 @@ def build_deerflow_system_prompt(runtime: CodingRuntime) -> str:
     return f"{base}\n\n{memory_block}" if memory_block else base
 
 
-def build_deerflow_durable_context(runtime: CodingRuntime) -> dict[str, object]:
+def build_deerflow_durable_context(
+    runtime: CodingRuntime,
+    *,
+    thread_goal: Mapping[str, Any] | None = None,
+) -> dict[str, object]:
     """Project bounded host-owned context channels into the graph checkpoint."""
     projected: dict[str, object] = {}
+    if thread_goal is not None:
+        goal = dict(thread_goal)
+        status = str(goal.get("status", "active"))
+        goal["status"] = {
+            "active": "in_progress",
+            "blocked": "in_progress",
+            "satisfied": "succeeded",
+        }.get(status, status)
+        projected["goal"] = goal
     checkpoint = getattr(runtime, "_active_checkpoint", None)
     summary = getattr(checkpoint, "summary", None)
     if summary is not None and callable(getattr(summary, "render_for_prompt", None)):
@@ -88,7 +101,8 @@ def context_status_event(
 ) -> RunEvent | None:
     """Project only configured context-budget fields; never expose history contents."""
     snapshot = runtime.context_snapshot()
-    if not snapshot.get("configured"):
+    goal = (durable_context or {}).get("goal")
+    if not snapshot.get("configured") and not isinstance(goal, Mapping):
         return None
     allowed = {
         "model_limit_tokens",
@@ -113,6 +127,8 @@ def context_status_event(
         "summary_available": bool((durable_context or {}).get("summary_text")),
         "todo_count": len(todos) if isinstance(todos, list | tuple) else 0,
         "memory_ref_count": len(memory_refs) if isinstance(memory_refs, list | tuple) else 0,
+        "thread_goal_id": str(goal.get("goal_id", "")) if isinstance(goal, Mapping) else "",
+        "thread_goal_revision": (int(goal.get("revision", 0)) if isinstance(goal, Mapping) else 0),
     }
     payload.update({key: snapshot[key] for key in allowed if key in snapshot})
     return RunEvent(

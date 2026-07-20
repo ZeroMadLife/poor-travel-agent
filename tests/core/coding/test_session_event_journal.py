@@ -16,6 +16,7 @@ from core.coding.persistence.session_event_journal import (
     SessionEventJournalError,
     SessionEventJournalOperationalError,
     SessionRunLeaseConflictError,
+    SessionThreadGoalConflictError,
 )
 
 
@@ -41,6 +42,93 @@ def test_replay_survives_restart_with_stable_ids_and_sequences(tmp_path: Path) -
     assert [item.sequence for item in page.items] == [1, 2]
     assert page.next_cursor == 2
     assert page.has_more is False
+
+
+def test_thread_goal_events_are_revisioned_recoverable_and_clearable(tmp_path: Path) -> None:
+    journal = SessionEventJournal(tmp_path, "session-1")
+    first = {
+        "goal_id": "goal-1",
+        "revision": 1,
+        "description": "掌握 checkpoint 恢复边界",
+        "completion_criteria": ["能引用官方资料说明恢复差异"],
+        "status": "active",
+        "evaluation": {
+            "status": "continue",
+            "blocker": "goal_not_met_yet",
+            "evidence_refs": [],
+            "next_action": "开始收集证据",
+            "source_run_id": None,
+            "evaluated_at": "2026-07-20T00:00:00+00:00",
+        },
+        "created_at": "2026-07-20T00:00:00+00:00",
+        "updated_at": "2026-07-20T00:00:00+00:00",
+    }
+    stored = journal.append_thread_goal(
+        event_type="thread_goal_updated",
+        expected_revision=0,
+        goal=first,
+    )
+
+    assert stored.kind == "harness"
+    assert stored.payload["type"] == "thread_goal_updated"
+    assert SessionEventJournal(tmp_path, "session-1").current_thread_goal() == first
+
+    with pytest.raises(SessionThreadGoalConflictError) as conflict:
+        journal.append_thread_goal(
+            event_type="thread_goal_updated",
+            expected_revision=0,
+            goal={**first, "revision": 1, "description": "stale"},
+        )
+    assert conflict.value.current_revision == 1
+
+    cleared = journal.clear_thread_goal(expected_revision=1)
+    assert cleared.payload == {
+        "type": "thread_goal_cleared",
+        "version": 1,
+        "goal_id": "goal-1",
+        "revision": 2,
+    }
+    assert SessionEventJournal(tmp_path, "session-1").current_thread_goal() is None
+    assert SessionEventJournal(tmp_path, "session-1").current_thread_goal_revision() == 2
+
+    recreated = {**first, "revision": 3, "description": "recreated"}
+    journal.append_thread_goal(
+        event_type="thread_goal_updated",
+        expected_revision=2,
+        goal=recreated,
+    )
+    assert journal.current_thread_goal() == recreated
+
+    with pytest.raises(SessionThreadGoalConflictError) as stale_after_recreate:
+        journal.append_thread_goal(
+            event_type="thread_goal_updated",
+            expected_revision=1,
+            goal={**recreated, "revision": 2, "description": "aba stale"},
+        )
+    assert stale_after_recreate.value.current_revision == 3
+
+
+def test_begin_run_freezes_thread_goal_for_resume(tmp_path: Path) -> None:
+    journal = SessionEventJournal(tmp_path, "session-1")
+    goal = {
+        "goal_id": "goal-1",
+        "revision": 3,
+        "description": "完成一次可恢复练习",
+        "completion_criteria": ["恢复后不重复执行工具"],
+        "status": "active",
+        "evaluation": None,
+        "created_at": "2026-07-20T00:00:00+00:00",
+        "updated_at": "2026-07-20T00:00:00+00:00",
+    }
+    begun = journal.begin_run(
+        "run-1",
+        owner_id="owner-1",
+        owner_pid=os.getpid(),
+        thread_goal=goal,
+    )
+
+    assert begun.event.payload["thread_goal"] == goal
+    assert journal.run_thread_goal("run-1") == goal
 
 
 def test_resume_run_reacquires_lease_without_duplicate_start(tmp_path: Path) -> None:
@@ -302,7 +390,9 @@ def test_replay_before_uses_one_read_snapshot_for_rows_and_high_water(
 def test_concurrent_append_allocates_strict_session_sequence(tmp_path: Path) -> None:
     journal = SessionEventJournal(tmp_path, "session-1")
     with ThreadPoolExecutor(max_workers=8) as executor:
-        stored = list(executor.map(lambda index: _append(journal, payload={"index": index}), range(40)))
+        stored = list(
+            executor.map(lambda index: _append(journal, payload={"index": index}), range(40))
+        )
 
     assert sorted(item.sequence for item in stored) == list(range(1, 41))
     assert [item.sequence for item in journal.replay(after=0, limit=50).items] == list(range(1, 41))
@@ -347,7 +437,9 @@ def test_schema_tampering_fails_closed_without_rebuild(tmp_path: Path) -> None:
     with pytest.raises(SessionEventJournalError, match="schema"):
         SessionEventJournal(tmp_path, "session-1")
     with sqlite3.connect(journal.path) as connection:
-        assert "injected" in {row[1] for row in connection.execute("PRAGMA table_info(session_events)")}
+        assert "injected" in {
+            row[1] for row in connection.execute("PRAGMA table_info(session_events)")
+        }
 
 
 def test_noncanonical_table_with_same_column_names_is_rejected(tmp_path: Path) -> None:
@@ -412,9 +504,7 @@ def test_corrupt_json_payload_is_detected_on_replay(tmp_path: Path) -> None:
         ("status", "interrupted"),
     ],
 )
-def test_replay_rejects_tampered_nonterminal_rows(
-    tmp_path: Path, column: str, value: str
-) -> None:
+def test_replay_rejects_tampered_nonterminal_rows(tmp_path: Path, column: str, value: str) -> None:
     journal = SessionEventJournal(tmp_path, "session-1")
     event = _append(journal)
     with sqlite3.connect(journal.path) as connection:
@@ -445,9 +535,7 @@ def test_terminal_append_is_atomic_and_idempotent(tmp_path: Path) -> None:
     first = journal.append_terminal_once(
         run_id="run-1", status="completed", payload={"answer": "done"}
     )
-    second = journal.append_terminal_once(
-        run_id="run-1", status="error", payload={"error": "late"}
-    )
+    second = journal.append_terminal_once(run_id="run-1", status="error", payload={"error": "late"})
 
     assert second == first
     assert [item.status for item in journal.replay(after=0, limit=10).items] == ["completed"]
@@ -493,13 +581,9 @@ def test_active_lease_cannot_be_bypassed_by_omitting_fencing_credentials(
     with pytest.raises(SessionEventJournalError, match="lease|fenc|owner"):
         journal.append(run_id="run-1", kind="tool", status="done", payload={})
     with pytest.raises(SessionEventJournalError, match="lease|fenc|owner"):
-        journal.append_terminal_and_release(
-            run_id="run-1", status="completed", payload={}
-        )
+        journal.append_terminal_and_release(run_id="run-1", status="completed", payload={})
     with pytest.raises(SessionEventJournalError, match="lease|fenc|owner"):
-        journal.append_terminal_once(
-            run_id="run-1", status="completed", payload={}
-        )
+        journal.append_terminal_once(run_id="run-1", status="completed", payload={})
 
     assert journal.active_run_id() == "run-1"
 
@@ -513,9 +597,10 @@ def test_release_requires_matching_owner_and_fencing_token(tmp_path: Path) -> No
             "run-1", owner_id="wrong-owner", fencing_token=begun.fencing_token
         )
     assert journal.active_run_id() == "run-1"
-    assert journal.release_run_lease(
-        "run-1", owner_id="owner-1", fencing_token=begun.fencing_token
-    ) is True
+    assert (
+        journal.release_run_lease("run-1", owner_id="owner-1", fencing_token=begun.fencing_token)
+        is True
+    )
 
 
 def test_pid_reuse_does_not_make_previous_process_owner_live(
@@ -554,9 +639,7 @@ def test_transient_identity_failure_does_not_recover_live_lease(
     monkeypatch.setattr(
         journal_module,
         "_process_identity",
-        lambda _pid: journal_module._ProcessIdentity(
-            journal_module._ProcessIdentityState.UNKNOWN
-        ),
+        lambda _pid: journal_module._ProcessIdentity(journal_module._ProcessIdentityState.UNKNOWN),
     )
 
     with pytest.raises(SessionEventJournalOperationalError, match="temporarily unavailable"):
@@ -572,9 +655,7 @@ def test_begin_run_fails_when_live_owner_identity_is_unknown(
     monkeypatch.setattr(
         journal_module,
         "_process_identity",
-        lambda _pid: journal_module._ProcessIdentity(
-            journal_module._ProcessIdentityState.UNKNOWN
-        ),
+        lambda _pid: journal_module._ProcessIdentity(journal_module._ProcessIdentityState.UNKNOWN),
     )
 
     with pytest.raises(SessionEventJournalOperationalError, match="reliable process identity"):
@@ -620,7 +701,9 @@ def test_v1_journal_migrates_to_persistent_lease_schema(tmp_path: Path) -> None:
     assert [item.event_id for item in migrated.replay(after=0, limit=10).items] == ["event-1"]
     assert migrated.active_run_id() is None
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == journal_module.SCHEMA_VERSION
+        assert (
+            connection.execute("PRAGMA user_version").fetchone()[0] == journal_module.SCHEMA_VERSION
+        )
         assert connection.execute(
             "SELECT name FROM sqlite_schema WHERE name = 'active_run_lease'"
         ).fetchone() == ("active_run_lease",)

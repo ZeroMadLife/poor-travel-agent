@@ -698,6 +698,44 @@ export type CodingTimelineResponse = {
   active_run: CodingActiveRun | null
 }
 
+export type CodingThreadGoalEvaluationStatus = 'satisfied' | 'blocked' | 'continue'
+
+export type CodingThreadGoalBlocker =
+  | 'missing_evidence'
+  | 'needs_user_input'
+  | 'run_failed'
+  | 'external_wait'
+  | 'goal_not_met_yet'
+  | 'no_progress'
+
+export type CodingThreadGoalEvaluation = {
+  status: CodingThreadGoalEvaluationStatus
+  blocker: CodingThreadGoalBlocker | null
+  evidence_refs: string[]
+  next_action: string
+  source_run_id: string | null
+  evaluated_at: string
+}
+
+export type CodingThreadGoal = {
+  goal_id: string
+  revision: number
+  description: string
+  completion_criteria: string[]
+  status: 'active' | 'blocked' | 'satisfied'
+  evaluation: CodingThreadGoalEvaluation | null
+  created_at: string
+  updated_at: string
+}
+
+export type CodingThreadGoalResponse = { goal: CodingThreadGoal | null; revision: number }
+
+export type CodingThreadGoalContinueResponse = {
+  goal_id: string
+  goal_revision: number
+  prompt: string
+}
+
 export type CodingApproval = {
   approval_id: string
   session_id: string

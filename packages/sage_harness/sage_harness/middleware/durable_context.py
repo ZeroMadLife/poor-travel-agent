@@ -73,12 +73,25 @@ def _normalize_durable_context(value: object) -> dict[str, object]:
         result["summary_text"] = _bound_text(summary, _MAX_SUMMARY_CHARS)
     goal = value.get("goal")
     if isinstance(goal, Mapping):
-        normalized_goal = {
+        normalized_goal: dict[str, object] = {
             str(key): _bound_text(raw, 1_024)
             for key, raw in goal.items()
-            if raw is not None
-            and str(key) in {"goal_id", "description", "status", "updated_at"}
+            if raw is not None and str(key) in {"goal_id", "description", "status", "updated_at"}
         }
+        revision = goal.get("revision")
+        if isinstance(revision, int) and not isinstance(revision, bool) and revision >= 0:
+            normalized_goal["revision"] = revision
+        criteria = (
+            [
+                _bound_text(item, 500)
+                for item in list(goal.get("completion_criteria", []))[:8]
+                if str(item).strip()
+            ]
+            if isinstance(goal.get("completion_criteria"), list | tuple)
+            else []
+        )
+        if criteria:
+            normalized_goal["completion_criteria"] = criteria
         if normalized_goal:
             result["goal"] = normalized_goal
     todos = _record_list(
@@ -133,7 +146,15 @@ def _render_durable_context(value: Mapping[str, object]) -> str:
         description = escape(str(goal.get("description", "")), quote=False)
         status = escape(str(goal.get("status", "pending")), quote=False)
         if description:
-            sections.append(f"## Goal\n- [{status}] {description}")
+            criteria = goal.get("completion_criteria")
+            lines = [f"## Goal\n- [{status}] {description}"]
+            if isinstance(criteria, list):
+                lines.extend(
+                    f"  - completion: {escape(str(item), quote=False)}"
+                    for item in criteria
+                    if str(item).strip()
+                )
+            sections.append("\n".join(lines))
 
     todos = value.get("todos")
     if isinstance(todos, list) and todos:
@@ -174,7 +195,9 @@ def _render_durable_context(value: Mapping[str, object]) -> str:
                 or item.get("path")
                 or ""
             )
-            lines.append(f"- {escape(str(identifier), quote=False)}: {escape(str(detail), quote=False)}")
+            lines.append(
+                f"- {escape(str(identifier), quote=False)}: {escape(str(detail), quote=False)}"
+            )
         if len(lines) > 1:
             sections.append("\n".join(lines))
 

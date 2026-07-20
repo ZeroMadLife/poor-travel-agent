@@ -33,6 +33,8 @@ import type {
   CodingSessionSummary,
   CodingSessionsResponse,
   CodingTimelineResponse,
+  CodingThreadGoalContinueResponse,
+  CodingThreadGoalResponse,
   CodingSkillDetailResponse,
   CodingSkillsResponse,
   PermissionMode,
@@ -140,6 +142,75 @@ export async function fetchCodingTimeline(
   const response = await apiFetch(url)
   if (!response.ok) throw new Error(`fetch timeline failed: ${response.status}`)
   return parseTimelineResponse(await response.json(), sessionId)
+}
+
+function threadGoalError(status: number): Error {
+  if (status === 409) return new Error('目标状态已变化或当前仍在运行，请刷新后重试')
+  if (status === 404) return new Error('当前会话尚未设置目标')
+  if (status === 422) return new Error('目标或完成标准格式无效')
+  return new Error(`目标服务暂时不可用 (${status})`)
+}
+
+export async function fetchCodingThreadGoal(
+  sessionId: string,
+): Promise<CodingThreadGoalResponse> {
+  const response = await apiFetch(
+    new URL(`/api/v1/coding/${sessionId}/goal`, API_BASE_URL),
+    { cache: 'no-store' },
+  )
+  if (!response.ok) throw threadGoalError(response.status)
+  return (await response.json()) as CodingThreadGoalResponse
+}
+
+export async function upsertCodingThreadGoal(
+  sessionId: string,
+  expectedRevision: number,
+  description: string,
+  completionCriteria: string[],
+): Promise<CodingThreadGoalResponse> {
+  const response = await apiFetch(new URL(`/api/v1/coding/${sessionId}/goal`, API_BASE_URL), {
+    method: 'PUT',
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      expected_revision: expectedRevision,
+      description,
+      completion_criteria: completionCriteria,
+    }),
+  })
+  if (!response.ok) throw threadGoalError(response.status)
+  return (await response.json()) as CodingThreadGoalResponse
+}
+
+async function postThreadGoalRevision<T>(
+  sessionId: string,
+  revision: number,
+  action: 'clear' | 'evaluate' | 'continue',
+): Promise<T> {
+  const response = await apiFetch(
+    new URL(`/api/v1/coding/${sessionId}/goal/${action}`, API_BASE_URL),
+    {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expected_revision: revision }),
+    },
+  )
+  if (!response.ok) throw threadGoalError(response.status)
+  if (response.status === 204) return undefined as T
+  return (await response.json()) as T
+}
+
+export function clearCodingThreadGoal(sessionId: string, revision: number) {
+  return postThreadGoalRevision<void>(sessionId, revision, 'clear')
+}
+
+export function evaluateCodingThreadGoal(sessionId: string, revision: number) {
+  return postThreadGoalRevision<CodingThreadGoalResponse>(sessionId, revision, 'evaluate')
+}
+
+export function prepareCodingThreadGoalContinue(sessionId: string, revision: number) {
+  return postThreadGoalRevision<CodingThreadGoalContinueResponse>(sessionId, revision, 'continue')
 }
 
 export async function fetchCodingTimelineTail(

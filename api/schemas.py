@@ -1725,6 +1725,62 @@ class UserMessage(BaseModel):
 
     content: str = Field(min_length=1, description="用户消息内容")
     surface_context: HarnessSurfaceContext | None = None
+    thread_goal_revision: int | None = Field(default=None, ge=1)
+
+
+class CodingThreadGoalEvaluation(BaseModel):
+    """A typed, evidence-referenced Goal evaluation visible to the user."""
+
+    status: Literal["satisfied", "blocked", "continue"]
+    blocker: (
+        Literal[
+            "missing_evidence",
+            "needs_user_input",
+            "run_failed",
+            "external_wait",
+            "goal_not_met_yet",
+            "no_progress",
+        ]
+        | None
+    ) = None
+    evidence_refs: list[str] = Field(default_factory=list, max_length=32)
+    next_action: str = Field(min_length=1, max_length=2_000)
+    source_run_id: str | None = None
+    evaluated_at: str
+
+
+class CodingThreadGoal(BaseModel):
+    """The revisioned primary Goal bound to one Thread."""
+
+    goal_id: str
+    revision: int = Field(ge=1)
+    description: str = Field(min_length=1, max_length=2_000)
+    completion_criteria: list[str] = Field(min_length=1, max_length=8)
+    status: Literal["active", "blocked", "satisfied"]
+    evaluation: CodingThreadGoalEvaluation | None = None
+    created_at: str
+    updated_at: str
+
+
+class CodingThreadGoalResponse(BaseModel):
+    goal: CodingThreadGoal | None
+    revision: int = Field(ge=0)
+
+
+class CodingThreadGoalUpsertRequest(BaseModel):
+    expected_revision: int = Field(ge=0)
+    description: str = Field(min_length=1, max_length=2_000)
+    completion_criteria: list[str] = Field(min_length=1, max_length=8)
+
+
+class CodingThreadGoalRevisionRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+
+
+class CodingThreadGoalContinueResponse(BaseModel):
+    goal_id: str
+    goal_revision: int = Field(ge=1)
+    prompt: str = Field(min_length=1, max_length=8_000)
 
 
 class ProgressEvent(BaseModel):

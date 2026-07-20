@@ -84,19 +84,20 @@ class RunCoordinator:
         event_stream: AsyncIterator[RunEvent | Mapping[str, Any]],
         *,
         surface_context: Mapping[str, Any] | None = None,
+        thread_goal: Mapping[str, Any] | None = None,
+        expected_thread_goal_revision: int | None = None,
     ) -> asyncio.Task[None]:
         """Start consuming an event stream as the session's active run."""
         frozen_surface_context = (
             deepcopy(dict(surface_context)) if surface_context is not None else None
         )
+        frozen_thread_goal = deepcopy(dict(thread_goal)) if thread_goal is not None else None
         async with self._state_lock:
             if self._active_run_id is not None:
                 raise ActiveRunConflictError(
                     f"session already has active run {self._active_run_id}"
                 )
-            recoverable_approval = await asyncio.to_thread(
-                self.journal.recoverable_approval
-            )
+            recoverable_approval = await asyncio.to_thread(self.journal.recoverable_approval)
             if recoverable_approval is not None:
                 blocked_run_id = str(recoverable_approval.get("run_id", "unknown"))
                 await _close_unowned_stream(event_stream)
@@ -104,7 +105,12 @@ class RunCoordinator:
                     f"session has resumable approval for run {blocked_run_id}"
                 )
             begin_task = asyncio.create_task(
-                self._begin_run(run_id, surface_context=frozen_surface_context)
+                self._begin_run(
+                    run_id,
+                    surface_context=frozen_surface_context,
+                    thread_goal=frozen_thread_goal,
+                    expected_thread_goal_revision=expected_thread_goal_revision,
+                )
             )
             try:
                 await asyncio.shield(begin_task)
@@ -151,6 +157,8 @@ class RunCoordinator:
         run_id: str,
         *,
         surface_context: Mapping[str, Any] | None = None,
+        thread_goal: Mapping[str, Any] | None = None,
+        expected_thread_goal_revision: int | None = None,
     ) -> BeginRunResult:
         async with self._publish_lock:
             kwargs: dict[str, Any] = {
@@ -159,6 +167,10 @@ class RunCoordinator:
             }
             if surface_context is not None:
                 kwargs["surface_context"] = surface_context
+            if thread_goal is not None:
+                kwargs["thread_goal"] = thread_goal
+            if expected_thread_goal_revision is not None:
+                kwargs["expected_thread_goal_revision"] = expected_thread_goal_revision
             stored = await asyncio.to_thread(self.journal.begin_run, run_id, **kwargs)
             self._broadcast(stored.event)
             return stored
@@ -238,9 +250,7 @@ class RunCoordinator:
             task = self._active_task
             fencing_token = self._active_fencing_token
             pending_audit_events = self._cancel_audit_events.get(run_id)
-            if pending_audit_events is None or (
-                not pending_audit_events and frozen_audit_events
-            ):
+            if pending_audit_events is None or (not pending_audit_events and frozen_audit_events):
                 self._cancel_audit_events[run_id] = frozen_audit_events
             task.cancel()
         with suppress(asyncio.CancelledError):
@@ -280,9 +290,7 @@ class RunCoordinator:
 
     async def subscribe(self, *, after: int = 0) -> AsyncIterator[SessionEvent]:
         """Replay history and then deliver live events without a race window."""
-        queue: asyncio.Queue[SessionEvent] = asyncio.Queue(
-            maxsize=self._subscriber_queue_size
-        )
+        queue: asyncio.Queue[SessionEvent] = asyncio.Queue(maxsize=self._subscriber_queue_size)
         cursor = after
         async with self._publish_lock:
             high_water = await asyncio.to_thread(self.journal.latest_sequence)
@@ -316,9 +324,7 @@ class RunCoordinator:
                     yield live_event
                     continue
                 while cursor < target:
-                    page = await asyncio.to_thread(
-                        self.journal.replay, after=cursor, limit=500
-                    )
+                    page = await asyncio.to_thread(self.journal.replay, after=cursor, limit=500)
                     items = tuple(item for item in page.items if item.sequence <= target)
                     if not items:
                         raise RunCoordinatorError("journal sequence gap could not be repaired")
@@ -368,9 +374,7 @@ class RunCoordinator:
                 if terminal_seen:
                     break
                 await asyncio.shield(
-                    self._persist(
-                        run_id=run_id, event=event, fencing_token=fencing_token
-                    )
+                    self._persist(run_id=run_id, event=event, fencing_token=fencing_token)
                 )
                 if event.kind == "terminal":
                     terminal_seen = True

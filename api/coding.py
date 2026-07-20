@@ -97,6 +97,11 @@ from api.schemas import (
     CodingSkillDetailResponse,
     CodingSkillsResponse,
     CodingSkillSummary,
+    CodingThreadGoal,
+    CodingThreadGoalContinueResponse,
+    CodingThreadGoalResponse,
+    CodingThreadGoalRevisionRequest,
+    CodingThreadGoalUpsertRequest,
     CodingTimelineEvent,
     CodingTimelineResponse,
     CodingUsageSummary,
@@ -119,7 +124,10 @@ from core.coding.persistence import (
     MemoryProposal,
     MemoryStoreError,
 )
-from core.coding.persistence.session_event_journal import SessionEvent
+from core.coding.persistence.session_event_journal import (
+    SessionEvent,
+    SessionThreadGoalConflictError,
+)
 from core.coding.persistence.tool_result_store import ToolResultStore
 from core.coding.provider_settings import SageProviderSettings, SageProviderSettingsStore
 from core.coding.run_coordinator import ActiveRunConflictError, RunEvent
@@ -145,6 +153,11 @@ from core.harness.subagent_adapter import (
     CodingSubagentExecutor,
     build_coding_subagent_config,
 )
+from core.harness.thread_goal import (
+    ThreadGoalBusyError,
+    ThreadGoalNotFoundError,
+    ThreadGoalService,
+)
 from core.harness.tools_adapter import build_deerflow_coding_tool_bundle
 from core.knowledge import KnowledgeStore
 from core.knowledge.source_proposals import (
@@ -167,9 +180,11 @@ def _require_enabled_runtime_profile(value: object, request: Request) -> Runtime
     if profile == "deerflow_v2" and not bool(request.app.state.coding_deerflow_v2_enabled):
         raise HTTPException(status_code=422, detail="deerflow_v2 runtime profile is disabled")
     app_env = str(getattr(request.app.state, "cloud_app_env", "development")).lower()
-    sandbox_provider = str(
-        getattr(request.app.state, "coding_sandbox_provider", "local_workspace")
-    ).strip().lower()
+    sandbox_provider = (
+        str(getattr(request.app.state, "coding_sandbox_provider", "local_workspace"))
+        .strip()
+        .lower()
+    )
     if (
         profile == "deerflow_v2"
         and app_env not in {"development", "test"}
@@ -188,9 +203,11 @@ def _available_runtime_profiles(request: Request) -> list[RuntimeProfile]:
     if not bool(getattr(request.app.state, "coding_deerflow_v2_enabled", False)):
         return profiles
     app_env = str(getattr(request.app.state, "cloud_app_env", "development")).lower()
-    sandbox_provider = str(
-        getattr(request.app.state, "coding_sandbox_provider", "local_workspace")
-    ).strip().lower()
+    sandbox_provider = (
+        str(getattr(request.app.state, "coding_sandbox_provider", "local_workspace"))
+        .strip()
+        .lower()
+    )
     if app_env in {"development", "test"} or sandbox_provider == "container":
         profiles.append("deerflow_v2")
     return profiles
@@ -224,9 +241,7 @@ async def _enforce_coding_session_owner(connection: HTTPConnection) -> None:
     runtime = sessions.get(session_id)
     owner_user_id = runtime.owner_user_id if runtime is not None else None
     if owner_user_id is None:
-        store = CodingSessionStore(
-            Path(connection.app.state.coding_storage_root) / "sessions"
-        )
+        store = CodingSessionStore(Path(connection.app.state.coding_storage_root) / "sessions")
         try:
             persisted = store.load(session_id)
         except (FileNotFoundError, ValueError):
@@ -277,6 +292,7 @@ async def _runtime_timeline_events(
     arguments: str,
     run_id: str,
     surface_context: Mapping[str, Any] | None,
+    thread_goal: Mapping[str, Any] | None = None,
     harness_checkpointer: Any | None = None,
     harness_config: HarnessConfig | None = None,
     mcp_catalog: McpCatalogPort | None = None,
@@ -302,6 +318,7 @@ async def _runtime_timeline_events(
                 content=content,
                 run_id=run_id,
                 surface_context=surface_context,
+                thread_goal=thread_goal,
                 checkpointer=harness_checkpointer,
                 harness_config=harness_config,
                 mcp_catalog=mcp_catalog,
@@ -316,9 +333,7 @@ async def _runtime_timeline_events(
                     diff_payload = await runtime.finish_harness_evidence(
                         run_id,
                         status=graph_event.status,
-                        duration_ms=int(
-                            (time.monotonic() - evidence_start_time) * 1000
-                        ),
+                        duration_ms=int((time.monotonic() - evidence_start_time) * 1000),
                     )
                     evidence_finished = True
                     yield RunEvent(
@@ -338,9 +353,7 @@ async def _runtime_timeline_events(
                 await runtime.abort_harness_evidence(
                     run_id,
                     status="cancelled",
-                    duration_ms=int(
-                        (time.monotonic() - evidence_start_time) * 1000
-                    ),
+                    duration_ms=int((time.monotonic() - evidence_start_time) * 1000),
                 )
             raise
         except Exception:
@@ -348,9 +361,7 @@ async def _runtime_timeline_events(
                 await runtime.abort_harness_evidence(
                     run_id,
                     status="error",
-                    duration_ms=int(
-                        (time.monotonic() - evidence_start_time) * 1000
-                    ),
+                    duration_ms=int((time.monotonic() - evidence_start_time) * 1000),
                 )
             raise
         return
@@ -416,6 +427,7 @@ async def _deerflow_timeline_events(
     content: str,
     run_id: str,
     surface_context: Mapping[str, Any] | None,
+    thread_goal: Mapping[str, Any] | None,
     checkpointer: Any,
     harness_config: HarnessConfig | None = None,
     mcp_catalog: McpCatalogPort | None = None,
@@ -443,8 +455,10 @@ async def _deerflow_timeline_events(
                 event_id=f"harness:{run_id}:user",
             )
 
-        durable_context = build_deerflow_durable_context(runtime)
-        context_event = None if is_resume else context_status_event(runtime, run_id, durable_context)
+        durable_context = build_deerflow_durable_context(runtime, thread_goal=thread_goal)
+        context_event = (
+            None if is_resume else context_status_event(runtime, run_id, durable_context)
+        )
         if prepared is not None:
             for raw_event in prepared.events:
                 payload = raw_event.model_dump()
@@ -510,9 +524,7 @@ async def _deerflow_timeline_events(
             provider=str(getattr(runtime, "sandbox_provider", "local_workspace")),
             allow_host_shell=True,
             allow_writes=True,
-            container_image=str(
-                getattr(runtime, "sandbox_image", "python:3.11-slim")
-            ),
+            container_image=str(getattr(runtime, "sandbox_image", "python:3.11-slim")),
         )
         try:
             knowledge_port = CodingKnowledgePort(runtime)
@@ -631,9 +643,7 @@ async def _deerflow_timeline_events(
                         event.payload.get("type") == "approval_required"
                         and event.payload.get("approval_scope") != "subagent"
                     ):
-                        approval_to_resume = str(
-                            event.payload.get("approval_id", "")
-                        ).strip()
+                        approval_to_resume = str(event.payload.get("approval_id", "")).strip()
                         if not approval_to_resume:
                             raise RuntimeError("graph approval event is missing approval_id")
                 if approval_to_resume is None:
@@ -708,7 +718,9 @@ def _timeline_status(event_type: str, event: dict[str, Any]) -> str:
         status = str(event.get("status", "completed"))
         if status == "retryable":
             return "interrupted"
-        return status if status in {"completed", "cancelled", "interrupted", "error"} else "completed"
+        return (
+            status if status in {"completed", "cancelled", "interrupted", "error"} else "completed"
+        )
     return "completed"
 
 
@@ -780,9 +792,7 @@ async def create_coding_session(
         sandbox_provider=str(
             getattr(request.app.state, "coding_sandbox_provider", "local_workspace")
         ),
-        sandbox_image=str(
-            getattr(request.app.state, "coding_sandbox_image", "python:3.11-slim")
-        ),
+        sandbox_image=str(getattr(request.app.state, "coding_sandbox_image", "python:3.11-slim")),
     )
     sessions: dict[str, CodingRuntime] = request.app.state.coding_sessions
     sessions[session_id] = runtime
@@ -843,7 +853,9 @@ async def update_coding_session_metadata(
             archived=payload.archived,
         )
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown coding session: {session_id}") from exc
+        raise HTTPException(
+            status_code=404, detail=f"Unknown coding session: {session_id}"
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if payload.archived is True:
@@ -1060,7 +1072,9 @@ async def resume_coding_session(
             sandbox_image=active_runtime.sandbox_image,
         )
     try:
-        runtime_profile = _require_enabled_runtime_profile(persisted.get("runtime_profile"), request)
+        runtime_profile = _require_enabled_runtime_profile(
+            persisted.get("runtime_profile"), request
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="invalid persisted runtime profile") from exc
     account = await load_account_model_context(request, include_credentials=True)
@@ -1123,6 +1137,148 @@ async def resume_coding_session(
         runtime_profile=runtime.runtime_profile,
         sandbox_provider=runtime.sandbox_provider,
         sandbox_image=runtime.sandbox_image,
+    )
+
+
+async def _thread_goal_service(request: Request, session_id: str) -> ThreadGoalService:
+    _require_valid_session_id(session_id)
+    sessions: dict[str, CodingRuntime] = request.app.state.coding_sessions
+    if session_id not in sessions:
+        store = CodingSessionStore(Path(request.app.state.coding_storage_root) / "sessions")
+        try:
+            store.load(session_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=404, detail=f"Unknown coding session: {session_id}"
+            ) from exc
+    coordinator = await request.app.state.coding_run_registry.hydrate(session_id)
+    return ThreadGoalService(coordinator.journal)
+
+
+def _thread_goal_conflict(exc: SessionThreadGoalConflictError) -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": "thread_goal_revision_conflict",
+            "current_revision": exc.current_revision,
+        },
+    )
+
+
+@router.get(
+    "/api/v1/coding/{session_id}/goal",
+    response_model=CodingThreadGoalResponse,
+)
+async def get_coding_thread_goal(
+    session_id: str,
+    request: Request,
+) -> CodingThreadGoalResponse:
+    """Return the one primary Goal currently bound to this Thread."""
+    service = await _thread_goal_service(request, session_id)
+    current = service.get()
+    return CodingThreadGoalResponse(
+        goal=CodingThreadGoal.model_validate(current) if current is not None else None,
+        revision=service.journal.current_thread_goal_revision(),
+    )
+
+
+@router.put(
+    "/api/v1/coding/{session_id}/goal",
+    response_model=CodingThreadGoalResponse,
+)
+async def upsert_coding_thread_goal(
+    session_id: str,
+    payload: CodingThreadGoalUpsertRequest,
+    request: Request,
+) -> CodingThreadGoalResponse:
+    """Create or revise the primary Goal with optimistic concurrency control."""
+    service = await _thread_goal_service(request, session_id)
+    try:
+        goal = service.upsert(
+            description=payload.description,
+            completion_criteria=payload.completion_criteria,
+            expected_revision=payload.expected_revision,
+        )
+    except SessionThreadGoalConflictError as exc:
+        raise _thread_goal_conflict(exc) from exc
+    except ThreadGoalBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return CodingThreadGoalResponse(
+        goal=CodingThreadGoal.model_validate(goal), revision=int(goal["revision"])
+    )
+
+
+@router.post(
+    "/api/v1/coding/{session_id}/goal/clear",
+    status_code=204,
+)
+async def clear_coding_thread_goal(
+    session_id: str,
+    payload: CodingThreadGoalRevisionRequest,
+    request: Request,
+) -> Response:
+    """Clear the current Goal without deleting its audit history."""
+    service = await _thread_goal_service(request, session_id)
+    try:
+        service.clear(expected_revision=payload.expected_revision)
+    except SessionThreadGoalConflictError as exc:
+        raise _thread_goal_conflict(exc) from exc
+    except ThreadGoalNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ThreadGoalBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return Response(status_code=204)
+
+
+@router.post(
+    "/api/v1/coding/{session_id}/goal/evaluate",
+    response_model=CodingThreadGoalResponse,
+)
+async def evaluate_coding_thread_goal(
+    session_id: str,
+    payload: CodingThreadGoalRevisionRequest,
+    request: Request,
+) -> CodingThreadGoalResponse:
+    """Project an honest typed evaluation from durable terminal evidence."""
+    service = await _thread_goal_service(request, session_id)
+    try:
+        goal = service.evaluate(expected_revision=payload.expected_revision)
+    except SessionThreadGoalConflictError as exc:
+        raise _thread_goal_conflict(exc) from exc
+    except ThreadGoalNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ThreadGoalBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return CodingThreadGoalResponse(
+        goal=CodingThreadGoal.model_validate(goal), revision=int(goal["revision"])
+    )
+
+
+@router.post(
+    "/api/v1/coding/{session_id}/goal/continue",
+    response_model=CodingThreadGoalContinueResponse,
+)
+async def continue_coding_thread_goal(
+    session_id: str,
+    payload: CodingThreadGoalRevisionRequest,
+    request: Request,
+) -> CodingThreadGoalContinueResponse:
+    """Prepare one user-authorized continuation over the existing WebSocket."""
+    service = await _thread_goal_service(request, session_id)
+    try:
+        prepared = service.prepare_continue(expected_revision=payload.expected_revision)
+    except SessionThreadGoalConflictError as exc:
+        raise _thread_goal_conflict(exc) from exc
+    except ThreadGoalNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ThreadGoalBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return CodingThreadGoalContinueResponse(
+        goal_id=prepared.goal_id,
+        goal_revision=prepared.goal_revision,
+        prompt=prepared.prompt,
     )
 
 
@@ -1274,6 +1430,23 @@ async def coding_stream(websocket: WebSocket, session_id: str) -> None:
                 )
                 continue
             content = message.content
+            current_thread_goal = coordinator.journal.current_thread_goal()
+            thread_goal = coordinator.journal.thread_goal_context()
+            frozen_thread_goal_revision = coordinator.journal.current_thread_goal_revision()
+            if message.thread_goal_revision is not None:
+                current_revision = (
+                    int(current_thread_goal.get("revision", 0)) if current_thread_goal else 0
+                )
+                if current_revision != message.thread_goal_revision:
+                    await _start_rejected_input_run(
+                        coordinator,
+                        message=(
+                            "Thread Goal revision changed: "
+                            f"expected {message.thread_goal_revision}, current {current_revision}"
+                        ),
+                        content=content,
+                    )
+                    continue
             surface_context: dict[str, Any] | None = None
             if message.surface_context is not None:
                 try:
@@ -1284,9 +1457,7 @@ async def coding_stream(websocket: WebSocket, session_id: str) -> None:
                         knowledge_job_service=getattr(
                             websocket.app.state, "knowledge_job_service", None
                         ),
-                        app_env=str(
-                            getattr(websocket.app.state, "cloud_app_env", "development")
-                        ),
+                        app_env=str(getattr(websocket.app.state, "cloud_app_env", "development")),
                     )
                 except SurfaceContextValidationError as exc:
                     await _start_rejected_input_run(
@@ -1313,15 +1484,14 @@ async def coding_stream(websocket: WebSocket, session_id: str) -> None:
                 arguments=args,
                 run_id=run_id,
                 surface_context=surface_context,
-                harness_checkpointer=getattr(websocket.app.state, "sage_harness_checkpointer", None),
+                thread_goal=thread_goal,
+                harness_checkpointer=getattr(
+                    websocket.app.state, "sage_harness_checkpointer", None
+                ),
                 harness_config=getattr(websocket.app.state, "coding_harness_config", None),
                 mcp_catalog=getattr(websocket.app.state, "coding_mcp_catalog", None),
-                web_fetch_port=getattr(
-                    websocket.app.state, "coding_web_fetch_port", None
-                ),
-                web_search_port=getattr(
-                    websocket.app.state, "coding_web_search_port", None
-                ),
+                web_fetch_port=getattr(websocket.app.state, "coding_web_fetch_port", None),
+                web_search_port=getattr(websocket.app.state, "coding_web_search_port", None),
                 knowledge_source_proposal_service=getattr(
                     websocket.app.state, "knowledge_source_proposal_service", None
                 ),
@@ -1332,6 +1502,12 @@ async def coding_stream(websocket: WebSocket, session_id: str) -> None:
                     run_id,
                     stream,
                     surface_context=surface_context,
+                    thread_goal=thread_goal,
+                    expected_thread_goal_revision=(
+                        message.thread_goal_revision
+                        if message.thread_goal_revision is not None
+                        else frozen_thread_goal_revision
+                    ),
                 )
                 task.add_done_callback(_observe_server_task)
             except ActiveRunConflictError:
@@ -1339,6 +1515,16 @@ async def coding_stream(websocket: WebSocket, session_id: str) -> None:
                 await _start_rejected_input_run(
                     coordinator,
                     message="A run is already in progress for this session",
+                    content=content,
+                )
+            except SessionThreadGoalConflictError as exc:
+                await stream.aclose()
+                await _start_rejected_input_run(
+                    coordinator,
+                    message=(
+                        "Thread Goal revision changed before the run started: "
+                        f"current {exc.current_revision}"
+                    ),
                     content=content,
                 )
 
@@ -1358,9 +1544,7 @@ async def coding_stream(websocket: WebSocket, session_id: str) -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def _start_rejected_input_run(
-    coordinator: Any, *, message: str, content: str = ""
-) -> None:
+async def _start_rejected_input_run(coordinator: Any, *, message: str, content: str = "") -> None:
     run_id = f"run_{uuid4().hex[:12]}"
 
     def persist() -> None:
@@ -1426,9 +1610,7 @@ async def coding_git_status(session_id: str, request: Request) -> CodingGitStatu
     "/api/v1/coding/{session_id}/context",
     response_model=CodingContextSnapshot,
 )
-async def coding_context_snapshot(
-    session_id: str, request: Request
-) -> CodingContextSnapshot:
+async def coding_context_snapshot(session_id: str, request: Request) -> CodingContextSnapshot:
     """Return the session's server-owned context budget and checkpoint status."""
     runtime = _require_runtime(request, session_id)
     return CodingContextSnapshot(**runtime.context_snapshot())
@@ -1455,9 +1637,7 @@ async def compact_coding_context(
         raise HTTPException(status_code=409, detail="context operation is busy") from exc
     except ValueError as exc:
         if str(exc) == "context window is not configured":
-            raise HTTPException(
-                status_code=422, detail="context window is not configured"
-            ) from exc
+            raise HTTPException(status_code=422, detail="context window is not configured") from exc
         raise HTTPException(status_code=500, detail="context compaction failed") from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail="context compaction failed") from exc
@@ -1503,7 +1683,7 @@ async def coding_approval_respond(
     runtime = _require_runtime(request, session_id)
     coordinator = request.app.state.coding_run_registry.get(session_id)
     run_id = runtime.approval_manager.run_id_for(session_id, payload.approval_id)
-    resume_plan: tuple[str, str, dict[str, Any], int] | None = None
+    resume_plan: tuple[str, str, dict[str, Any], dict[str, Any] | None, int] | None = None
     durable_approval: dict[str, Any] | None = None
     if (
         run_id is not None
@@ -1511,10 +1691,7 @@ async def coding_approval_respond(
         and runtime.runtime_profile == "deerflow_v2"
     ):
         durable_approval = coordinator.journal.recoverable_approval(run_id)
-        if (
-            durable_approval is None
-            or durable_approval.get("approval_id") != payload.approval_id
-        ):
+        if durable_approval is None or durable_approval.get("approval_id") != payload.approval_id:
             raise HTTPException(
                 status_code=409,
                 detail="Durable approval checkpoint is unavailable",
@@ -1526,10 +1703,12 @@ async def coding_approval_respond(
                 detail="Durable approval run context is unavailable",
             )
         content, surface_context = resume_context
+        thread_goal = coordinator.journal.run_thread_goal(run_id)
         resume_plan = (
             run_id,
             content,
             surface_context,
+            thread_goal,
             max(1, int(durable_approval.get("resume_attempt", 1))),
         )
     ok = runtime.approval_manager.resolve(session_id, payload.approval_id, payload.choice)
@@ -1545,7 +1724,7 @@ async def coding_approval_respond(
                 status_code=409,
                 detail="Approval resolution is unavailable",
             )
-        resumed_run_id, content, surface_context, resume_attempt = resume_plan
+        resumed_run_id, content, surface_context, thread_goal, resume_attempt = resume_plan
         stream = _runtime_timeline_events(
             runtime,
             content=content,
@@ -1554,6 +1733,7 @@ async def coding_approval_respond(
             arguments="",
             run_id=resumed_run_id,
             surface_context=surface_context,
+            thread_goal=thread_goal,
             harness_checkpointer=getattr(
                 request.app.state,
                 "sage_harness_checkpointer",
@@ -1989,16 +2169,12 @@ async def get_coding_run(
 
 
 @router.get("/api/v1/coding/{session_id}/runs/{run_id}/diff")
-async def get_coding_run_diff(
-    session_id: str, run_id: str, request: Request
-) -> dict[str, Any]:
+async def get_coding_run_diff(session_id: str, run_id: str, request: Request) -> dict[str, Any]:
     """Return the workspace diff artifact for a completed run."""
     runtime = _require_runtime(request, session_id)
     diff_path = runtime.run_store.evidence_root / run_id / "diff.json"
     if not diff_path.is_file():
-        raise HTTPException(
-            status_code=404, detail="diff not found for this run"
-        )
+        raise HTTPException(status_code=404, detail="diff not found for this run")
     import json
 
     return cast(dict[str, Any], json.loads(diff_path.read_text(encoding="utf-8")))
@@ -2078,9 +2254,7 @@ async def switch_coding_model(
     runtime.model_capabilities = combined_capabilities(request, account)
     runtime.model_reasoning_modes = combined_reasoning_modes(request, account)
 
-    def factory(
-        model_id: str = payload.model_id, *, reasoning_mode: str = "off"
-    ) -> Any:
+    def factory(model_id: str = payload.model_id, *, reasoning_mode: str = "off") -> Any:
         return _build_model(model_factory, model_id, reasoning_mode)
 
     try:
@@ -2142,7 +2316,9 @@ async def update_coding_provider_settings(
         # unknown field's submitted value (which could be an accidental key).
         settings = store.save(payload)
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail="provider settings are deployment managed") from exc
+        raise HTTPException(
+            status_code=403, detail="provider settings are deployment managed"
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -2236,9 +2412,7 @@ def _require_runtime(request: Request, session_id: str) -> CodingRuntime:
     return runtime
 
 
-def _coding_operation_busy(
-    request: Request, session_id: str, runtime: CodingRuntime
-) -> bool:
+def _coding_operation_busy(request: Request, session_id: str, runtime: CodingRuntime) -> bool:
     coordinator = request.app.state.coding_run_registry.get(session_id)
     return (
         coordinator.journal.active_run_id() is not None
@@ -2280,9 +2454,7 @@ def _transition_memory_proposal(
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="memory proposal not found") from exc
     except MemoryConflictError as exc:
-        raise HTTPException(
-            status_code=409, detail="memory proposal conflict"
-        ) from exc
+        raise HTTPException(status_code=409, detail="memory proposal conflict") from exc
     except (MemoryStoreError, OSError) as exc:
         raise _memory_storage_error() from exc
     return _memory_proposal_response(proposal)
@@ -2415,9 +2587,7 @@ def _provider_settings_response(
     )
 
 
-def _resolve_persisted_workspace_root(
-    default_workspace: Path, raw_workspace: object
-) -> Path:
+def _resolve_persisted_workspace_root(default_workspace: Path, raw_workspace: object) -> Path:
     if not isinstance(raw_workspace, str) or not raw_workspace.strip():
         raise HTTPException(status_code=400, detail="persisted workspace_root is invalid")
     workspace = Path(raw_workspace).expanduser().resolve()

@@ -155,13 +155,18 @@ export class CodingStream {
     if (expired) this.seenEventIds.delete(expired)
   }
 
-  send(content: string, surfaceContext?: HarnessSurfaceContext | null): boolean {
+  send(
+    content: string,
+    surfaceContext?: HarnessSurfaceContext | null,
+    threadGoalRevision?: number,
+  ): boolean {
     if (!this.socket || this.socket.readyState !== OPEN) return false
     this.socket.send(JSON.stringify({
       content,
       ...(surfaceContext
         ? { surface_context: serializeHarnessSurfaceContext(surfaceContext) }
         : {}),
+      ...(threadGoalRevision ? { thread_goal_revision: threadGoalRevision } : {}),
     }))
     return true
   }

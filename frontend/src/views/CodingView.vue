@@ -424,12 +424,19 @@ onBeforeUnmount(() => {
                 :source-busy="store.knowledgeSourceProposalBusy"
                 :source-detail-busy="store.knowledgeSourceProposalDetailBusy"
                 :source-error="store.knowledgeSourceProposalError"
+                :thread-goal="store.threadGoal"
+                :goal-busy="store.threadGoalBusy"
+                :goal-error="store.threadGoalError"
                 @approve-deposit="store.approveMemoryProposal"
                 @reject-deposit="store.rejectMemoryProposal"
                 @approve-source="store.approveKnowledgeSourceProposal"
                 @reject-source="store.rejectKnowledgeSourceProposal"
                 @load-source-detail="store.loadKnowledgeSourceProposalDetail"
                 @open-operation="openHarnessOperation"
+                @save-goal="store.saveThreadGoal"
+                @evaluate-goal="store.evaluateThreadGoal"
+                @continue-goal="store.continueThreadGoal(activeChatContext)"
+                @clear-goal="store.removeThreadGoal"
               />
             </section>
           </template>

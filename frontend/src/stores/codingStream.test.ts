@@ -104,6 +104,23 @@ describe('CodingStream', () => {
     })
   })
 
+  it('guards a manual Goal continuation with the visible revision', () => {
+    const socket = new FakeSocket()
+    const stream = new CodingStream({
+      createSocket: () => socket,
+      onEvent: vi.fn(),
+      onError: vi.fn(),
+    })
+
+    stream.connect('coding_1', 'ws://local/stream')
+    expect(stream.send('继续目标', null, 7)).toBe(true)
+
+    expect(JSON.parse(socket.sent[0])).toEqual({
+      content: '继续目标',
+      thread_goal_revision: 7,
+    })
+  })
+
   it('forwards explicit Harness stage events to the timeline store', () => {
     const socket = new FakeSocket()
     const onEvent = vi.fn()
