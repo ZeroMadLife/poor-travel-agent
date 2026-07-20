@@ -6,9 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
-    "build:public": "vue-tsc -b && vite build --config vite.public.config.ts",
+    "fetch:github-meta": "node ./scripts/fetch-github-meta.mjs",
+    "build:public": "npm run fetch:github-meta && vue-tsc -b && vite build --config vite.public.config.ts",
     "preview": "vite preview",
     "preview:public": "vite preview --config vite.public.config.ts",
+    "dev:public": "vite --config vite.public.config.ts",
     "test": "vitest --environment jsdom"
   },
   "dependencies": {

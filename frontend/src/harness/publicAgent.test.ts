@@ -8,7 +8,7 @@ describe('public profile answer adapter', () => {
     expect(response.mode).toBe('static')
     expect(response.answer).toContain('durable Timeline')
     expect(response.sources).toEqual([
-      expect.objectContaining({ id: 'harness', target: 'writing' }),
+      expect.objectContaining({ id: 'harness', target: 'harness' }),
     ])
   })
 
@@ -18,5 +18,11 @@ describe('public profile answer adapter', () => {
     expect(response.answer).toContain('只覆盖已经公开')
     expect(response.sources).toEqual([])
     expect(JSON.stringify(response)).not.toContain('/Users/')
+  })
+
+  it('exposes static mode and never invents limited harness answers without flag', async () => {
+    const response = await answerPublicProfileQuestion('Harness 2.0 如何恢复运行？')
+    expect(response.mode).toBe('static')
+    expect(response.mode).not.toBe('limited_harness')
   })
 })

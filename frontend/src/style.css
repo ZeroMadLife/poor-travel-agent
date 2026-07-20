@@ -154,3 +154,28 @@ html[data-view-transition="composer"]::view-transition-new(root) {
 .message-content .hljs .hljs-attr,
 .message-content .hljs .hljs-attribute,
 .message-content .hljs .hljs-property { color: #61afef; }
+
+/* Public site tokens */
+:root {
+  --pub-bg: #f6f8f6;
+  --pub-surface: #ffffff;
+  --pub-text: #1a201c;
+  --pub-muted: #6b796f;
+  --pub-border: #d7e0d8;
+  --pub-brand: #2f704e;
+  --pub-brand-strong: #255d41;
+}
+
+:root[data-theme="dark"] {
+  --pub-bg: #101412;
+  --pub-surface: #171c19;
+  --pub-text: #e8ede9;
+  --pub-muted: #9aaba0;
+  --pub-border: #2a332d;
+  --pub-brand: #4f9a6d;
+  --pub-brand-strong: #7bc895;
+}
+
+body {
+  background: var(--pub-bg, var(--sage-bg));
+}

@@ -1,5 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import PublicProfileView from '../views/PublicProfileView.vue'
+import PublicHomeView from '../views/public/PublicHomeView.vue'
+import NotesListView from '../views/public/NotesListView.vue'
+import NoteDetailView from '../views/public/NoteDetailView.vue'
 
 const publicRouter = createRouter({
   history: createWebHistory(),
@@ -7,7 +9,18 @@ const publicRouter = createRouter({
     {
       path: '/',
       name: 'public.home',
-      component: PublicProfileView,
+      component: PublicHomeView,
+    },
+    {
+      path: '/notes',
+      name: 'public.notes',
+      component: NotesListView,
+    },
+    {
+      path: '/notes/:slug',
+      name: 'public.note',
+      component: NoteDetailView,
+      props: true,
     },
     {
       path: '/public',
@@ -18,6 +31,10 @@ const publicRouter = createRouter({
       redirect: '/',
     },
   ],
+  scrollBehavior(to) {
+    if (to.hash) return { el: to.hash, behavior: 'smooth' }
+    return { top: 0 }
+  },
 })
 
 export default publicRouter

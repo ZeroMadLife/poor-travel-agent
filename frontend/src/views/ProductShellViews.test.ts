@@ -7,6 +7,9 @@ import EvolutionView from './EvolutionView.vue'
 import PublishingStudioView from './PublishingStudioView.vue'
 import PublicProfileView from './PublicProfileView.vue'
 import PublicProfileRouteView from './PublicProfileRouteView.vue'
+import PublicHomeView from './public/PublicHomeView.vue'
+import NotesListView from './public/NotesListView.vue'
+import NoteDetailView from './public/NoteDetailView.vue'
 
 vi.mock('../api/knowledge', () => ({
   fetchKnowledgeGraphInsights: vi.fn().mockRejectedValue(new Error('not connected')),
@@ -18,7 +21,10 @@ function createTestRouter() {
     routes: [
       { path: '/growth', component: EvolutionView },
       { path: '/publishing', component: PublishingStudioView },
+      { path: '/', component: PublicHomeView },
       { path: '/public', component: PublicProfileView },
+      { path: '/notes', component: NotesListView },
+      { path: '/notes/:slug', component: NoteDetailView, props: true },
       { path: '/coding', component: { template: '<div />' } },
     ],
   })
@@ -74,46 +80,49 @@ it('opens the public Sage preview with source-scoped answers', async () => {
   const wrapper = mount(PublicProfileView, { global: { plugins: [router] } })
 
   expect(wrapper.text()).toContain('ZeroMadLife')
-  expect(wrapper.text()).toContain('Sage / Personal AI Learning Companion')
-  await wrapper.get('.ask-sage').trigger('click')
+  expect(wrapper.text()).toContain('不是又一个聊天框')
+  expect(wrapper.text()).toContain('HARNESS')
+  await wrapper.get('[data-action="ask-sage"]').trigger('click')
   expect(wrapper.text()).toContain('公开资料预览')
-  expect(wrapper.text()).toContain('只回答这页已经公开的项目、方法和成长记录')
+  expect(wrapper.text()).toContain('只回答已经公开的项目、方法和成长记录')
   await wrapper.get('.agent-prompts button').trigger('click')
-  await wrapper.get('.agent-form').trigger('submit')
+  await flushPromises()
   expect(wrapper.text()).toContain('Sage 是一个 Personal AI Learning Companion')
   expect(wrapper.text()).toContain('回答依据')
-  expect(wrapper.get('.agent-source').attributes('data-target')).toBe('work')
   expect(wrapper.text()).not.toContain('/Users/')
   wrapper.unmount()
 })
 
-it('keeps internal section navigation inside the hash-router public route', async () => {
+it('leads with harness evidence and keeps notes navigable', async () => {
   const router = createTestRouter()
-  await router.push('/public')
-  const wrapper = mount(PublicProfileView, { global: { plugins: [router] } })
+  await router.push('/')
+  const wrapper = mount(PublicHomeView, { global: { plugins: [router] } })
 
-  await wrapper.get('[data-section="writing"]').trigger('click')
-
-  expect(router.currentRoute.value.path).toBe('/public')
-  expect(wrapper.get('[data-section="writing"]').classes()).toContain('active')
+  expect(wrapper.text()).toContain('真实工作台，不是概念图')
+  expect(wrapper.text()).toContain('GitHub')
+  expect(wrapper.get('[data-nav="notes"]').exists()).toBe(true)
+  await wrapper.get('[data-nav="notes"]').trigger('click')
+  await flushPromises()
+  expect(router.currentRoute.value.path).toBe('/notes')
   wrapper.unmount()
 })
 
-it('lets a visitor inspect project evidence before leaving the public profile', async () => {
+it('lists engineering notes and opens markdown detail content', async () => {
   const router = createTestRouter()
-  await router.push('/public')
-  const wrapper = mount(PublicProfileView, { global: { plugins: [router] } })
+  await router.push('/notes')
+  const list = mount(NotesListView, { global: { plugins: [router] } })
+  expect(list.text()).toContain('工程笔记')
+  expect(list.text()).toContain('durable timeline')
+  list.unmount()
 
-  const firstWork = wrapper.get('[data-work-id="sage"]')
-  expect(firstWork.attributes('aria-expanded')).toBe('false')
-  await firstWork.trigger('click')
-
-  expect(firstWork.attributes('aria-expanded')).toBe('true')
-  expect(wrapper.get('[data-work-evidence="sage"]').text()).toContain('为什么做')
-  expect(wrapper.get('[data-work-evidence="sage"]').text()).toContain('怎么判断有效')
-  expect(wrapper.get('[data-work-evidence="sage"]').text()).toContain('当前边界')
-  expect(wrapper.get('[data-work-evidence="sage"] a').attributes('target')).toBe('_blank')
-  wrapper.unmount()
+  await router.push('/notes/why-durable-timeline')
+  const detail = mount(NoteDetailView, {
+    props: { slug: 'why-durable-timeline' },
+    global: { plugins: [router] },
+  })
+  expect(detail.text()).toContain('为什么 Harness 需要 durable timeline')
+  expect(detail.html()).not.toContain('<script>alert')
+  detail.unmount()
 })
 
 it('keeps the local publishing draft preview on the private application route', async () => {
