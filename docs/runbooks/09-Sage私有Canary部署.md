@@ -170,6 +170,19 @@ CPU、内存和 PID 限额。探针使用 `--pull=never`，所以要先把 `SAGE
 不加 `--execute` 时只输出计划，不运行构建、迁移或切换。执行路径依次为：预检、构建不可变
 SHA 镜像、启动数据服务、PostgreSQL 备份、幂等 migration、API/Web 健康检查、状态落盘。
 
+若磁盘预检提示可用空间不足 8 GiB，不得直接通过 SSH 执行自由形式清理，也不得删除 volume、
+数据库目录或备份。合入带 `cleanup` 的部署控制器后，由 Canary 固定流程在 checkout 精确 SHA
+后执行：
+
+```bash
+DOCKER_HOST=unix:///run/user/1002/docker.sock \
+  python3 /opt/sage/app/scripts/deployctl.py --env-file /etc/sage/env --execute cleanup
+```
+
+该命令只清理未使用的 builder cache、悬空镜像，以及既非 `current` 也非 `previous` 的旧
+`sage-api`、`sage-web`、`sage-public` commit 镜像。Docker volume、PostgreSQL 备份和当前/上一
+回滚点始终保留；清理完成后必须重新通过完整 `preflight`，不能降低 8 GiB 门禁。
+
 ## 6. 验收
 
 1. `curl http://127.0.0.1:8080/health` 和 `curl http://127.0.0.1:8081/` 返回 200。

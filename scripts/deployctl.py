@@ -37,6 +37,7 @@ SECRET_KEYS = {
     "MODEL_PROVIDER_ENCRYPTION_SECRET",
 }
 EXPECTED_SERVICES = {"api", "web", "public", "postgres", "redis"}
+SAGE_IMAGE = re.compile(r"sage-(?:api|web|public):([0-9a-f]{40})")
 REQUIRED_KEYS = SECRET_KEYS | {
     "APP_ENV",
     "CLOUD_FRONTEND_URL",
@@ -317,8 +318,61 @@ class DeployController:
             "apply": ["preflight", "build", "database backup", "migration", "health"],
             "rollback": ["preflight", "image check", "switch", "health"],
             "preflight": ["config", "rootless runtimes", "git", "tailscale", "disk"],
+            "cleanup": ["rootless deploy runtime", "builder cache", "dangling images", "old Sage images"],
         }[action]
         return {"mode": "dry-run", "action": action, "tag": tag, "steps": steps}
+
+    def cleanup(self, *, execute: bool) -> dict[str, object]:
+        """Remove only rebuildable Docker data while retaining two release points."""
+        if not execute:
+            return self.dry_run_plan("cleanup")
+        validate_environment(self.config.env_file, self.values)
+        deploy_host = os.environ.get("DOCKER_HOST", "")
+        if not deploy_host.startswith("unix:///run/user/"):
+            raise DeployError("部署 daemon 必须是 /run/user 下的 rootless Docker socket")
+        socket_path = Path(deploy_host.removeprefix("unix://"))
+        if (
+            not socket_path.exists()
+            or not stat.S_ISSOCK(socket_path.stat().st_mode)
+            or socket_path.stat().st_uid != os.getuid()
+        ):
+            raise DeployError("部署 rootless Docker socket 不可用")
+        docker_info = self._run(
+            ["docker", "info", "--format", "{{json .SecurityOptions}}"],
+            label="检查部署 Docker",
+        ).stdout.lower()
+        if "rootless" not in docker_info:
+            raise DeployError("部署 Docker 不是 rootless 模式")
+
+        free_before = shutil.disk_usage(self.config.repo_root).free
+        self._run(["docker", "builder", "prune", "--force"], label="清理构建缓存", timeout=600)
+        self._run(["docker", "image", "prune", "--force"], label="清理悬空镜像", timeout=300)
+
+        state = self._load_state()
+        keep_tags = {
+            tag
+            for tag in (str(state.get("current") or ""), str(state.get("previous") or ""))
+            if COMMIT_TAG.fullmatch(tag)
+        }
+        image_rows = self._run(
+            ["docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}"],
+            label="读取 Sage 镜像",
+        ).stdout.splitlines()
+        removable = sorted(
+            reference
+            for reference in image_rows
+            if (match := SAGE_IMAGE.fullmatch(reference)) and match.group(1) not in keep_tags
+        )
+        if removable:
+            self._run(["docker", "image", "rm", *removable], label="清理旧 Sage 镜像", timeout=600)
+        free_after = shutil.disk_usage(self.config.repo_root).free
+        return {
+            "status": "cleaned",
+            "removed_sage_images": len(removable),
+            "reclaimed_bytes": max(0, free_after - free_before),
+            "retained_release_tags": len(keep_tags),
+            "volumes": "untouched",
+        }
 
     def preflight(self) -> dict[str, object]:
         validate_environment(self.config.env_file, self.values)
@@ -607,10 +661,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-file", type=Path, default=DEFAULT_STATE_FILE)
     parser.add_argument("--backup-root", type=Path, default=DEFAULT_BACKUP_ROOT)
     parser.add_argument("--gateway-url", default="http://127.0.0.1:8080/health")
-    parser.add_argument("--execute", action="store_true", help="显式允许 apply/rollback 写操作")
+    parser.add_argument("--execute", action="store_true", help="显式允许 cleanup/apply/rollback 写操作")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("preflight")
     subparsers.add_parser("status")
+    subparsers.add_parser("cleanup")
     apply_parser = subparsers.add_parser("apply")
     apply_parser.add_argument("--tag", required=True)
     rollback_parser = subparsers.add_parser("rollback")
@@ -634,6 +689,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = controller.preflight()
         elif args.command == "status":
             result = controller.status()
+        elif args.command == "cleanup":
+            result = controller.cleanup(execute=args.execute)
         elif args.command == "apply":
             result = controller.apply(args.tag, execute=args.execute)
         else:
