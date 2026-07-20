@@ -209,7 +209,7 @@ V6.8 设计了手动 + 自动两种触发：
 ```
 pending -> approved (写入 memory + 生成 transaction)
         -> rejected (不修改 memory)
-        
+
 approved -> rollback (恢复到 base_revision，用 inverse changes)
 ```
 
