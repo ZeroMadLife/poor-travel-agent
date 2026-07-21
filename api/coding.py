@@ -191,6 +191,25 @@ def _port_available(port: object) -> bool:
     return bool(port is not None and getattr(port, "available", True))
 
 
+def _graph_approval_resume_value(
+    approval: Mapping[str, Any],
+    choice: str,
+) -> dict[str, dict[str, str]]:
+    """Address a LangGraph approval response to the exact interrupt it resumes."""
+    approval_id = str(approval.get("approval_id", "")).strip()
+    interrupt_id = str(approval.get("interrupt_id", "")).strip()
+    if not approval_id:
+        raise RuntimeError("graph approval event is missing approval_id")
+    if not interrupt_id or interrupt_id == "anonymous":
+        raise RuntimeError("graph approval event is missing interrupt_id")
+    return {
+        interrupt_id: {
+            "approval_id": approval_id,
+            "choice": choice,
+        }
+    }
+
+
 def _require_enabled_runtime_profile(value: object, request: Request) -> RuntimeProfile:
     """Resolve a requested profile and enforce the server-owned rollout gate."""
     profile = normalize_runtime_profile(value)
@@ -700,7 +719,7 @@ async def _deerflow_timeline_events(
             resume = is_resume
             current_resume_value = resume_value
             while True:
-                approval_to_resume: str | None = None
+                approval_to_resume: dict[str, Any] | None = None
                 async for event in adapter.stream_turn(
                     session_id=runtime.session_id,
                     run_id=run_id,
@@ -726,28 +745,28 @@ async def _deerflow_timeline_events(
                         event.payload.get("type") == "approval_required"
                         and event.payload.get("approval_scope") != "subagent"
                     ):
-                        approval_to_resume = str(event.payload.get("approval_id", "")).strip()
-                        if not approval_to_resume:
-                            raise RuntimeError("graph approval event is missing approval_id")
+                        approval_to_resume = dict(event.payload)
+                        _graph_approval_resume_value(approval_to_resume, "once")
                 if approval_to_resume is None:
                     break
+                approval_id = str(approval_to_resume["approval_id"])
                 choice = await runtime.approval_manager.wait_for(
                     runtime.session_id,
-                    approval_to_resume,
+                    approval_id,
                 )
                 if choice is None:
                     raise RuntimeError("graph approval timed out or was cancelled")
                 if choice in {"session", "always"}:
                     runtime.approval_manager.consume_resolution(
                         runtime.session_id,
-                        approval_to_resume,
+                        approval_id,
                     )
                 resume = True
                 current_resume_attempt += 1
-                current_resume_value = {
-                    "approval_id": approval_to_resume,
-                    "choice": choice,
-                }
+                current_resume_value = _graph_approval_resume_value(
+                    approval_to_resume,
+                    choice,
+                )
         finally:
             await sandbox.aclose()
         answer = "".join(response_parts).strip()
@@ -2176,6 +2195,11 @@ async def coding_approval_respond(
     if not ok:
         raise HTTPException(status_code=404, detail=f"Unknown approval: {payload.approval_id}")
     if resume_plan is not None:
+        if durable_approval is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Durable approval checkpoint is unavailable",
+            )
         resolved_choice = await runtime.approval_manager.wait_for(
             session_id,
             payload.approval_id,
@@ -2208,10 +2232,7 @@ async def coding_approval_respond(
                 request.app.state, "knowledge_source_proposal_service", None
             ),
             app_env=str(getattr(request.app.state, "cloud_app_env", "development")),
-            resume_value={
-                "approval_id": payload.approval_id,
-                "choice": resolved_choice,
-            },
+            resume_value=_graph_approval_resume_value(durable_approval, resolved_choice),
             resume_attempt=resume_attempt,
         )
         try:

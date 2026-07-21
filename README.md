@@ -137,11 +137,12 @@ Provider key、OAuth secret 或任何运行凭据。
 bash scripts/dev.sh
 ```
 
-开发脚本会启动 PostgreSQL/pgvector、Redis、FastAPI 和 Vite：
+开发脚本会启动 PostgreSQL/pgvector、Redis、loopback SearXNG、FastAPI 和 Vite：
 
 - Web：`http://127.0.0.1:5173`
 - API：`http://127.0.0.1:8000`
 - Health：`http://127.0.0.1:8000/health`
+- Search：`http://127.0.0.1:8088`（仅本机，供 Harness `search_web` 使用）
 
 开发环境默认执行幂等数据库迁移；生产环境必须在发布流程中显式运行并验证迁移。
 完整环境变量与 worktree 联调说明见 [Getting Started](docs/GETTING-STARTED.md)。
@@ -178,12 +179,12 @@ sage-agent/
 ├── tests/                       # 后端、API、契约与集成测试
 ├── release/v7-beta/             # 当前发布说明、评审与学习手册
 ├── docs/                        # 设计、计划、Review 与运维文档
-└── docker-compose.yml           # 本地 PostgreSQL/pgvector + Redis
+└── docker-compose.yml           # 本地 PostgreSQL/pgvector + Redis + SearXNG
 ```
 
 ## 当前边界
 
-- `docker-compose.yml` 只编排本地 PostgreSQL/pgvector 与 Redis，不是生产部署栈。
+- `docker-compose.yml` 只编排本地 PostgreSQL/pgvector、Redis 与 loopback SearXNG，不是生产部署栈。
 - 公开主页已有独立静态构建、限定资料问答和 loopback 部署面；在域名与 80/443 门禁完成前
   不能描述为公网已发布，也不是公开 Agent，不共享主对话的文件权限。
 - Knowledge 已完成本地来源工作流；云端租户级来源与元数据隔离尚未开放。

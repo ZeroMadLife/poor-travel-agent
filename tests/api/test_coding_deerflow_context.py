@@ -376,7 +376,7 @@ async def test_v2_external_resume_preserves_checkpoint_retrieval_gate(
             thread_goal=None,
             checkpointer=object(),
             mcp_catalog=None,
-            resume_value={"approval_id": "approval-1", "choice": "once"},
+            resume_value={"interrupt-1": {"approval_id": "approval-1", "choice": "once"}},
             resume_attempt=1,
         )
     ]

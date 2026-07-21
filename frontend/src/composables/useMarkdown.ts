@@ -67,8 +67,11 @@ function normalizeMarkdownText(content: string): string {
     .replace(/<tool>\s*\{[\s\S]*?\}\s*<\/tool>/gi, '')
     .replace(/<\/?final>/gi, '')
     .replace(/\r\n?/g, '\n')
-  normalized = normalized.replace(/([^#\n])(?=#{1,6})/g, '$1\n\n')
-  normalized = normalized.replace(/^(#{1,6})(?=\S)/gm, '$1 ')
+  // Repair duplicate heading markers before splitting compact headings. Otherwise
+  // the second marker in `## # Title` is mistaken for a new adjacent heading.
+  normalized = normalized.replace(/^ {0,3}(#{1,6})\s+#+\s*/gm, '$1 ')
+  normalized = normalized.replace(/([^#\n])(?=#{1,6}(?:[\p{L}\p{N}]))/gu, '$1\n\n')
+  normalized = normalized.replace(/^ {0,3}(#{1,6})(?=[^\s#])/gm, '$1 ')
 
   // Some providers collapse table row separators while streaming. Repair only
   // strings that clearly contain a compact Markdown table, leaving prose `||`

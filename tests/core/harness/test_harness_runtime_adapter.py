@@ -844,6 +844,46 @@ def test_event_adapter_projects_graph_approval_interrupt_without_checkpoint_cont
     assert events[2].payload["type"] == "checkpoint_update"
 
 
+def test_event_adapter_projects_each_parallel_graph_approval_interrupt() -> None:
+    adapter = HarnessEventAdapter(session_id="s1", run_id="r1")
+
+    class FirstInterrupt:
+        id = "interrupt-1"
+        value: ClassVar[dict[str, object]] = {
+            "type": "approval_required",
+            "approval_id": "approval-1",
+            "tool": "write_file",
+            "tool_call_id": "call-1",
+            "args": {"path": "first.txt"},
+        }
+
+    class SecondInterrupt:
+        id = "interrupt-2"
+        value: ClassVar[dict[str, object]] = {
+            "type": "approval_required",
+            "approval_id": "approval-2",
+            "tool": "write_file",
+            "tool_call_id": "call-2",
+            "args": {"path": "second.txt"},
+        }
+
+    events = adapter.adapt(
+        HarnessStreamItem(
+            1,
+            "values",
+            {"__interrupt__": (FirstInterrupt(), SecondInterrupt()), "messages": []},
+            "source-parallel-interrupts",
+        )
+    )
+
+    approvals = [event for event in events if event.payload.get("type") == "approval_required"]
+    assert [event.payload["interrupt_id"] for event in approvals] == [
+        "interrupt-1",
+        "interrupt-2",
+    ]
+    assert events[-1].payload["type"] == "checkpoint_update"
+
+
 def test_runtime_adapter_streams_a_real_langgraph_message(tmp_path: Path) -> None:
     async def run() -> list[dict[str, object]]:
         async with open_sqlite_checkpointer(tmp_path / "checkpoints.sqlite3") as saver:
