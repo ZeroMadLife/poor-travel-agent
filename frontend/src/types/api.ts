@@ -787,7 +787,7 @@ export type CodingToolResultEvent = CodingEventMeta & {
   type: 'tool_result'
   tool_call_id?: string
   tool: string
-  args: Record<string, unknown>
+  args?: Record<string, unknown>
   content: string
   is_error: boolean
   error_code?: string | null
@@ -826,6 +826,7 @@ export type CodingSkillInvokedEvent = {
 
 export type CodingApprovalRequiredEvent = CodingEventMeta & {
   type: 'approval_required'
+  tool_call_id?: string
   approval_id: string
   tool: string
   args: Record<string, unknown>
@@ -835,6 +836,7 @@ export type CodingApprovalRequiredEvent = CodingEventMeta & {
 
 export type CodingApprovalGrantedEvent = CodingEventMeta & {
   type: 'approval_granted'
+  tool_call_id?: string
   tool: string
 }
 

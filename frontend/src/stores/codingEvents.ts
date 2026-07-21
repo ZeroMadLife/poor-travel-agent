@@ -276,7 +276,7 @@ export function applyCodingEvent(
     if (samePendingApproval(state.pendingApproval.value, event.run_id, event.tool)) {
       state.pendingApproval.value = null
     }
-    const target = findRunningTool(state.messages.value, event.tool)
+    const target = findRunningTool(state.messages.value, event.tool, undefined, event.tool_call_id)
     if (target) target.content = '已确认,正在执行...'
     state.thinkingPhase.value = '正在执行工具...'
     settleExecutionActivity(state.messages.value, 'approval')
@@ -351,6 +351,7 @@ function appendToolActivity(
   event: CodingToolCallEvent | CodingApprovalRequiredEvent,
   content = '',
 ) {
+  const args = normalizeToolArgs(event.args)
   const lastMessage = messages[messages.length - 1]
   if (!lastMessage || lastMessage.role !== 'assistant' || !lastMessage.isThinking) {
     messages.push({
@@ -363,22 +364,32 @@ function appendToolActivity(
   }
   const current = messages[messages.length - 1]
   current.tools = current.tools || []
-  const existing = findRunningTool(messages, event.tool, event.args)
+  const existing = findRunningTool(messages, event.tool, args, event.tool_call_id)
   if (existing) {
+    if (event.tool_call_id) existing.tool_call_id = event.tool_call_id
+    if (!Object.keys(existing.args).length && Object.keys(args).length) {
+      existing.args = args
+    }
     existing.content = content
     return
   }
   current.tools.push({
+    tool_call_id: event.tool_call_id,
     tool: event.tool,
-    args: event.args,
+    args,
     status: 'running',
     content,
   })
 }
 
 function updateToolActivity(messages: ChatMessage[], event: CodingToolResultEvent) {
-  const target = findRunningTool(messages, event.tool, event.args)
+  const args = normalizeToolArgs(event.args)
+  const target = findRunningTool(messages, event.tool, args, event.tool_call_id)
   if (target) {
+    if (event.tool_call_id) target.tool_call_id = event.tool_call_id
+    if (!Object.keys(target.args).length && Object.keys(args).length) {
+      target.args = args
+    }
     target.status = event.is_error ? 'error' : 'done'
     target.content = event.content
     target.retrieval = event.tool === 'knowledge_search'
@@ -390,6 +401,7 @@ function updateToolActivity(messages: ChatMessage[], event: CodingToolResultEven
 }
 
 function appendSettledToolActivity(messages: ChatMessage[], event: CodingToolResultEvent) {
+  const args = normalizeToolArgs(event.args)
   const lastMessage = messages[messages.length - 1]
   if (!lastMessage || lastMessage.role !== 'assistant' || !lastMessage.isThinking) {
     messages.push({
@@ -403,8 +415,9 @@ function appendSettledToolActivity(messages: ChatMessage[], event: CodingToolRes
   const current = messages[messages.length - 1]
   current.tools = current.tools || []
   current.tools.push({
+    tool_call_id: event.tool_call_id,
     tool: event.tool,
-    args: event.args,
+    args,
     status: event.is_error ? 'error' : 'done',
     content: event.content,
     retrieval: event.tool === 'knowledge_search'
@@ -417,24 +430,32 @@ function findRunningTool(
   messages: ChatMessage[],
   toolName: string,
   args?: Record<string, unknown>,
+  toolCallId?: string,
 ) {
   for (const msg of [...messages].reverse()) {
     if (!msg.tools) continue
-    const target = [...msg.tools]
-      .reverse()
-      .find(
-        (tool) =>
-          tool.tool === toolName &&
-          tool.status === 'running' &&
-          (args === undefined || sameArgs(tool.args, args)),
-      )
-    if (target) return target
+    const running = [...msg.tools].reverse().filter(
+      (tool) => tool.tool === toolName && tool.status === 'running',
+    )
+    const target = toolCallId
+      ? running.find((tool) => tool.tool_call_id === toolCallId)
+      : undefined
+    const exact = target ?? (
+      args === undefined ? running[0] : running.find((tool) => sameArgs(tool.args, args))
+    )
+    const legacy = exact ?? running.find((tool) => !tool.tool_call_id)
+    if (legacy) return legacy
   }
   return undefined
 }
 
 function sameArgs(left: Record<string, unknown>, right: Record<string, unknown>) {
   return JSON.stringify(left) === JSON.stringify(right)
+}
+
+function normalizeToolArgs(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  return value as Record<string, unknown>
 }
 
 function finalizeCurrentMessage(messages: ChatMessage[], content: string) {

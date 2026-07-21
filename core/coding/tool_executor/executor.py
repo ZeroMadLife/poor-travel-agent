@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import dataclass
@@ -294,12 +295,15 @@ class ToolExecutor:
         elif tool_name == "remember":
             description = "保存事实到长期工作区记忆前需要确认。"
         elif tool_name == "run_shell":
-            dangerous, command_description, command_pattern = check_dangerous_command(
-                str(args.get("command", ""))
-            )
+            command = str(args.get("command", ""))
+            dangerous, command_description, command_pattern = check_dangerous_command(command)
+            normalized = command.strip()
+            command_digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
             if dangerous:
                 description = command_description
-                pattern_key = f"shell:{command_pattern}"
+                pattern_key = f"shell:{command_pattern}:{command_digest}"
+            else:
+                pattern_key = f"shell:command:{command_digest}"
         return description, pattern_key
 
     def _tool_result_event(

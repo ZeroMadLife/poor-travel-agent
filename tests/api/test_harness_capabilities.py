@@ -96,9 +96,7 @@ class CountingTransport:
 
 
 @pytest.fixture
-async def cloud_repositories() -> AsyncIterator[
-    tuple[CloudRepository, ModelProviderRepository]
-]:
+async def cloud_repositories() -> AsyncIterator[tuple[CloudRepository, ModelProviderRepository]]:
     engine = create_engine("sqlite+aiosqlite:///:memory:")
     factory = create_session_factory(engine)
     await init_db(engine)
@@ -240,10 +238,7 @@ def test_capability_api_exposes_web_tools_only_with_server_ports(tmp_path: Path)
                 "/api/v1/harness/capabilities",
                 params={"session_id": session_id, "surface": "coding"},
             ).json()
-        return {
-            item["capability_id"]: item["availability"]
-            for item in payload["capabilities"]
-        }
+        return {item["capability_id"]: item["availability"] for item in payload["capabilities"]}
 
     disabled = capabilities(disabled_app)
     enabled = capabilities(enabled_app)
@@ -280,6 +275,7 @@ def test_capability_api_exposes_research_only_with_knowledge_and_web_search(
 
     assert {item["capability_id"] for item in payload["capabilities"]} == {
         "subagent:explore",
+        "subagent:practice",
         "subagent:research",
     }
 
@@ -318,9 +314,7 @@ def test_capability_health_api_returns_content_free_workspace_metrics(
     assert response.status_code == 200
     payload = response.json()
     metric = next(
-        item
-        for item in payload["capabilities"]
-        if item["capability_id"] == "local:list_files"
+        item for item in payload["capabilities"] if item["capability_id"] == "local:list_files"
     )
     assert payload["workspace_id"] == workspace_id_from_path(tmp_path)
     assert payload["range_days"] == 30

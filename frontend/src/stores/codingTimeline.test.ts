@@ -176,6 +176,27 @@ describe('coding timeline projection', () => {
     ])
   })
 
+  it('backfills missing tool-call arguments from the matching result', () => {
+    const projection = createTimelineProjection([
+      event(1, 'tool', {
+        type: 'tool_call', tool: 'run_shell', tool_call_id: 'call-shell', args: {},
+      }, { status: 'running' }),
+      event(2, 'tool', {
+        type: 'tool_result', tool: 'run_shell', tool_call_id: 'call-shell',
+        args: { command: 'pwd', timeout: 10 }, content: '/workspace', is_error: false,
+      }),
+    ])
+
+    expect(projection.turns[0].tools).toEqual([
+      expect.objectContaining({
+        tool_call_id: 'call-shell',
+        args: { command: 'pwd', timeout: 10 },
+        status: 'completed',
+        result: '/workspace',
+      }),
+    ])
+  })
+
   it('merges generic graph and Sage executor events for the same tool call', () => {
     const projection = createTimelineProjection([
       event(1, 'tool', {

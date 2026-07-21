@@ -263,6 +263,50 @@ describe('harness timeline projection', () => {
     }))
   })
 
+  it('projects retrieval gate decisions and actual source hits without query content', () => {
+    const projection = projectLatestCodingHarness([
+      codingEvent(1, 'harness', {
+        type: 'retrieval_gate_decided',
+        decision: 'mixed',
+        selected_sources: ['semantic_memory', 'knowledge'],
+        query_fingerprint: 'fingerprint-only',
+        degraded: false,
+      }),
+      codingEvent(2, 'harness', {
+        type: 'retrieval_source_completed',
+        source: 'knowledge',
+        actual_hit_count: 3,
+        used_tokens: 480,
+        token_budget: 3000,
+      }),
+    ])
+
+    expect(projection.runtimeResources).toContainEqual({
+      id: 'retrieval-gate',
+      kind: 'retrieval',
+      label: '检索门限',
+      detail: '长期记忆 + 知识库 · 3 条实际命中',
+      status: 'completed',
+    })
+    expect(JSON.stringify(projection.runtimeResources)).not.toContain('fingerprint-only')
+  })
+
+  it('shows an unavailable retrieval request as a truthful blocked degradation', () => {
+    const projection = projectLatestCodingHarness([
+      codingEvent(1, 'harness', {
+        type: 'retrieval_gate_decided',
+        decision: 'skip',
+        candidate_sources: ['web'],
+        selected_sources: [],
+        degraded: true,
+      }),
+    ])
+
+    expect(projection.runtimeResources).toContainEqual(expect.objectContaining({
+      kind: 'retrieval', detail: '本轮跳过检索 · 已降级', status: 'blocked',
+    }))
+  })
+
   it('projects a V2 approval loop without charging human wait to plan or tool time', () => {
     const projection = projectLatestCodingHarness([
       { ...codingEvent(1, 'user', { type: 'user', content: '执行 pwd' }), timestamp: '2026-07-16T00:00:00Z' },

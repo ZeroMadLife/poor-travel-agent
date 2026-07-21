@@ -235,12 +235,11 @@ def test_policy_rejects_commands_whose_only_purpose_is_workspace_read(
 ) -> None:
     workspace, tools = _tools(tmp_path)
 
-    decision = ToolPolicyChecker(workspace).check(
-        tools["run_shell"], {"command": command}
-    )
+    decision = ToolPolicyChecker(workspace).check(tools["run_shell"], {"command": command})
 
     assert decision.allowed is False
     assert decision.reason == "shell_search_should_use_tool"
+    assert "workspace tmp/" in decision.message
 
 
 @pytest.mark.parametrize(
@@ -253,14 +252,10 @@ def test_policy_rejects_commands_whose_only_purpose_is_workspace_read(
         "npm run build && ls -la",
     ],
 )
-def test_policy_allows_compound_shell_validation_commands(
-    tmp_path: Path, command: str
-) -> None:
+def test_policy_allows_compound_shell_validation_commands(tmp_path: Path, command: str) -> None:
     workspace, tools = _tools(tmp_path)
 
-    decision = ToolPolicyChecker(workspace).check(
-        tools["run_shell"], {"command": command}
-    )
+    decision = ToolPolicyChecker(workspace).check(tools["run_shell"], {"command": command})
 
     assert decision.allowed is True
 
@@ -283,9 +278,7 @@ def test_policy_rejects_unbounded_shell_fallbacks(
 ) -> None:
     workspace, tools = _tools(tmp_path)
 
-    decision = ToolPolicyChecker(workspace).check(
-        tools["run_shell"], {"command": command}
-    )
+    decision = ToolPolicyChecker(workspace).check(tools["run_shell"], {"command": command})
 
     assert decision.allowed is False
     assert decision.reason == reason
@@ -296,12 +289,7 @@ def test_policy_allows_bounded_curl_for_coding_diagnostics(tmp_path: Path) -> No
 
     decision = ToolPolicyChecker(workspace).check(
         tools["run_shell"],
-        {
-            "command": (
-                "curl -sL --connect-timeout 3 --max-time 10 "
-                "https://example.com/docs"
-            )
-        },
+        {"command": ("curl -sL --connect-timeout 3 --max-time 10 " "https://example.com/docs")},
     )
 
     assert decision.allowed is True

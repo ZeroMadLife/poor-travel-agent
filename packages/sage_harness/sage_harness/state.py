@@ -117,6 +117,17 @@ class MemoryRef(TypedDict, total=False):
     revision: str
 
 
+class RetrievalGateState(TypedDict, total=False):
+    """Bounded server-owned routing receipt for the current turn."""
+
+    decision: str
+    reason_code: str
+    selected_sources: list[str]
+    token_budget_by_source: dict[str, int]
+    query_fingerprint: str
+    degraded: bool
+
+
 class ApprovalContext(TypedDict, total=False):
     """Pending or resolved approval bound to one exact tool call."""
 
@@ -519,6 +530,7 @@ class SageThreadState(AgentState):
     ]
     skill_context: Annotated[NotRequired[list[SkillRef] | None], merge_skill_context]
     memory_refs: Annotated[NotRequired[list[MemoryRef] | None], merge_memory_refs]
+    retrieval_gate: NotRequired[RetrievalGateState | None]
     approval_context: Annotated[NotRequired[ApprovalContext | None], merge_approval_context]
     promoted_tools: Annotated[NotRequired[PromotedTools | None], merge_promoted_tools]
     summary_text: NotRequired[str | None]
@@ -543,6 +555,7 @@ __all__ = [
     "GoalStatus",
     "MemoryRef",
     "PromotedTools",
+    "RetrievalGateState",
     "SageThreadState",
     "SandboxState",
     "SkillRef",

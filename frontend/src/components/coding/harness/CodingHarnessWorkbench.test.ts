@@ -120,7 +120,7 @@ describe('CodingHarnessWorkbench', () => {
     expect(wrapper.get('.metric-state').text()).toContain('已完成')
   })
 
-  it('creates a durable goal contract before the first run', async () => {
+  it('keeps the learning canvas visible until the user opens Goal setup', async () => {
     const current = projection()
     const wrapper = mount(CodingHarnessWorkbench, {
       props: {
@@ -132,9 +132,11 @@ describe('CodingHarnessWorkbench', () => {
       },
     })
 
-    expect(wrapper.attributes('data-journey')).toBe('contract')
-    expect(wrapper.get('.contract-surface').text()).toContain('目标尚未确认')
-    expect(wrapper.get('.contract-surface').text()).not.toContain('42%')
+    expect(wrapper.attributes('data-journey')).toBe('active')
+    expect(wrapper.get('.active-surface').text()).toContain('当前会话尚未绑定长期目标')
+    expect(wrapper.find('.goal-contract-form').exists()).toBe(false)
+    await wrapper.get('.goal-empty button').trigger('click')
+    expect(wrapper.get('.goal-setup-form').text()).toContain('完成标准')
     await wrapper.get('textarea[aria-label="完成标准"]').setValue('完成一次恢复演练\n给出可追溯证据')
     await wrapper.get('.goal-contract-form').trigger('submit')
     expect(wrapper.emitted('saveGoal')).toEqual([[
@@ -165,7 +167,7 @@ describe('CodingHarnessWorkbench', () => {
     expect(wrapper.emitted('continueGoal')).toEqual([[]])
   })
 
-  it('offers Goal setup to a completed legacy Thread without an existing Goal', () => {
+  it('offers compact Goal setup to a completed legacy Thread without replacing its canvas', async () => {
     const current = projection()
     const wrapper = mount(CodingHarnessWorkbench, {
       props: {
@@ -174,7 +176,9 @@ describe('CodingHarnessWorkbench', () => {
       },
     })
 
-    expect(wrapper.attributes('data-journey')).toBe('contract')
+    expect(wrapper.attributes('data-journey')).toBe('active')
+    expect(wrapper.find('.learning-path').exists()).toBe(true)
+    await wrapper.get('.goal-empty button').trigger('click')
     expect(
       (wrapper.get('textarea[aria-label="目标结果"]').element as HTMLTextAreaElement).value,
     ).toBe('已有历史但尚未设置目标')

@@ -1,6 +1,7 @@
 import type { KnowledgeRetrievalViewModel } from './knowledgeRetrieval'
 
 export type ToolActivityViewModel = {
+  tool_call_id?: string
   tool: string
   args: Record<string, unknown>
   status: 'running' | 'done' | 'error'

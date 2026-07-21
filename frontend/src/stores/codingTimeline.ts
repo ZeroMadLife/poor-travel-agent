@@ -234,6 +234,9 @@ function projectTool(turn: TimelineTurn, event: CodingTimelineEvent, type: strin
     }
     turn.tools.push(target)
   }
+  if (Object.keys(target.args).length === 0 && Object.keys(args).length > 0) {
+    target.args = args
+  }
   target.result = stringValue(event.payload.content)
   target.retrieval = toolName === 'knowledge_search'
     ? parseKnowledgeRetrieval(target.result) ?? undefined

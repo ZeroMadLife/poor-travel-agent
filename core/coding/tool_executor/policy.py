@@ -11,9 +11,7 @@ from core.coding.context import WorkspaceContext
 from core.coding.tools.base import RegisteredTool
 
 SHELL_OPERATOR_RE = re.compile(r"^[;&|]+$")
-SHELL_READ_COMMANDS = frozenset(
-    {"cat", "find", "grep", "head", "less", "ls", "rg", "tail"}
-)
+SHELL_READ_COMMANDS = frozenset({"cat", "find", "grep", "head", "less", "ls", "rg", "tail"})
 
 
 @dataclass(frozen=True)
@@ -73,7 +71,9 @@ class ToolPolicyChecker:
                 return ToolPolicyDecision.deny(
                     "shell_search_should_use_tool",
                     "error: run_shell is not for ordinary workspace search/read; "
-                    "use search, read_file, or list_files first",
+                    "use search, read_file, or list_files first. For external artifacts, "
+                    "copy or clone them under workspace tmp/ before using structured "
+                    "read tools; never use the operating-system /tmp directory",
                 )
         return ToolPolicyDecision.allow()
 
@@ -113,9 +113,7 @@ def _is_ordinary_shell_read(command: str) -> bool:
             command_names.append(token.rsplit("/", 1)[-1])
             expecting_command = False
 
-    return bool(command_names) and all(
-        name in SHELL_READ_COMMANDS for name in command_names
-    )
+    return bool(command_names) and all(name in SHELL_READ_COMMANDS for name in command_names)
 
 
 def _contains_root_filesystem_scan(command: str) -> bool:
@@ -139,7 +137,5 @@ def _network_command_lacks_timeout(command: str) -> bool:
         if not has_connect_timeout or not has_total_timeout:
             return True
     if re.search(r"(?:^|[;&|]\s*)wget(?:\s|$)", command, flags=re.IGNORECASE):
-        return not bool(
-            re.search(r"--timeout(?:=|\s+)\d", command, flags=re.IGNORECASE)
-        )
+        return not bool(re.search(r"--timeout(?:=|\s+)\d", command, flags=re.IGNORECASE))
     return False

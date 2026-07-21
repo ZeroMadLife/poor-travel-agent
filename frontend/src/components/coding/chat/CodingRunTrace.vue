@@ -121,21 +121,30 @@ function fallbackStep(tool: TimelineTool): CodingRunAuditStep {
 }
 
 function presentStep(step: CodingRunAuditStep, tool?: TimelineTool): CodingRunAuditStep {
+  let presented = step
+  if (tool && Object.keys(tool.args).length) {
+    const args = safeArguments(tool.tool, tool.args)
+    presented = {
+      ...step,
+      action_summary: actionSummary(tool.tool, args),
+      arguments_preview: JSON.stringify(args, null, 2),
+    }
+  }
   if (tool?.policy_reason?.trim()) {
     return {
-      ...step,
+      ...presented,
       status: 'policy-blocked',
       result_summary: policyReasonLabel(tool.policy_reason),
     }
   }
   if (tool?.status === 'blocked') {
     return {
-      ...step,
+      ...presented,
       status: 'approval-blocked',
       result_summary: '等待用户确认',
     }
   }
-  return step
+  return presented
 }
 
 function policyReasonLabel(reason?: string) {
@@ -173,6 +182,12 @@ function actionSummary(tool: string, args: Record<string, unknown>) {
   if (tool === 'patch_file') return `修改 ${path || '文件'}`
   if (tool === 'run_shell') return `执行 ${stringArg(args, 'command') || 'shell 命令'}`
   if (tool === 'agent') return `子任务 ${stringArg(args, 'description') || stringArg(args, 'task') || '执行'}`
+  if (tool === 'task') {
+    const profile = stringArg(args, 'subagent_type')
+    const description = stringArg(args, 'description')
+    const label = profile ? `${profile[0].toUpperCase()}${profile.slice(1)} 子代理` : '子代理'
+    return `${label}${description ? ` · ${description}` : ''}`
+  }
   return `调用 ${tool}`
 }
 
@@ -230,7 +245,7 @@ function toolIcon(tool: string) {
   if (tool === 'list_files' || tool === 'search') return FolderSearch
   if (tool === 'tool_search') return Search
   if (tool === 'write_file' || tool === 'patch_file') return FilePenLine
-  if (tool === 'agent') return Bot
+  if (tool === 'agent' || tool === 'task') return Bot
   return Wrench
 }
 
@@ -263,6 +278,7 @@ function stepActionSummary(step: CodingRunAuditStep) {
   if (step.tool === 'agent') {
     return `子任务 ${stringArg(args, 'description') || stringArg(args, 'task') || '执行'}`
   }
+  if (step.tool === 'task') return actionSummary(step.tool, args)
   return step.action_summary
 }
 

@@ -120,9 +120,7 @@ class AppliedContextController:
             ),
         )
 
-    def before_model_request(
-        self, history: list[dict[str, Any]], **kwargs: Any
-    ) -> PreparedContext:
+    def before_model_request(self, history: list[dict[str, Any]], **kwargs: Any) -> PreparedContext:
         del kwargs
         return PreparedContext.create(
             projected_history=history,
@@ -151,9 +149,7 @@ class EmergencyContextController:
             events=(_usage_event(run_id, "emergency"),),
         )
 
-    def before_model_request(
-        self, history: list[dict[str, Any]], **kwargs: Any
-    ) -> PreparedContext:
+    def before_model_request(self, history: list[dict[str, Any]], **kwargs: Any) -> PreparedContext:
         del kwargs
         return PreparedContext.create(
             projected_history=history,
@@ -261,6 +257,56 @@ async def test_v2_compacts_before_graph_and_injects_new_summary(
 
 
 @pytest.mark.asyncio
+async def test_v2_emits_retrieval_gate_and_loads_only_selected_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _runtime(tmp_path)
+    runtime.memory_manager.remember(
+        "用户偏好先给出简短结论，再展开证据。",
+        topic="project-conventions",
+        source_ref="approved-memory",
+    )
+    RecordingAdapter.runtime = runtime
+    monkeypatch.setattr(coding_api, "SageHarnessRuntimeAdapter", RecordingAdapter)
+
+    events = [
+        event
+        async for event in coding_api._deerflow_timeline_events(
+            runtime,
+            content="你还记得我之前告诉过你的偏好吗？",
+            run_id="run-memory-gate",
+            surface_context={"surface": "coding"},
+            thread_goal=None,
+            checkpointer=object(),
+            mcp_catalog=None,
+        )
+    ]
+
+    gate_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.payload.get("type") == "retrieval_gate_decided"
+    )
+    catalog_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.payload.get("type") == "capability_catalog_updated"
+    )
+    gate = events[gate_index].payload
+    assert gate["decision"] == "semantic_memory"
+    assert gate["selected_sources"] == ["semantic_memory"]
+    assert gate["query_fingerprint"]
+    assert "偏好" not in str(gate)
+    assert gate_index < catalog_index
+
+    durable = RecordingAdapter.durable_contexts[0]
+    references = durable["memory_refs"]
+    assert isinstance(references, list)
+    assert references[0]["summary"] == "用户偏好先给出简短结论，再展开证据。"
+    assert durable["retrieval_gate"]["decision"] == "semantic_memory"
+
+
+@pytest.mark.asyncio
 async def test_v2_subagent_approval_continues_without_graph_checkpoint_resume(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -310,6 +356,34 @@ async def test_v2_subagent_approval_continues_without_graph_checkpoint_resume(
     assert SubagentApprovalAdapter.calls == 1
     assert any(event.payload.get("type") == "approval_required" for event in events)
     assert events[-2].payload["content"] == "continued in place"
+
+
+@pytest.mark.asyncio
+async def test_v2_external_resume_preserves_checkpoint_retrieval_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _runtime(tmp_path)
+    RecordingAdapter.runtime = runtime
+    monkeypatch.setattr(coding_api, "SageHarnessRuntimeAdapter", RecordingAdapter)
+
+    events = [
+        event
+        async for event in coding_api._deerflow_timeline_events(
+            runtime,
+            content="resume original request",
+            run_id="run-resume-gate",
+            surface_context={"surface": "coding"},
+            thread_goal=None,
+            checkpointer=object(),
+            mcp_catalog=None,
+            resume_value={"approval_id": "approval-1", "choice": "once"},
+            resume_attempt=1,
+        )
+    ]
+
+    assert not any(event.payload.get("type") == "retrieval_gate_decided" for event in events)
+    assert RecordingAdapter.durable_contexts == [{}]
+    assert RecordingAdapter.stream_kwargs[0]["resume"] is True
 
 
 @pytest.mark.asyncio

@@ -134,6 +134,63 @@ describe('codingEvents', () => {
     expect(current.messages.value[0].tools![0].content).toBe('# Sage')
   })
 
+  it('settles a restored tool result when the wire event omits args', () => {
+    const current = state()
+    current.messages.value = [
+      {
+        role: 'assistant',
+        content: '',
+        tools: [{ tool_call_id: 'call-task', tool: 'task', args: {}, status: 'running', content: '' }],
+        isThinking: true,
+      },
+    ]
+
+    expect(() => applyCodingEvent(current, {
+      type: 'tool_result',
+      tool_call_id: 'call-task',
+      tool: 'task',
+      content: '{"status":"completed"}',
+      is_error: false,
+    })).not.toThrow()
+
+    expect(current.messages.value[0].tools).toEqual([
+      expect.objectContaining({
+        tool_call_id: 'call-task',
+        args: {},
+        status: 'done',
+      }),
+    ])
+  })
+
+  it('settles one empty-args tool call by id and backfills the executed command', () => {
+    const current = state()
+    current.messages.value = [{ role: 'assistant', content: '', tools: [], isThinking: true }]
+
+    applyCodingEvent(current, {
+      type: 'tool_call',
+      tool: 'run_shell',
+      tool_call_id: 'call-shell',
+      args: {},
+    })
+    applyCodingEvent(current, {
+      type: 'tool_result',
+      tool: 'run_shell',
+      tool_call_id: 'call-shell',
+      args: { command: 'pwd', timeout: 10 },
+      content: '/workspace',
+      is_error: false,
+    })
+
+    expect(current.messages.value[0].tools).toEqual([
+      expect.objectContaining({
+        tool_call_id: 'call-shell',
+        args: { command: 'pwd', timeout: 10 },
+        status: 'done',
+        content: '/workspace',
+      }),
+    ])
+  })
+
   it('projects knowledge citations during the live event stream', () => {
     const current = state()
     current.messages.value = [{

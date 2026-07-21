@@ -209,6 +209,33 @@ function projectCodingRuntimeResources(
   events: readonly CodingTimelineEvent[],
 ): HarnessRuntimeResource[] {
   const resources: HarnessRuntimeResource[] = []
+  const retrievalGate = [...events].reverse().find(
+    (event) => event.payload.type === 'retrieval_gate_decided',
+  )
+  if (retrievalGate) {
+    const selected = arrayValue(retrievalGate.payload.selected_sources)
+      .map(stringValue)
+      .filter(Boolean)
+    const sourceEvents = events.filter(
+      (event) => event.payload.type === 'retrieval_source_completed',
+    )
+    const hits = sourceEvents.reduce(
+      (total, event) => total + numberValue(event.payload.actual_hit_count),
+      0,
+    )
+    const detail = selected.length
+      ? `${selected.map(retrievalSourceLabel).join(' + ')} · ${sourceEvents.length ? `${hits} 条实际命中` : '等待来源调用'}`
+      : '本轮跳过检索'
+    resources.push({
+      id: 'retrieval-gate',
+      kind: 'retrieval',
+      label: '检索门限',
+      detail: retrievalGate.payload.degraded === true ? `${detail} · 已降级` : detail,
+      status: retrievalGate.payload.degraded === true && selected.length === 0
+        ? 'blocked'
+        : explicitStatus(retrievalGate.status),
+    })
+  }
   const runBudget = [...events].reverse().find(
     (event) => event.payload.type === 'run_budget_updated',
   )
@@ -283,6 +310,15 @@ function projectCodingRuntimeResources(
   }
   resources.push(...agentResources.values())
   return resources
+}
+
+function retrievalSourceLabel(value: string) {
+  return ({
+    semantic_memory: '长期记忆',
+    episodic_memory: '会话记忆',
+    knowledge: '知识库',
+    web: 'Web',
+  } as Record<string, string>)[value] || value
 }
 
 function compactNumber(value: number) {

@@ -152,6 +152,10 @@ from core.harness.knowledge_source_proposal_adapter import (
 )
 from core.harness.mcp_adapter import mcp_catalog_event
 from core.harness.memory_adapter import CodingMemoryPort
+from core.harness.retrieval_gate import (
+    decide_retrieval_gate,
+    retrieval_source_event,
+)
 from core.harness.runtime_adapter import SageHarnessRuntimeAdapter
 from core.harness.sandbox_factory import create_coding_sandbox
 from core.harness.subagent_adapter import (
@@ -492,7 +496,47 @@ async def _deerflow_timeline_events(
                     event_id=f"harness:{run_id}:goal-followup",
                 )
 
-        durable_context = build_deerflow_durable_context(runtime, thread_goal=thread_goal)
+        knowledge_port = CodingKnowledgePort(runtime)
+        memory_port = CodingMemoryPort(runtime)
+        if is_resume:
+            # Command(resume=...) continues from checkpoint state. Supplying a fresh gate here
+            # would replace the decision frozen before the interrupted model/tool step.
+            durable_context = {}
+            retrieval_gate = None
+        else:
+            retrieval_gate = decide_retrieval_gate(
+                content,
+                surface_context=surface_context,
+                thread_goal=thread_goal,
+                memory_available=True,
+                knowledge_available=knowledge_port.available,
+                web_available=_port_available(web_search_port),
+            )
+            memory_token_budget = sum(
+                budget
+                for source, budget in retrieval_gate.token_budget_by_source.items()
+                if source in {"semantic_memory", "episodic_memory"}
+            )
+            memory_refs = (
+                await memory_port.load_context(
+                    runtime.session_id,
+                    token_budget=memory_token_budget,
+                )
+                if retrieval_gate.memory_selected and memory_token_budget > 0
+                else ()
+            )
+            durable_context = build_deerflow_durable_context(
+                runtime,
+                thread_goal=thread_goal,
+                memory_refs=memory_refs,
+                retrieval_gate=retrieval_gate.to_context(),
+            )
+            yield RunEvent(
+                kind="harness",
+                status="completed",
+                payload=retrieval_gate.to_payload(run_id=run_id),
+                event_id=f"harness:{run_id}:retrieval-gate",
+            )
         context_event = (
             None if is_resume else context_status_event(runtime, run_id, durable_context)
         )
@@ -564,7 +608,6 @@ async def _deerflow_timeline_events(
             container_image=str(getattr(runtime, "sandbox_image", "python:3.11-slim")),
         )
         try:
-            knowledge_port = CodingKnowledgePort(runtime)
             evidence_bundle_port = CodingEvidenceBundlePort(runtime)
             subagent_config = build_coding_subagent_config(
                 knowledge_port,
@@ -590,7 +633,7 @@ async def _deerflow_timeline_events(
                 runtime,
                 run_id=run_id,
                 knowledge_port=knowledge_port,
-                memory_port=CodingMemoryPort(runtime),
+                memory_port=memory_port,
                 sandbox=sandbox,
                 extra_deferred_tools=mcp_tools,
                 mcp_catalog=mcp_snapshot.catalog if mcp_snapshot is not None else None,
@@ -676,6 +719,9 @@ async def _deerflow_timeline_events(
                     if event.payload.get("type") == "text_delta":
                         response_parts.append(str(event.payload.get("delta", "")))
                     yield event
+                    observed_retrieval = retrieval_source_event(event, run_id=run_id)
+                    if observed_retrieval is not None:
+                        yield observed_retrieval
                     if (
                         event.payload.get("type") == "approval_required"
                         and event.payload.get("approval_scope") != "subagent"
@@ -1272,6 +1318,7 @@ def _harness_capability_context(
                 _port_available(getattr(request.app.state, "coding_web_search_port", None))
                 and isinstance(_coding_knowledge_store(request), KnowledgeStore)
             ),
+            practice_subagent_available=True,
         ),
     )
 
