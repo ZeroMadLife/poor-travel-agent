@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from scripts.canaryctl import (
+    DEFAULT_PUBLIC_HEALTH_URL,
     DEFAULT_REMOTE_HOST,
     CanaryConfig,
     CanaryController,
@@ -30,6 +31,7 @@ REQUIRED_CHECKS = (
 
 def test_default_management_channel_uses_public_key_only_ssh() -> None:
     assert DEFAULT_REMOTE_HOST == "sage-deploy@121.40.185.188"
+    assert DEFAULT_PUBLIC_HEALTH_URL == "https://sagecompanion.top/"
 
 
 def _config(tmp_path: Path, **overrides: object) -> CanaryConfig:
@@ -340,6 +342,19 @@ def test_availability_falls_back_to_proxy_free_curl(tmp_path: Path) -> None:
     assert report["healthy"] is True
     curl = next(command for command in calls if command[0] == "/bin/echo")
     assert curl[curl.index("--noproxy") + 1] == "*"
+
+
+def test_public_https_wait_allows_initial_certificate_issuance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attempts = iter((False, False, True))
+    sleeps: list[int] = []
+    controller = CanaryController(_config(tmp_path))
+    controller._public_http_healthy = lambda: next(attempts)
+    monkeypatch.setattr("scripts.canaryctl.time.sleep", sleeps.append)
+
+    assert controller._wait_public_http_healthy() is True
+    assert sleeps == [1, 1]
 
 
 def test_run_once_reuses_proxy_free_probe_after_deploy(tmp_path: Path) -> None:

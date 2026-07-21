@@ -26,12 +26,15 @@ LIVE_CONTAINER = "sage-public-gateway"
 PREVIOUS_CONTAINER = "sage-public-gateway-previous"
 CANDIDATE_CONTAINER = "sage-public-gateway-candidate"
 PUBLIC_NETWORK = "sage-public-release"
+PUBLIC_DATA_VOLUME = "sage-public-caddy-data"
+PUBLIC_CONFIG_VOLUME = "sage-public-caddy-config"
+PUBLIC_BIND_ADDRESS = "172.20.67.88"
 DEFAULT_SOURCE_DOCKER_HOST = "unix:///run/user/1002/docker.sock"
 DEFAULT_TARGET_DOCKER_HOST = "unix:///var/run/docker.sock"
 DEFAULT_STATE_FILE = Path("/var/lib/sage-public-release/state.json")
 DEFAULT_LOCK_FILE = Path("/run/lock/sage-public-release.lock")
 DEFAULT_CANDIDATE_URL = "http://127.0.0.1:18081/"
-DEFAULT_LIVE_URL = "http://127.0.0.1/"
+DEFAULT_LIVE_URL = "http://127.0.0.1:18082/healthz"
 
 
 class PublicReleaseError(RuntimeError):
@@ -131,16 +134,21 @@ class PublicReleaseController:
         return self._docker(self.config.target_docker_host, *args, timeout=timeout)
 
     @staticmethod
-    def _container_args(name: str, image: str, binding: str) -> list[str]:
-        return [
+    def _container_args(
+        name: str,
+        image: str,
+        bindings: Sequence[str],
+        *,
+        persistent_storage: bool,
+        command: Sequence[str] = (),
+    ) -> list[str]:
+        args = [
             "run",
             "-d",
             "--name",
             name,
             "--restart",
             "unless-stopped" if name == LIVE_CONTAINER else "no",
-            "--publish",
-            binding,
             "--network",
             PUBLIC_NETWORK,
             "--user",
@@ -151,21 +159,43 @@ class PublicReleaseController:
             "--security-opt",
             "no-new-privileges:true",
             "--tmpfs",
-            "/config:rw,noexec,nosuid,mode=1777,size=8m",
-            "--tmpfs",
-            "/data:rw,noexec,nosuid,mode=1777,size=8m",
-            "--tmpfs",
             "/tmp:rw,noexec,nosuid,mode=1777,size=8m",
             "--health-cmd",
-            "wget -qO- http://127.0.0.1:8081/ >/dev/null || exit 1",
+            (
+                "wget -qO- http://127.0.0.1:8081/healthz >/dev/null || exit 1"
+                if persistent_storage
+                else "wget -qO- http://127.0.0.1:8081/ >/dev/null || exit 1"
+            ),
             "--health-interval",
             "15s",
             "--health-timeout",
             "5s",
             "--health-retries",
             "3",
-            image,
         ]
+        for binding in bindings:
+            args.extend(("--publish", binding))
+        if persistent_storage:
+            args.extend(
+                (
+                    "--mount",
+                    f"type=volume,source={PUBLIC_DATA_VOLUME},target=/data",
+                    "--mount",
+                    f"type=volume,source={PUBLIC_CONFIG_VOLUME},target=/config",
+                )
+            )
+        else:
+            args.extend(
+                (
+                    "--tmpfs",
+                    "/config:rw,noexec,nosuid,mode=1777,size=8m",
+                    "--tmpfs",
+                    "/data:rw,noexec,nosuid,mode=1777,size=8m",
+                )
+            )
+        args.append(image)
+        args.extend(command)
+        return args
 
     def _inspect_optional(self, name: str) -> bool:
         result = self.runner(
@@ -220,6 +250,30 @@ class PublicReleaseController:
                 raise PublicReleaseError("公共门面 Docker 网络安全属性不匹配")
             return
         self._target("network", "create", "--driver", "bridge", PUBLIC_NETWORK)
+
+    def _ensure_volume(self, name: str) -> None:
+        result = self.runner(
+            [
+                "docker",
+                "--host",
+                self.config.target_docker_host,
+                "volume",
+                "inspect",
+                "--format",
+                "{{.Driver}}",
+                name,
+            ],
+            30,
+        )
+        if result.returncode == 0:
+            if result.stdout.strip() != "local":
+                raise PublicReleaseError(f"公共门面 Docker volume {name} 驱动不匹配")
+            return
+        self._target("volume", "create", "--driver", "local", name)
+
+    def _ensure_storage(self) -> None:
+        self._ensure_volume(PUBLIC_DATA_VOLUME)
+        self._ensure_volume(PUBLIC_CONFIG_VOLUME)
 
     def _wait_healthy(self, url: str, attempts: int = 20) -> None:
         for _ in range(attempts):
@@ -294,14 +348,41 @@ class PublicReleaseController:
 
     def _run_candidate(self, image: str) -> None:
         self._remove_optional(CANDIDATE_CONTAINER)
-        self._target(*self._container_args(CANDIDATE_CONTAINER, image, "127.0.0.1:18081:8081"))
+        self._target(
+            *self._container_args(
+                CANDIDATE_CONTAINER,
+                image,
+                ("127.0.0.1:18081:8081",),
+                persistent_storage=False,
+                command=(
+                    "caddy",
+                    "run",
+                    "--config",
+                    "/etc/caddy/Caddyfile.candidate",
+                    "--adapter",
+                    "caddyfile",
+                ),
+            )
+        )
         try:
             self._wait_healthy(self.config.candidate_url)
         finally:
             self._remove_optional(CANDIDATE_CONTAINER)
 
     def _start_live(self, image: str) -> None:
-        self._target(*self._container_args(LIVE_CONTAINER, image, "80:8081"))
+        self._ensure_storage()
+        self._target(
+            *self._container_args(
+                LIVE_CONTAINER,
+                image,
+                (
+                    "127.0.0.1:18082:8081",
+                    f"{PUBLIC_BIND_ADDRESS}:80:8081",
+                    f"{PUBLIC_BIND_ADDRESS}:443:8443",
+                ),
+                persistent_storage=True,
+            )
+        )
         self._wait_healthy(self.config.live_url)
 
     def _restore_previous(self) -> None:

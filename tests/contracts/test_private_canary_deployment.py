@@ -26,6 +26,9 @@ def test_public_profile_is_built_as_an_api_isolated_static_surface() -> None:
     compose = (ROOT / "infra/compose/private-canary.yml").read_text(encoding="utf-8")
     dockerfile = (ROOT / "infra/docker/sage-public.Dockerfile").read_text(encoding="utf-8")
     caddyfile = (ROOT / "infra/proxy/Caddyfile.public").read_text(encoding="utf-8")
+    static_caddyfile = (ROOT / "infra/proxy/Caddyfile.public-static").read_text(
+        encoding="utf-8"
+    )
     router = (ROOT / "frontend/src/router/public.ts").read_text(encoding="utf-8")
 
     public_service = compose[compose.index("  public:") : compose.index("\nnetworks:")]
@@ -39,9 +42,16 @@ def test_public_profile_is_built_as_an_api_isolated_static_surface() -> None:
     assert "USER 65532:65532" in dockerfile
     assert "SAGE_IMAGE_TAG: ${SAGE_IMAGE_TAG:?SAGE_IMAGE_TAG is required}" in public_service
     assert "dist-public" in dockerfile
-    assert "reverse_proxy" not in caddyfile
-    assert "connect-src 'none'" in caddyfile
-    assert "frame-ancestors 'none'" in caddyfile
+    assert "EXPOSE 8081 8443" in dockerfile
+    assert "Caddyfile.candidate" in dockerfile
+    assert "/etc/caddy/Caddyfile.candidate" in public_service
+    assert "reverse_proxy" not in caddyfile + static_caddyfile
+    assert "sagecompanion.top, www.sagecompanion.top" in caddyfile
+    assert "http_port 8081" in caddyfile
+    assert "https_port 8443" in caddyfile
+    assert "auto_https off" not in caddyfile
+    assert "connect-src 'none'" in static_caddyfile
+    assert "frame-ancestors 'none'" in static_caddyfile
     assert "PublicProfileView" in router
     assert "AssistantHomeView" not in router
     assert "KnowledgeView" not in router

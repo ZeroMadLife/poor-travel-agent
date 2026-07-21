@@ -12,6 +12,9 @@ from scripts.public_releasectl import (
     CANDIDATE_CONTAINER,
     LIVE_CONTAINER,
     PREVIOUS_CONTAINER,
+    PUBLIC_BIND_ADDRESS,
+    PUBLIC_CONFIG_VOLUME,
+    PUBLIC_DATA_VOLUME,
     CommandResult,
     PublicReleaseConfig,
     PublicReleaseController,
@@ -31,7 +34,7 @@ def _config(tmp_path: Path) -> PublicReleaseConfig:
         state_file=tmp_path / "state.json",
         lock_file=tmp_path / "release.lock",
         candidate_url="http://127.0.0.1:18081/",
-        live_url="http://127.0.0.1/",
+        live_url="http://127.0.0.1:18082/healthz",
     )
 
 
@@ -59,6 +62,7 @@ class FakeDocker:
         self.calls: list[list[str]] = []
         self.containers: dict[str, str] = {LIVE_CONTAINER: f"sage-public:{SHA}"}
         self.images = {SHA, NEXT_SHA}
+        self.volumes = {PUBLIC_DATA_VOLUME, PUBLIC_CONFIG_VOLUME}
         self.fail_live = False
 
     def __call__(self, command, timeout):
@@ -77,6 +81,13 @@ class FakeDocker:
             return CommandResult(0, f"{image}\n") if image else CommandResult(1)
         if args[:3] == ["network", "inspect", "--format"]:
             return CommandResult(0, "false bridge\n")
+        if args[:3] == ["volume", "inspect", "--format"]:
+            if args[-1] in self.volumes:
+                return CommandResult(0, "local\n")
+            return CommandResult(1)
+        if args[:2] == ["volume", "create"]:
+            self.volumes.add(args[-1])
+            return CommandResult(0, f"{args[-1]}\n")
         if args[:2] == ["container", "inspect"]:
             return CommandResult(0) if args[-1] in self.containers else CommandResult(1)
         if args[:3] == ["container", "rm", "--force"]:
@@ -97,7 +108,7 @@ class FakeDocker:
             return CommandResult(0)
         if args and args[0] == "run":
             name = args[args.index("--name") + 1]
-            image = args[-1]
+            image = next(arg for arg in args if arg.startswith("sage-public:"))
             if name == LIVE_CONTAINER and self.fail_live:
                 return CommandResult(1, stderr="port failure")
             self.containers[name] = image
@@ -141,7 +152,10 @@ def test_apply_verifies_candidate_then_atomically_switches_live(tmp_path: Path) 
         "previous": SHA,
         "deployed_at": "now",
     }
-    assert probes == ["http://127.0.0.1:18081/", "http://127.0.0.1/"]
+    assert probes == [
+        "http://127.0.0.1:18081/",
+        "http://127.0.0.1:18082/healthz",
+    ]
     assert docker.containers[LIVE_CONTAINER] == f"sage-public:{NEXT_SHA}"
     assert docker.containers[PREVIOUS_CONTAINER] == f"sage-public:{SHA}"
     assert CANDIDATE_CONTAINER not in docker.containers
@@ -151,6 +165,26 @@ def test_apply_verifies_candidate_then_atomically_switches_live(tmp_path: Path) 
     state = json.loads((_config(tmp_path).state_file).read_text(encoding="utf-8"))
     assert state["current"] == NEXT_SHA
     assert state["previous"] == SHA
+
+    runs = [call[3:] for call in docker.calls if call[3:4] == ["run"]]
+    candidate = next(call for call in runs if CANDIDATE_CONTAINER in call)
+    live = next(call for call in runs if LIVE_CONTAINER in call)
+    assert "127.0.0.1:18081:8081" in candidate
+    assert candidate[-6:] == [
+        "caddy",
+        "run",
+        "--config",
+        "/etc/caddy/Caddyfile.candidate",
+        "--adapter",
+        "caddyfile",
+    ]
+    assert "127.0.0.1:18082:8081" in live
+    assert f"{PUBLIC_BIND_ADDRESS}:80:8081" in live
+    assert f"{PUBLIC_BIND_ADDRESS}:443:8443" in live
+    assert f"type=volume,source={PUBLIC_DATA_VOLUME},target=/data" in live
+    assert f"type=volume,source={PUBLIC_CONFIG_VOLUME},target=/config" in live
+    assert PUBLIC_DATA_VOLUME not in candidate
+    assert PUBLIC_CONFIG_VOLUME not in candidate
 
 
 def test_failed_live_switch_restores_previous_container(tmp_path: Path) -> None:
@@ -166,6 +200,18 @@ def test_failed_live_switch_restores_previous_container(tmp_path: Path) -> None:
     assert docker.containers[LIVE_CONTAINER] == f"sage-public:{SHA}"
     assert PREVIOUS_CONTAINER not in docker.containers
     assert not _config(tmp_path).state_file.exists()
+
+
+def test_apply_creates_missing_local_certificate_volumes(tmp_path: Path) -> None:
+    docker = FakeDocker()
+    docker.volumes.clear()
+    controller = PublicReleaseController(
+        _config(tmp_path), runner=docker, http_probe=lambda _url: True
+    )
+
+    controller.apply(NEXT_SHA)
+
+    assert docker.volumes == {PUBLIC_DATA_VOLUME, PUBLIC_CONFIG_VOLUME}
 
 
 def test_rollback_restores_retained_legacy_previous_without_oci_label(

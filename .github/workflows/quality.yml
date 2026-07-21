@@ -75,7 +75,8 @@ jobs:
             --tmpfs /config:rw,noexec,nosuid,mode=1777,size=8m \
             --tmpfs /data:rw,noexec,nosuid,mode=1777,size=8m \
             --tmpfs /tmp:rw,noexec,nosuid,mode=1777,size=8m \
-            sage-public:${{ github.sha }}
+            sage-public:${{ github.sha }} \
+            caddy run --config /etc/caddy/Caddyfile.candidate --adapter caddyfile
           attempt=0
           until curl --fail --silent --show-error --max-time 5 http://127.0.0.1:18081/ | grep -q '<title>ZeroMadLife / Sage</title>'; do
             attempt=$((attempt + 1))
