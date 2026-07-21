@@ -24,6 +24,7 @@ _MAX_SUMMARY_CHARS = 8_000
 _MAX_TODOS = 32
 _MAX_MEMORY_REFS = 32
 _MAX_SKILLS = 8
+_RETRIEVAL_SOURCES = frozenset({"semantic_memory", "episodic_memory", "knowledge", "web"})
 
 _AUTHORITY_CONTRACT = (
     "## Sage durable context authority\n"
@@ -125,6 +126,39 @@ def _normalize_durable_context(value: object) -> dict[str, object]:
     )
     if memory_refs:
         result["memory_refs"] = memory_refs
+    retrieval_gate = value.get("retrieval_gate")
+    if isinstance(retrieval_gate, Mapping):
+        selected_sources = (
+            [
+                str(source)
+                for source in retrieval_gate.get("selected_sources", [])
+                if str(source) in _RETRIEVAL_SOURCES
+            ]
+            if isinstance(retrieval_gate.get("selected_sources"), list | tuple)
+            else []
+        )
+        raw_budgets = retrieval_gate.get("token_budget_by_source")
+        budgets = (
+            {
+                str(source): budget
+                for source, budget in raw_budgets.items()
+                if str(source) in _RETRIEVAL_SOURCES
+                and type(budget) is int
+                and 0 <= budget <= 100_000
+            }
+            if isinstance(raw_budgets, Mapping)
+            else {}
+        )
+        normalized_gate: dict[str, object] = {
+            "decision": _bound_text(retrieval_gate.get("decision"), 40),
+            "reason_code": _bound_text(retrieval_gate.get("reason_code"), 80),
+            "selected_sources": selected_sources,
+            "token_budget_by_source": budgets,
+            "query_fingerprint": _bound_text(retrieval_gate.get("query_fingerprint"), 64),
+            "degraded": retrieval_gate.get("degraded") is True,
+        }
+        if normalized_gate["decision"]:
+            result["retrieval_gate"] = normalized_gate
     skills = _record_list(
         value.get("skill_context"),
         limit=_MAX_SKILLS,
@@ -155,6 +189,29 @@ def _render_durable_context(value: Mapping[str, object]) -> str:
                     if str(item).strip()
                 )
             sections.append("\n".join(lines))
+
+    retrieval_gate = value.get("retrieval_gate")
+    if isinstance(retrieval_gate, Mapping) and retrieval_gate.get("decision"):
+        selected = retrieval_gate.get("selected_sources")
+        selected_text = (
+            ", ".join(str(item) for item in selected) if isinstance(selected, list) else ""
+        )
+        budgets = retrieval_gate.get("token_budget_by_source")
+        budget_text = (
+            ", ".join(f"{source}={budget}" for source, budget in budgets.items())
+            if isinstance(budgets, Mapping)
+            else ""
+        )
+        lines = [
+            "## Retrieval gate",
+            f"- decision: {escape(str(retrieval_gate['decision']), quote=False)}",
+            f"- selected_sources: {escape(selected_text or 'none', quote=False)}",
+        ]
+        if budget_text:
+            lines.append(f"- token_budgets: {escape(budget_text, quote=False)}")
+        if retrieval_gate.get("degraded") is True:
+            lines.append("- degraded: true")
+        sections.append("\n".join(lines))
 
     todos = value.get("todos")
     if isinstance(todos, list) and todos:
@@ -254,6 +311,7 @@ class DurableContextMiddleware(AgentMiddleware[SageThreadState, HarnessRunContex
                     "todos",
                     "delegations",
                     "memory_refs",
+                    "retrieval_gate",
                     "skill_context",
                 )
                 if state.get(key)

@@ -483,6 +483,14 @@ frozen surface context
 - UI 只显示“检索了哪些来源”，不显示模型私有推理；
 - 普通算术/闲聊必须可以 skip，避免默认拖慢快速体验。
 
+实现状态（2026-07-21）：已交付 H2.8A 首个纵向切片。每轮在模型调用前生成
+`retrieval_gate_decided` durable receipt，记录决定、原因码、候选/选中来源、独立 token
+budget、耗时与查询指纹，不保存原始查询或模型私有推理。普通算术与无检索信号对话可
+确定性 `skip`；只有 Gate 选择 Semantic/Episodic Memory 时才调用 bounded Memory Port 并
+把带 revision 的 reference 注入 checkpoint。Knowledge/Web 工具实际执行后会追加来源命中
+回执，前端从 timeline 投影“检索门限”资源。当前 Knowledge/Web 选择仍是可观测建议，尚未
+成为强制工具过滤；该边界留给 H2.8B，不能宣称已完成全来源硬路由。
+
 #### H2.8B：Semantic / Episodic Retrieval
 
 - Memory Store 增加 bounded query seam；
@@ -657,7 +665,7 @@ Web、MCP 和模型真实 smoke 使用测试账户/低权限 fixture。CI 不依
 5. 用现有工具场景证明行为完全兼容；
 6. 独立提交、PR、全量门禁和 sage-learning 收口后，再进入 H2.4B。
 
-第一批次没有加入 Web Search、Memory 或自动 Goal 续跑，先建立了后续扩展共享的能力底座。随后 H2.4B-C 已完成统一发现、安全提升、健康度与审计；H2.5A 已交付 Search 与当前回答引用，H2.5B0-B2 已依次交付运行预算与 Shell 可靠性、安全 Fetch/Artifact、异步 PDF 解析；H2.5C 已交付用户确认的 Knowledge Source Proposal；H2.6A 已交付单个受限 Research Subagent；H2.6B1 已交付最多三个 child 的真实并行、父子共享预算、恢复幂等账本和 evidence refs 确定性去重；H2.6B2 已交付父 run 绑定的 Evidence Bundle、run 级重复检索 breaker 和只读 Synthesize；H2.6C 已完成 Practice Profile 实现和定向门禁，PR 合入后进入 H2.7A Thread Goal 与人工继续。
+第一批次没有加入 Web Search、Memory 或自动 Goal 续跑，先建立了后续扩展共享的能力底座。随后 H2.4B-C 已完成统一发现、安全提升、健康度与审计；H2.5A 已交付 Search 与当前回答引用，H2.5B0-B2 已依次交付运行预算与 Shell 可靠性、安全 Fetch/Artifact、异步 PDF 解析；H2.5C 已交付用户确认的 Knowledge Source Proposal；H2.6A 已交付单个受限 Research Subagent；H2.6B1 已交付最多三个 child 的真实并行、父子共享预算、恢复幂等账本和 evidence refs 确定性去重；H2.6B2 已交付父 run 绑定的 Evidence Bundle、run 级重复检索 breaker 和只读 Synthesize；H2.6C 已交付 Practice Profile；H2.7A-C 已交付 Thread Goal、安全续跑与可重算 Mastery Ledger；H2.8A 已交付确定性 Retrieval Gate、按需 Memory 注入和来源回执，下一切片进入 H2.8B Semantic/Episodic Retrieval 与全来源硬路由。
 
 ## 14. 完成定义
 

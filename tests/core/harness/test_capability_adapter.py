@@ -127,6 +127,8 @@ def test_adapter_marks_research_subagent_unavailable_until_server_profile_is_rea
     unavailable = disabled.get("subagent:research")
     assert unavailable is not None
     assert unavailable.availability == "unavailable"
+    assert "Knowledge" in unavailable.description
+    assert "Web Search" in unavailable.description
     descriptor = enabled.get("subagent:research")
     assert descriptor is not None
     assert descriptor.availability == "available"

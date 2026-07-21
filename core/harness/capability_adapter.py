@@ -206,13 +206,18 @@ def _explore_descriptor() -> CapabilityDescriptor:
 
 
 def _research_descriptor(*, available: bool) -> CapabilityDescriptor:
+    description = (
+        "Read-only child agent for bounded Knowledge and public web research."
+        if available
+        else "Unavailable until both Knowledge and Web Search are configured."
+    )
     return CapabilityDescriptor(
         capability_id="subagent:research",
         name="Research",
         origin="subagent",
         kind="delegate",
         revision="research-evidence-v1",
-        description=("Read-only child agent for bounded Knowledge and public web research."),
+        description=description,
         surfaces=_ALL_SURFACES,
         risk="medium",
         permission="runtime",

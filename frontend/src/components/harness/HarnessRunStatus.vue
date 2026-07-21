@@ -9,6 +9,7 @@ import {
   LoaderCircle,
   PauseCircle,
   PlugZap,
+  SearchCheck,
   RotateCcw,
   XCircle,
 } from 'lucide-vue-next'
@@ -50,6 +51,7 @@ function resourceIcon(resource: HarnessRuntimeResource) {
   if (resource.kind === 'budget') return Gauge
   if (resource.kind === 'mcp') return PlugZap
   if (resource.kind === 'agent') return Bot
+  if (resource.kind === 'retrieval') return SearchCheck
   return Database
 }
 

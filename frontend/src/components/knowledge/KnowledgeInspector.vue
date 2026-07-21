@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { ArrowUpRight, BookOpenText, ChevronDown, FileText, Link2, LoaderCircle, Network, ScanSearch, Target, X } from 'lucide-vue-next'
+import { ArrowUpRight, BookOpenText, ChevronDown, FileText, Link2, LoaderCircle, Network, Target, X } from 'lucide-vue-next'
 import { fetchKnowledgeCitation } from '../../api/knowledge'
 import { fetchKnowledgePage } from '../../api/knowledge'
 import { useMarkdown } from '../../composables/useMarkdown'
@@ -32,7 +32,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   close: []
   select: [nodeId: string]
-  research: []
 }>()
 
 const panel = ref<HTMLElement | null>(null)
@@ -221,9 +220,6 @@ onMounted(() => {
         <h2>{{ node?.label || page?.title || goal?.title || '本地知识分析' }}</h2>
       </div>
       <div class="inspector-heading-actions">
-        <button v-if="node" type="button" aria-label="在对话中研究此节点" title="研究此节点" @click="emit('research')">
-          <ScanSearch :size="18" />
-        </button>
         <button ref="closeButton" type="button" aria-label="关闭知识详情" title="关闭" @click="emit('close')">
           <X :size="18" />
         </button>

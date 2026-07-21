@@ -28,6 +28,11 @@ vi.mock('../components/knowledge', () => ({
     emits: ['close', 'select'],
     template: '<aside class="inspector-stub">{{ node?.label || goal?.title }} · 能力 {{ alignments.length }}<button class="select-source" type="button" @click="$emit(\'select\', \'node-source\')">查看来源</button></aside>',
   },
+  KnowledgeNodeResearchPanel: {
+    props: ['model', 'loading'],
+    emits: ['choose'],
+    template: '<section class="node-research-panel">研究「{{ model.label }}」<div class="research-actions"><button type="button" @click="$emit(\'choose\', \'understand\')">梳理概念</button><button type="button" @click="$emit(\'choose\', \'evidence\')">补充证据</button><button type="button" @click="$emit(\'choose\', \'practice\')">生成练习</button></div></section>',
+  },
 }))
 
 vi.mock('../api/knowledge', () => ({
@@ -257,7 +262,7 @@ it('loads revision-bound evidence when a graph node is selected', async () => {
   expect(wrapper.get('.knowledge-canvas-shell').classes()).toContain('has-selection')
   expect(wrapper.find('.knowledge-detail-rail').exists()).toBe(true)
   expect(wrapper.get('.inspector-stub').text()).toContain('Agent Harness')
-  expect(wrapper.get('.continue-in-chat').text()).toContain('回到主对话继续')
+  expect(wrapper.get('.node-research-panel').text()).toContain('研究「Agent Harness」')
   expect(wrapper.find('textarea').exists()).toBe(false)
   wrapper.unmount()
 })
@@ -267,7 +272,7 @@ it('stages a revision-bound node draft for the canonical main chat without sendi
 
   await wrapper.get('.graph-stub').trigger('click')
   await flushPromises()
-  await wrapper.get('.continue-in-chat').trigger('click')
+  await wrapper.get('.research-actions button').trigger('click')
   await flushPromises()
 
   const draft = consumeHarnessChatDraft()

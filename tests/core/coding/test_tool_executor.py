@@ -154,10 +154,7 @@ async def test_authorized_workspace_tool_is_delegated_to_the_sandbox(tmp_path: P
     executor = _executor(tmp_path, sandbox=sandbox)
 
     events = [
-        event
-        async for event in executor.execute(
-            {"name": "list_files", "args": {"path": "."}}
-        )
+        event async for event in executor.execute({"name": "list_files", "args": {"path": "."}})
     ]
 
     assert [event.type for event in events] == ["tool_call", "tool_result"]
@@ -172,10 +169,7 @@ async def test_sandbox_provider_failure_is_normalized_without_leaking_details(
     executor = _executor(tmp_path, sandbox=sandbox)
 
     events = [
-        event
-        async for event in executor.execute(
-            {"name": "list_files", "args": {"path": "."}}
-        )
+        event async for event in executor.execute({"name": "list_files", "args": {"path": "."}})
     ]
 
     result = events[-1]
@@ -226,6 +220,24 @@ async def test_invalid_write_arguments_fail_before_approval(tmp_path: Path) -> N
     assert isinstance(first, ToolResultEvent)
     assert first.is_error is True
     assert "path" in first.content.lower()
+    assert manager.pending("coding_1") is None
+
+
+@pytest.mark.parametrize("args", [{}, {"command": "   "}])
+async def test_empty_shell_command_fails_before_approval(
+    tmp_path: Path,
+    args: dict[str, object],
+) -> None:
+    """Empty shell requests never reach approval or start a subprocess."""
+    manager = ApprovalManager()
+    executor = _executor(tmp_path, approval_policy="ask", approval_manager=manager)
+
+    events = [event async for event in executor.execute({"name": "run_shell", "args": args})]
+
+    assert len(events) == 1
+    assert isinstance(events[0], ToolResultEvent)
+    assert events[0].is_error is True
+    assert "command" in events[0].content.lower()
     assert manager.pending("coding_1") is None
 
 
@@ -289,6 +301,51 @@ async def test_session_approval_skips_the_next_matching_tool_prompt(tmp_path: Pa
         "tool_result",
     ]
     assert (tmp_path / "second.txt").read_text(encoding="utf-8") == "second"
+
+
+async def test_shell_session_approval_is_bound_to_the_exact_trimmed_command(
+    tmp_path: Path,
+) -> None:
+    """Approving one shell command never approves a different command implicitly."""
+    manager = ApprovalManager()
+    executor = _executor(tmp_path, approval_policy="ask", approval_manager=manager)
+    first_stream = executor.execute({"name": "run_shell", "args": {"command": "printf 'first\\n'"}})
+
+    first = await anext(first_stream)
+    assert isinstance(first, ApprovalRequiredEvent)
+    assert first.pattern_key.startswith("shell:command:")
+    assert manager.resolve("coding_1", first.approval_id, "session") is True
+    _ = [event async for event in first_stream]
+
+    replay = [
+        event
+        async for event in executor.execute(
+            {"name": "run_shell", "args": {"command": "  printf 'first\\n'  "}}
+        )
+    ]
+    assert [event.type for event in replay] == [
+        "approval_granted",
+        "tool_call",
+        "tool_result",
+    ]
+
+    different_stream = executor.execute(
+        {"name": "run_shell", "args": {"command": "printf 'second\\n'"}}
+    )
+    different = await anext(different_stream)
+    await different_stream.aclose()
+
+    assert isinstance(different, ApprovalRequiredEvent)
+    assert different.pattern_key != first.pattern_key
+
+    quoted_whitespace_stream = executor.execute(
+        {"name": "run_shell", "args": {"command": "printf 'first  \\n'"}}
+    )
+    quoted_whitespace = await anext(quoted_whitespace_stream)
+    await quoted_whitespace_stream.aclose()
+
+    assert isinstance(quoted_whitespace, ApprovalRequiredEvent)
+    assert quoted_whitespace.pattern_key != first.pattern_key
 
 
 async def test_ask_approval_denied_returns_error(tmp_path: Path) -> None:

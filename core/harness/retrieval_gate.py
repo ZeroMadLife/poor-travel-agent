@@ -1,0 +1,234 @@
+"""Deterministic, content-free retrieval routing for one Harness turn."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import time
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any, Literal, cast
+
+from core.coding.run_coordinator import RunEvent
+
+RetrievalDecision = Literal[
+    "skip",
+    "semantic_memory",
+    "episodic_memory",
+    "knowledge",
+    "web",
+    "mixed",
+]
+
+_WEB_PATTERN = re.compile(
+    r"(?:\bweb\b|\bonline\b|联网|网页|官网|官方资料|最新|近期|今天|当前版本|搜索互联网)",
+    re.IGNORECASE,
+)
+_KNOWLEDGE_PATTERN = re.compile(
+    r"(?:知识库|知识图谱|节点|wiki|资料库|文档库|代码仓库|项目资料|README|源码|本地文件)",
+    re.IGNORECASE,
+)
+_SEMANTIC_MEMORY_PATTERN = re.compile(
+    r"(?:我的偏好|我的习惯|我喜欢|我不喜欢|记住的|长期目标|个人约束|之前告诉过你)",
+    re.IGNORECASE,
+)
+_EPISODIC_MEMORY_PATTERN = re.compile(
+    r"(?:上次|之前那次|刚才|本轮|这个会话|之前执行|之前失败|历史会话|我们做过)",
+    re.IGNORECASE,
+)
+
+_SOURCE_BUDGETS = {
+    "semantic_memory": 1_200,
+    "episodic_memory": 1_600,
+    "knowledge": 3_000,
+    "web": 3_000,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalGateReceipt:
+    """Public routing receipt that never contains the user query or retrieved content."""
+
+    decision: RetrievalDecision
+    reason_code: str
+    candidate_sources: tuple[str, ...]
+    selected_sources: tuple[str, ...]
+    available_sources: tuple[str, ...]
+    token_budget_by_source: Mapping[str, int]
+    query_fingerprint: str
+    latency_ms: int
+    degraded: bool = False
+
+    @property
+    def memory_selected(self) -> bool:
+        return any(
+            source in {"semantic_memory", "episodic_memory"} for source in self.selected_sources
+        )
+
+    def to_payload(self, *, run_id: str) -> dict[str, object]:
+        return {
+            "type": "retrieval_gate_decided",
+            "version": 1,
+            "run_id": run_id,
+            "decision": self.decision,
+            "reason_code": self.reason_code,
+            "candidate_sources": list(self.candidate_sources),
+            "selected_sources": list(self.selected_sources),
+            "available_sources": list(self.available_sources),
+            "token_budget_by_source": dict(self.token_budget_by_source),
+            "candidate_count": len(self.candidate_sources),
+            "actual_hit_count": 0,
+            "query_fingerprint": self.query_fingerprint,
+            "latency_ms": self.latency_ms,
+            "degraded": self.degraded,
+        }
+
+    def to_context(self) -> dict[str, object]:
+        return {
+            "decision": self.decision,
+            "reason_code": self.reason_code,
+            "selected_sources": list(self.selected_sources),
+            "token_budget_by_source": dict(self.token_budget_by_source),
+            "query_fingerprint": self.query_fingerprint,
+            "degraded": self.degraded,
+        }
+
+
+def decide_retrieval_gate(
+    user_message: str,
+    *,
+    surface_context: Mapping[str, Any] | None = None,
+    thread_goal: Mapping[str, Any] | None = None,
+    memory_available: bool,
+    knowledge_available: bool,
+    web_available: bool,
+) -> RetrievalGateReceipt:
+    """Route explicit retrieval signals before model/tool selection."""
+    started_at = time.monotonic()
+    normalized = " ".join(user_message.split())[:8_000]
+    fingerprint = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+    available: list[str] = []
+    if memory_available:
+        available.extend(("semantic_memory", "episodic_memory"))
+    if knowledge_available:
+        available.append("knowledge")
+    if web_available:
+        available.append("web")
+
+    candidates: list[str] = []
+    if _SEMANTIC_MEMORY_PATTERN.search(normalized):
+        candidates.append("semantic_memory")
+    if _EPISODIC_MEMORY_PATTERN.search(normalized):
+        candidates.append("episodic_memory")
+    if _KNOWLEDGE_PATTERN.search(normalized) or _has_knowledge_selection(surface_context):
+        candidates.append("knowledge")
+    if _WEB_PATTERN.search(normalized):
+        candidates.append("web")
+    if thread_goal and not candidates and _goal_requests_retrieval(thread_goal):
+        candidates.append("knowledge")
+
+    candidates = list(dict.fromkeys(candidates))
+    selected = [source for source in candidates if source in available]
+    degraded = len(selected) != len(candidates)
+    if not candidates:
+        decision: RetrievalDecision = "skip"
+        reason_code = "no_retrieval_signal"
+    elif not selected:
+        decision = "skip"
+        reason_code = "requested_sources_unavailable"
+    elif len(selected) > 1:
+        decision = "mixed"
+        reason_code = "multiple_explicit_sources"
+    else:
+        decision = cast(RetrievalDecision, selected[0])
+        reason_code = "explicit_source_signal"
+
+    budgets = {source: _SOURCE_BUDGETS[source] for source in selected}
+    return RetrievalGateReceipt(
+        decision=decision,
+        reason_code=reason_code,
+        candidate_sources=tuple(candidates),
+        selected_sources=tuple(selected),
+        available_sources=tuple(available),
+        token_budget_by_source=budgets,
+        query_fingerprint=fingerprint,
+        latency_ms=max(0, round((time.monotonic() - started_at) * 1_000)),
+        degraded=degraded,
+    )
+
+
+def retrieval_source_event(event: RunEvent, *, run_id: str) -> RunEvent | None:
+    """Project actual Knowledge/Web hits from a completed public tool event."""
+    if event.payload.get("type") != "tool_result":
+        return None
+    tool = str(event.payload.get("tool", ""))
+    source = {"knowledge_search": "knowledge", "search_web": "web"}.get(tool)
+    if source is None:
+        return None
+    payload = _tool_result_payload(event.payload.get("content"))
+    citations = payload.get("citations")
+    evidence = payload.get("evidence")
+    actual_hit_count = (
+        len(citations)
+        if isinstance(citations, list)
+        else len(evidence)
+        if isinstance(evidence, list)
+        else 0
+    )
+    return RunEvent(
+        kind="harness",
+        status="error" if event.status == "error" else "completed",
+        payload={
+            "type": "retrieval_source_completed",
+            "version": 1,
+            "run_id": run_id,
+            "source": source,
+            "status": str(
+                payload.get("status") or ("error" if event.status == "error" else "completed")
+            ),
+            "actual_hit_count": actual_hit_count,
+            "used_tokens": _non_negative_int(payload.get("used_tokens")),
+            "token_budget": _non_negative_int(payload.get("token_budget")),
+            "omitted_count": _non_negative_int(payload.get("omitted_count")),
+        },
+        event_id=f"harness:{run_id}:retrieval-source:{source}:{event.event_id or 'result'}",
+    )
+
+
+def _has_knowledge_selection(surface_context: Mapping[str, Any] | None) -> bool:
+    if not isinstance(surface_context, Mapping):
+        return False
+    serialized = json.dumps(surface_context, ensure_ascii=True, sort_keys=True, default=str).lower()
+    return any(
+        marker in serialized for marker in ("graph_node", "knowledge", "wiki", "page_revision")
+    )
+
+
+def _goal_requests_retrieval(thread_goal: Mapping[str, Any]) -> bool:
+    description = " ".join(str(thread_goal.get("description", "")).split())
+    return bool(_KNOWLEDGE_PATTERN.search(description) or _WEB_PATTERN.search(description))
+
+
+def _tool_result_payload(value: object) -> dict[str, Any]:
+    if not isinstance(value, str):
+        return {}
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _non_negative_int(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(0, value)
+
+
+__all__ = [
+    "RetrievalGateReceipt",
+    "decide_retrieval_gate",
+    "retrieval_source_event",
+]

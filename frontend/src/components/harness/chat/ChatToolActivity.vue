@@ -86,6 +86,13 @@ function toolSummary(tool: ToolActivityViewModel) {
   if (tool.tool === 'patch_file') return `修改 ${path || '文件'}`
   if (tool.tool === 'run_shell') return stringArg(tool.args, 'command') || '执行 shell 命令'
   if (tool.tool === 'agent') return stringArg(tool.args, 'task') || '启动子智能体'
+  if (tool.tool === 'task') {
+    const profile = stringArg(tool.args, 'subagent_type')
+    const description = stringArg(tool.args, 'description')
+    return [profile ? `${profile[0].toUpperCase()}${profile.slice(1)}` : '子代理', description]
+      .filter(Boolean)
+      .join(' · ')
+  }
   if (tool.tool === 'knowledge_search') {
     if (!tool.retrieval) return `搜索知识 · ${stringArg(tool.args, 'query') || '知识库'}`
     if (tool.retrieval.status === 'unavailable') return '知识库不可用'

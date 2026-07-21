@@ -67,9 +67,7 @@ class _LegacyProtocolFilter:
 
             lowered = self._buffer.lower()
             candidates = [
-                (index, tag)
-                for tag in _LEGACY_PROTOCOL_TAGS
-                if (index := lowered.find(tag)) >= 0
+                (index, tag) for tag in _LEGACY_PROTOCOL_TAGS if (index := lowered.find(tag)) >= 0
             ]
             if candidates:
                 index, tag = min(candidates, key=lambda item: item[0])
@@ -126,6 +124,7 @@ class HarnessEventAdapter:
         }
         self._pending_model_tool_calls: dict[str, dict[str, Any]] = {}
         self._custom_tool_results: set[str] = set()
+        self._public_subagent_receipts: dict[str, dict[str, Any]] = {}
         self._seen_budget_signatures: set[str] = set()
         self._seen_budget_usage_signatures: set[str] = set()
         self._assistant_protocol_filter = _LegacyProtocolFilter()
@@ -206,9 +205,11 @@ class HarnessEventAdapter:
                 return ()
             is_error = projected.get("status") == "error"
             events: list[RunEvent] = []
+            result_payload = _tool_result_payload(projected, tool_name, content, is_error)
             pending_call = self._take_pending_tool_call(
                 tool_call_id=str(projected.get("tool_call_id", "")),
                 tool_name=tool_name,
+                args=self._public_task_args(result_payload) if tool_name == "task" else {},
                 source_event_id=f"{source_event_id}:late-call",
             )
             if pending_call is not None:
@@ -217,7 +218,7 @@ class HarnessEventAdapter:
                 self._event(
                     "tool",
                     "error" if is_error else "completed",
-                    _tool_result_payload(projected, tool_name, content, is_error),
+                    result_payload,
                     source_event_id=source_event_id,
                 )
             )
@@ -377,6 +378,7 @@ class HarnessEventAdapter:
             )
             if event_type.startswith("subagent"):
                 event_payload.setdefault("agent_run_id", event_payload.get("child_run_id", ""))
+                self._remember_public_subagent_receipt(event_payload)
             if event_type == "tool_call":
                 tool_name = str(event_payload.get("tool", ""))
                 tool_call_id = str(event_payload.get("tool_call_id", ""))
@@ -430,8 +432,7 @@ class HarnessEventAdapter:
                         "blocked"
                         if event_type == "approval_required"
                         else "running"
-                        if event_type
-                        in {"agent_started", "subagent_started", "subagent_progress"}
+                        if event_type in {"agent_started", "subagent_started", "subagent_progress"}
                         else "error"
                         if event_type == "subagent_cancelled"
                         else "error"
@@ -442,6 +443,7 @@ class HarnessEventAdapter:
                     source_event_id=source_event_id,
                 ),
             )
+
         if event_type == "context_usage_updated":
             event_payload = {str(key): _bounded_value(value) for key, value in payload.items()}
             return (
@@ -461,6 +463,40 @@ class HarnessEventAdapter:
                 source_event_id=source_event_id,
             ),
         )
+
+    def _remember_public_subagent_receipt(self, payload: Mapping[str, Any]) -> None:
+        child_run_id = str(payload.get("child_run_id", "")).strip()
+        if not child_run_id:
+            return
+        receipt = self._public_subagent_receipts.setdefault(child_run_id, {})
+        for key in ("subagent_type", "description"):
+            value = str(payload.get(key, "")).strip()
+            if value:
+                receipt[key] = value
+        operation_ref = payload.get("operation_ref")
+        if isinstance(operation_ref, Mapping):
+            kind = str(operation_ref.get("kind", "")).strip()
+            identifier = str(operation_ref.get("id", "")).strip()
+            if kind and identifier:
+                receipt["operation_ref"] = {"kind": kind, "id": identifier}
+
+    def _public_task_args(self, result_payload: Mapping[str, Any]) -> dict[str, Any]:
+        operation_ref = result_payload.get("operation_ref")
+        child_run_id = ""
+        if isinstance(operation_ref, Mapping):
+            child_run_id = str(operation_ref.get("id", "")).strip()
+        subagent = result_payload.get("subagent")
+        if not child_run_id and isinstance(subagent, Mapping):
+            child_run_id = str(subagent.get("child_run_id", "")).strip()
+        receipt = self._public_subagent_receipts.get(child_run_id, {})
+        public_args = {
+            key: _bounded_value(receipt[key])
+            for key in ("subagent_type", "description", "operation_ref")
+            if key in receipt
+        }
+        if child_run_id and "operation_ref" not in public_args:
+            public_args["operation_ref"] = {"kind": "coding_run", "id": child_run_id}
+        return public_args
 
     def _budget_from_state(
         self,
@@ -579,6 +615,7 @@ class HarnessEventAdapter:
         *,
         tool_call_id: str,
         tool_name: str,
+        args: object,
         source_event_id: str,
     ) -> RunEvent | None:
         pending_id = tool_call_id if tool_call_id in self._pending_model_tool_calls else ""
@@ -594,6 +631,13 @@ class HarnessEventAdapter:
         if not pending_id:
             return None
         payload = self._pending_model_tool_calls.pop(pending_id)
+        pending_args = payload.get("args")
+        if (
+            isinstance(args, Mapping)
+            and args
+            and (not isinstance(pending_args, Mapping) or not pending_args)
+        ):
+            payload["args"] = _bounded_value(args)
         if pending_id in self._seen_model_tool_calls:
             return None
         self._seen_model_tool_calls.add(pending_id)
@@ -615,6 +659,7 @@ class HarnessEventAdapter:
         pending = self._take_pending_tool_call(
             tool_call_id=tool_call_id,
             tool_name=tool_name,
+            args=args,
             source_event_id=source_event_id,
         )
         if pending is not None:
@@ -691,9 +736,7 @@ def _tool_result_payload(
             payload.update(
                 {
                     "artifact_ref": artifact_ref,
-                    "original_chars": _public_non_negative_int(
-                        artifact.get("original_chars")
-                    ),
+                    "original_chars": _public_non_negative_int(artifact.get("original_chars")),
                     "truncated": artifact.get("truncated") is True,
                 }
             )
@@ -744,12 +787,8 @@ def _public_capability_payload(payload: Mapping[str, Any]) -> dict[str, Any] | N
         public.update(
             {
                 "surface": _public_string(payload.get("surface"), 32),
-                "capability_count": _public_non_negative_int(
-                    payload.get("capability_count")
-                ),
-                "executable_count": _public_non_negative_int(
-                    payload.get("executable_count")
-                ),
+                "capability_count": _public_non_negative_int(payload.get("capability_count")),
+                "executable_count": _public_non_negative_int(payload.get("executable_count")),
             }
         )
         return public
@@ -781,9 +820,7 @@ def _public_capability_payload(payload: Mapping[str, Any]) -> dict[str, Any] | N
         public.update(
             {
                 "failure_categories": categories,
-                "rejected_count": _public_non_negative_int(
-                    payload.get("rejected_count")
-                ),
+                "rejected_count": _public_non_negative_int(payload.get("rejected_count")),
             }
         )
         return public
@@ -851,11 +888,7 @@ def _public_subagent_progress(payload: Mapping[str, Any]) -> dict[str, Any]:
 def _public_capability_ids(value: object) -> list[str]:
     if not isinstance(value, list | tuple):
         return []
-    return [
-        item
-        for item in (_public_string(candidate, 256) for candidate in value[:20])
-        if item
-    ]
+    return [item for item in (_public_string(candidate, 256) for candidate in value[:20]) if item]
 
 
 def _public_failure_categories(
@@ -963,9 +996,11 @@ def _public_web_search_content(text: str) -> str:
     if status not in _KNOWLEDGE_STATUSES:
         return text[:_PUBLIC_TOOL_CONTENT_LIMIT]
     raw_citations = payload.get("citations")
-    citations = [item for item in raw_citations if isinstance(item, Mapping)][
-        :_PUBLIC_WEB_CITATION_LIMIT
-    ] if isinstance(raw_citations, list) else []
+    citations = (
+        [item for item in raw_citations if isinstance(item, Mapping)][:_PUBLIC_WEB_CITATION_LIMIT]
+        if isinstance(raw_citations, list)
+        else []
+    )
     omitted_count = _public_non_negative_int(payload.get("omitted_count"))
     base = {
         "status": status,
@@ -1234,8 +1269,7 @@ def _graph_interrupt(value: Any) -> tuple[dict[str, Any], str] | None:
         if not isinstance(raw_value, Mapping):
             raw_value = {"value": _bounded_value(raw_value)}
         projected = {
-            str(key): _bounded_value(item_value)
-            for key, item_value in list(raw_value.items())[:64]
+            str(key): _bounded_value(item_value) for key, item_value in list(raw_value.items())[:64]
         }
         projected.setdefault("type", "graph_interrupt")
         return projected, interrupt_id or "anonymous"

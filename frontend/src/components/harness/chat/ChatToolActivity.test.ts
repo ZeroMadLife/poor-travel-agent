@@ -50,4 +50,24 @@ describe('ChatToolActivity knowledge evidence', () => {
     expect(wrapper.text()).toContain('页面 krev_page_1')
     expect(wrapper.text()).toContain('来源 krev_source_1')
   })
+
+  it('shows the public subagent profile and task description', () => {
+    const wrapper = mount(ChatToolActivity, {
+      props: {
+        isThinking: false,
+        tools: [{
+          tool: 'task',
+          args: {
+            subagent_type: 'practice',
+            description: '只读检查 README.md',
+            operation_ref: { kind: 'coding_run', id: 'child-1' },
+          },
+          status: 'done',
+          content: 'Task succeeded.',
+        }],
+      },
+    })
+
+    expect(wrapper.text()).toContain('Practice · 只读检查 README.md')
+  })
 })

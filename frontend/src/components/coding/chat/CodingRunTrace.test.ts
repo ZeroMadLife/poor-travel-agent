@@ -137,6 +137,48 @@ describe('CodingRunTrace', () => {
     expect(wrapper.text()).toContain('无匹配工具')
   })
 
+  it('merges durable task receipt arguments into a generic run audit step', async () => {
+    const taskAudit: CodingRunAuditSummary = {
+      ...audit,
+      tool_count: 1,
+      completed_tool_count: 1,
+      steps: [{
+        tool: 'task',
+        status: 'completed',
+        action_summary: '调用 task',
+        result_summary: '执行完成',
+        duration_ms: 1200,
+        arguments_preview: '{}',
+        result_preview: 'Task succeeded.',
+        arguments_truncated: false,
+        result_truncated: false,
+      }],
+    }
+    const wrapper = mount(CodingRunTrace, {
+      props: {
+        runId: 'run-task',
+        audit: taskAudit,
+        tools: [{
+          id: 'tool-task',
+          tool_call_id: 'call-task',
+          tool: 'task',
+          args: {
+            subagent_type: 'practice',
+            description: '只读检查 README.md',
+            operation_ref: { kind: 'coding_run', id: 'child-1' },
+          },
+          status: 'completed',
+          result: 'Task succeeded.',
+          is_error: false,
+        }],
+      },
+    })
+
+    expect(wrapper.get('summary').text()).toContain('Practice 子代理 · 只读检查 README.md')
+    await wrapper.get('summary').trigger('click')
+    expect(wrapper.get('.trace-step').text()).toContain('Practice 子代理 · 只读检查 README.md')
+  })
+
   it('shows the current action while active and keeps secret-shaped fallback data redacted', async () => {
     const wrapper = mount(CodingRunTrace, {
       props: {

@@ -398,7 +398,15 @@ onBeforeUnmount(() => {
       </aside>
 
       <main class="pane-center" :class="{ 'is-inert': mainInert }" :inert="mainInert || undefined" :aria-hidden="mainInert ? 'true' : undefined">
-        <ChatHarnessLayout class="coding-harness-layout" surface-label="主对话" chat-label="主对话" :show-details="false">
+        <ChatHarnessLayout
+          class="coding-harness-layout"
+          surface-label="主对话"
+          chat-label="主对话"
+          :show-details="false"
+          :default-dock-width="560"
+          :min-dock-width="420"
+          :max-dock-width="720"
+        >
           <template #canvas>
             <section class="harness-workbench-pane">
               <header class="session-titlebar">

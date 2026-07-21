@@ -14,7 +14,6 @@ import {
   FolderOpen,
   FolderUp,
   GitBranch,
-  MessageCircle,
   History,
   LayoutList,
   Network,
@@ -55,6 +54,7 @@ import {
 } from '../api/knowledge'
 import {
   KnowledgeGraphCanvas,
+  KnowledgeNodeResearchPanel,
   KnowledgeInspector,
 } from '../components/knowledge'
 import {
@@ -66,6 +66,7 @@ import {
   buildKnowledgeNodeResearchModel,
   buildKnowledgePageResearchPrompt,
   buildKnowledgeNodeResearchPrompt,
+  type KnowledgeNodeResearchModel,
   type KnowledgeNodeResearchIntent,
 } from '../harness/knowledgeNodeResearch'
 import { stageHarnessChatDraft } from '../harness/chatDraftBridge'
@@ -155,6 +156,15 @@ const selectedPage = computed<KnowledgePage | null>(() => {
 const selectedCommunityId = computed(() => communities.value?.node_metrics.find(
   (item) => item.node_id === selectedNodeId.value,
 )?.community_id ?? null)
+const selectedNodeResearchModel = computed<KnowledgeNodeResearchModel | null>(() => {
+  if (!selectedNode.value) return null
+  return buildKnowledgeNodeResearchModel({
+    node: selectedNode.value,
+    graphRevision: graph.value?.snapshot.graph_revision,
+    neighborhood: neighborhood.value,
+    alignments: alignments.value,
+  })
+})
 const goalNodeIds = computed(() => [...new Set(
   alignments.value.flatMap((item) => item.matched_node_ids),
 )])
@@ -185,10 +195,6 @@ const knowledgeContext = computed(() => knowledgeSurfaceAdapter.buildContext({
 watch(selectedGoalPath, (path) => {
   if (!path) showGoalPath.value = false
 })
-
-function openNodeResearch() {
-  void prepareNodeResearch('understand')
-}
 
 async function prepareNodeResearch(intent: KnowledgeNodeResearchIntent) {
   const node = selectedNode.value
@@ -920,10 +926,20 @@ onBeforeUnmount(() => {
             :compact="false"
             @close="closeInspector"
             @select="selectNode"
-            @research="openNodeResearch"
           />
-          <button class="continue-in-chat" type="button" @click="prepareNodeResearch('understand')">
-            <MessageCircle :size="15" />回到主对话继续
+          <KnowledgeNodeResearchPanel
+            v-if="selectedNode && selectedNodeResearchModel"
+            :model="selectedNodeResearchModel"
+            :loading="nodeLoading"
+            @choose="prepareNodeResearch"
+          />
+          <button
+            v-else-if="selectedPage"
+            class="continue-in-chat"
+            type="button"
+            @click="prepareNodeResearch('understand')"
+          >
+            在主对话中研究此页面
           </button>
         </aside>
       </div>
@@ -998,7 +1014,7 @@ onBeforeUnmount(() => {
 .icon-button,.primary-button,.secondary-button { display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:34px; border-radius:var(--sage-radius); padding:0 11px; font:inherit; font-size:var(--sage-font-sm); }.icon-button { width:34px; padding:0; border:0; color:var(--sage-text-secondary); background:transparent; }.icon-button:hover { color:var(--sage-text); background:var(--sage-surface-muted); }.primary-button { border:1px solid var(--sage-brand-strong); color:#fff; background:var(--sage-brand-strong); font-weight:650; }.secondary-button { border:1px solid var(--sage-border-strong); color:var(--sage-text-secondary); background:var(--sage-surface); }.primary-button:hover,.secondary-button:hover { filter:brightness(.97); }.primary-button:disabled,.secondary-button:disabled,.icon-button:disabled { cursor:not-allowed; opacity:.55; }
 .workspace-alert { position:absolute; z-index:45; top:66px; left:50%; display:flex; align-items:center; gap:8px; max-width:min(620px,calc(100% - 32px)); margin:0; padding:9px 11px; border:1px solid var(--sage-border); border-left:3px solid var(--sage-brand); border-radius:var(--sage-radius); color:var(--sage-text-secondary); background:var(--sage-surface); box-shadow:var(--sage-shadow-sm); font-size:var(--sage-font-sm); transform:translateX(-50%); }.workspace-alert.error { border-left-color:var(--sage-danger); }.workspace-alert button { margin-left:auto; border:0; color:var(--sage-source); background:transparent; }
 .workspace-body { position:relative; display:grid; grid-template-columns:214px minmax(0,1fr); min-width:0; min-height:0; overflow:hidden; }.workspace-body.is-loading { grid-template-columns:214px minmax(0,1fr); }
-.knowledge-canvas-shell { position:relative; display:grid; grid-template-columns:minmax(0,1fr); min-width:0; min-height:0; height:100%; overflow:hidden; }.knowledge-canvas-shell.has-selection { grid-template-columns:minmax(0,1fr) 320px; }.knowledge-detail-rail { z-index:8; display:grid; grid-template-rows:minmax(0,1fr) 66px; min-width:0; min-height:0; overflow:hidden; border-left:1px solid var(--sage-border); background:var(--sage-surface); }.continue-in-chat { grid-row:2; align-self:start; display:flex; align-items:center; justify-content:center; gap:7px; width:calc(100% - 20px); height:46px; min-height:46px; margin:10px; border:0; border-radius:var(--sage-radius); color:white; background:var(--sage-brand-strong); font-size:var(--sage-font-sm); font-weight:650; }
+.knowledge-canvas-shell { position:relative; display:grid; grid-template-columns:minmax(0,1fr); min-width:0; min-height:0; height:100%; overflow:hidden; }.knowledge-canvas-shell.has-selection { grid-template-columns:minmax(0,1fr) 320px; }.knowledge-detail-rail { z-index:8; display:grid; grid-template-rows:minmax(0,1fr) auto; min-width:0; min-height:0; overflow:hidden; border-left:1px solid var(--sage-border); background:var(--sage-surface); }.continue-in-chat { align-self:start; display:flex; align-items:center; justify-content:center; gap:7px; width:calc(100% - 20px); height:46px; min-height:46px; margin:10px; border:0; border-radius:var(--sage-radius); color:white; background:var(--sage-brand-strong); font-size:var(--sage-font-sm); font-weight:650; }
 .knowledge-library { z-index:2; display:flex; flex-direction:column; min-width:0; min-height:0; overflow:hidden; border-right:1px solid var(--sage-border); background:var(--sage-surface); }.knowledge-library>header { display:flex; align-items:center; justify-content:space-between; min-height:58px; padding:0 14px; border-bottom:1px solid var(--sage-border); }.knowledge-library>header div { display:flex; flex-direction:column; }.knowledge-library>header strong { font-size:var(--sage-font-md); }.knowledge-library>header small { color:var(--sage-text-muted); font-size:var(--sage-font-xs); }.library-metrics { display:grid; grid-template-columns:repeat(3,1fr); gap:1px; margin:12px; border:1px solid var(--sage-border); background:var(--sage-border); }.library-metrics button { min-width:0; min-height:62px; padding:8px 3px; border:0; color:var(--sage-text); background:var(--sage-surface); }.library-metrics button:hover { background:var(--sage-surface-muted); }.library-metrics strong,.library-metrics span { display:block; }.library-metrics strong { font-size:17px; }.library-metrics span { color:var(--sage-text-muted); font-size:11px; }.library-search { display:flex; align-items:center; gap:7px; margin:0 12px 12px; min-height:34px; padding:0 9px; border:1px solid var(--sage-border); border-radius:var(--sage-radius); color:var(--sage-text-muted); background:var(--sage-surface-raised); }.library-search:focus-within { border-color:var(--sage-source); }.library-search input { min-width:0; width:100%; border:0; outline:0; color:var(--sage-text); background:transparent; font-size:var(--sage-font-sm); }.goal-summary { margin:0 12px 12px; padding:11px; border-left:3px solid var(--sage-brand); background:var(--sage-brand-bg); }.goal-summary span { display:flex; align-items:center; gap:5px; color:var(--sage-brand-strong); font-size:11px; font-weight:700; }.goal-summary strong,.goal-summary small { display:block; }.goal-summary strong { margin-top:5px; font-size:var(--sage-font-sm); line-height:1.45; }.goal-summary small { margin-top:4px; color:var(--sage-text-muted); font-size:10px; }.library-nav { display:grid; gap:2px; padding:0 8px 10px; border-bottom:1px solid var(--sage-border); }.library-nav button { display:grid; grid-template-columns:20px minmax(0,1fr) auto; align-items:center; min-height:36px; padding:0 8px; border:0; border-radius:var(--sage-radius); color:var(--sage-text-secondary); text-align:left; background:transparent; font-size:var(--sage-font-sm); }.library-nav button:hover,.library-nav button.active { color:var(--sage-text); background:var(--sage-surface-muted); }.library-nav button.active { color:var(--sage-brand-strong); font-weight:650; }.library-nav em { min-width:20px; padding:1px 5px; border-radius:9px; color:var(--sage-review-strong); background:var(--sage-review-bg); text-align:center; font-size:10px; font-style:normal; }.page-tree { min-height:0; flex:1; overflow:auto; padding:8px; }.tree-heading { display:flex; justify-content:space-between; padding:5px 7px 7px; color:var(--sage-text-muted); font-size:11px; }.page-tree button { display:grid; grid-template-columns:17px minmax(0,1fr); align-items:center; gap:6px; width:100%; min-height:43px; padding:5px 7px; border:0; border-radius:var(--sage-radius); color:var(--sage-text-secondary); text-align:left; background:transparent; }.page-tree button:hover { color:var(--sage-text); background:var(--sage-surface-muted); }.page-tree button>span,.page-tree strong,.page-tree small { display:block; min-width:0; }.page-tree strong { overflow:hidden; font-size:var(--sage-font-xs); text-overflow:ellipsis; white-space:nowrap; }.page-tree small { margin-top:1px; color:var(--sage-text-muted); font-size:10px; }.page-tree-more { grid-template-columns:minmax(0,1fr) auto !important; margin-top:5px; color:var(--sage-brand-strong) !important; background:var(--sage-brand-bg) !important; font-size:11px; }.page-tree>p { color:var(--sage-text-muted); font-size:var(--sage-font-xs); text-align:center; }.library-import { display:flex; align-items:center; gap:7px; min-height:40px; margin:8px 12px 12px; padding:0 10px; border:1px solid var(--sage-border); border-radius:var(--sage-radius); color:var(--sage-text-secondary); background:var(--sage-surface); }.library-import:hover { color:var(--sage-brand-strong); border-color:var(--sage-brand); }
 .knowledge-stage { min-width:0; min-height:0; height:100%; overflow:hidden; background:var(--sage-surface); }.stage-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:50px; padding:0 14px; overflow-x:auto; border-bottom:1px solid var(--sage-border); scrollbar-width:none; }.stage-toolbar::-webkit-scrollbar { display:none; }.stage-tabs { display:flex; align-self:stretch; min-width:0; flex:none; }.stage-tabs button { min-height:49px; padding:0 12px; border:0; border-bottom:2px solid transparent; color:var(--sage-text-muted); background:transparent; font-size:var(--sage-font-sm); white-space:nowrap; }.stage-tabs button.active { border-color:var(--sage-brand); color:var(--sage-text); font-weight:650; }.graph-filters,.graph-filters label,.graph-filters summary { display:flex; align-items:center; }.graph-filters { flex:none; gap:6px; }.graph-filters>label,.graph-filters summary { gap:5px; min-height:32px; padding:0 8px; border:1px solid var(--sage-border); border-radius:var(--sage-radius); color:var(--sage-text-secondary); background:var(--sage-surface); font-size:var(--sage-font-xs); }.graph-filters select { border:0; outline:0; color:inherit; background:transparent; }.graph-filters details { position:relative; }.graph-filters summary { cursor:pointer; list-style:none; }.graph-scope-control,.graph-depth-control { display:flex; align-items:center; height:32px; overflow:hidden; border:1px solid var(--sage-border); border-radius:var(--sage-radius); background:var(--sage-surface-muted); }.graph-scope-control button,.graph-depth-control button,.goal-path-toggle { min-height:30px; padding:0 8px; border:0; color:var(--sage-text-muted); background:transparent; font-size:10px; white-space:nowrap; }.graph-scope-control button+button,.graph-depth-control button+button { border-left:1px solid var(--sage-border); }.graph-scope-control button.active,.graph-depth-control button.active { color:var(--sage-brand-strong); background:var(--sage-surface-raised); font-weight:700; }.graph-scope-control button:disabled,.goal-path-toggle:disabled { cursor:not-allowed; opacity:.45; }.graph-depth-control>span { padding:0 7px; color:var(--sage-text-muted); font-size:9px; }.goal-path-toggle { display:inline-flex; align-items:center; gap:5px; height:32px; border:1px solid var(--sage-border); border-radius:var(--sage-radius); }.goal-path-toggle.active { border-color:var(--sage-review-strong); color:var(--sage-review-strong); background:var(--sage-review-bg); }.kind-menu { position:absolute; z-index:15; top:38px; right:0; display:grid; width:150px; padding:8px; border:1px solid var(--sage-border); border-radius:var(--sage-radius); background:var(--sage-surface); box-shadow:var(--sage-shadow-sm); }.kind-menu label { min-height:30px; border:0; padding:0 4px; }.kind-menu input { accent-color:var(--sage-brand); }
 .graph-stage { position:relative; display:grid; grid-template-rows:60px minmax(0,1fr); height:calc(100% - 50px); min-height:0; }.graph-heading { display:flex; align-items:center; justify-content:space-between; gap:14px; padding:0 18px; border-bottom:1px solid var(--sage-border); }.graph-heading h1,.list-stage h1 { margin:0; font-size:18px; letter-spacing:0; }.graph-heading>div>span,.graph-reading-hint { color:var(--sage-text-muted); font-size:var(--sage-font-xs); }.graph-reading-hint { white-space:nowrap; }

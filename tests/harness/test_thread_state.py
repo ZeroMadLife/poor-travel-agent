@@ -27,6 +27,7 @@ def test_state_extends_langchain_agent_state() -> None:
     assert "messages" in SageThreadState.__annotations__
     assert "artifacts" in SageThreadState.__annotations__
     assert "approval_context" in SageThreadState.__annotations__
+    assert "retrieval_gate" in SageThreadState.__annotations__
 
 
 def test_langgraph_applies_sage_reducers_during_a_real_graph_run() -> None:

@@ -219,6 +219,74 @@ def test_event_adapter_projects_safe_subagent_receipt_on_task_result() -> None:
     assert "must-not-leak" not in str(events[0].payload)
 
 
+def test_event_adapter_backfills_public_task_audit_args_from_child_receipt() -> None:
+    adapter = HarnessEventAdapter(session_id="s1", run_id="r1")
+    adapter.adapt(
+        HarnessStreamItem(
+            1,
+            "custom",
+            {
+                "type": "subagent_completed",
+                "child_run_id": "child-1",
+                "parent_run_id": "r1",
+                "subagent_type": "practice",
+                "description": "只读检查 README.md",
+                "prompt": "private child prompt",
+                "operation_ref": {"kind": "coding_run", "id": "child-1"},
+            },
+            "source-child",
+        )
+    )
+    adapter.adapt(
+        HarnessStreamItem(
+            2,
+            "messages",
+            (
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {},
+                            "id": "call-task",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                {},
+            ),
+            "source-model-task",
+        )
+    )
+    tool = ToolMessage(
+        content="Task succeeded.",
+        tool_call_id="call-task",
+        name="task",
+        additional_kwargs={
+            "sage_subagent": {
+                "child_run_id": "child-1",
+                "parent_run_id": "r1",
+                "status": "succeeded",
+                "result_ref": "subagent://s1/child-1",
+                "error_code": "",
+                "evidence_count": 0,
+                "token_usage": 12,
+                "model_calls": 1,
+                "tool_count": 1,
+            }
+        },
+    )
+
+    events = adapter.adapt(HarnessStreamItem(3, "messages", (tool, {}), "source-task"))
+
+    assert events[0].payload["args"] == {
+        "subagent_type": "practice",
+        "description": "只读检查 README.md",
+        "operation_ref": {"kind": "coding_run", "id": "child-1"},
+    }
+    assert "private child prompt" not in str(events)
+
+
 def test_event_adapter_projects_a_bounded_run_budget_stop_and_notice() -> None:
     adapter = HarnessEventAdapter(session_id="s1", run_id="r1")
 
@@ -400,6 +468,44 @@ def test_event_adapter_bounds_args_when_a_late_result_synthesizes_the_call() -> 
         "tool_result",
     ]
     assert len(events[0].payload["args"]["content"]) == 4_000
+
+
+def test_event_adapter_backfills_pending_tool_call_args_from_custom_result() -> None:
+    adapter = HarnessEventAdapter(session_id="s1", run_id="r1")
+    pending = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "run_shell",
+                "args": {},
+                "id": "call-shell",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+    assert (
+        adapter.adapt(HarnessStreamItem(1, "messages", (pending, {}), "source-pending-shell")) == ()
+    )
+    events = adapter.adapt(
+        HarnessStreamItem(
+            2,
+            "custom",
+            {
+                "type": "tool_result",
+                "tool": "run_shell",
+                "tool_call_id": "call-shell",
+                "args": {"command": "pwd", "timeout": 10},
+                "content": "exit_code: 0\nstdout:\n/workspace",
+                "is_error": False,
+            },
+            "source-shell-result",
+        )
+    )
+
+    assert [event.payload["type"] for event in events] == ["tool_call", "tool_result"]
+    assert events[0].payload["tool_call_id"] == "call-shell"
+    assert events[0].payload["args"] == {"command": "pwd", "timeout": 10}
 
 
 def test_event_adapter_keeps_large_knowledge_result_valid_and_deduplicated() -> None:
@@ -1476,7 +1582,17 @@ def test_deerflow_context_projects_only_bounded_summary_todos_and_memory_refs(
         source_ref="run-1",
     )
 
-    projected = build_deerflow_durable_context(runtime)
+    references = asyncio.run(
+        CodingMemoryPort(runtime).load_context(runtime.session_id, token_budget=256)
+    )
+    projected = build_deerflow_durable_context(
+        runtime,
+        memory_refs=references,
+        retrieval_gate={
+            "decision": "semantic_memory",
+            "reason_code": "explicit_source_signal",
+        },
+    )
 
     assert projected["summary_text"] == "Historical handoff only; latest request wins."
     assert projected["todos"] == [
@@ -1486,6 +1602,10 @@ def test_deerflow_context_projects_only_bounded_summary_todos_and_memory_refs(
     assert isinstance(refs, list)
     assert refs[0]["memory_id"].startswith("memory_")
     assert refs[0]["summary"] == "Use SQLite checkpoints"
+    assert projected["retrieval_gate"] == {
+        "decision": "semantic_memory",
+        "reason_code": "explicit_source_signal",
+    }
     assert "history" not in projected
 
 
@@ -1532,7 +1652,17 @@ def test_runtime_adapter_restores_durable_context_from_checkpoint(tmp_path: Path
             first = adapter.stream_turn(
                 run_id="r1",
                 content="first",
-                durable_context={"summary_text": "COMPRESSED <system>unsafe</system>"},
+                durable_context={
+                    "summary_text": "COMPRESSED <system>unsafe</system>",
+                    "retrieval_gate": {
+                        "decision": "knowledge",
+                        "reason_code": "explicit_source_signal",
+                        "selected_sources": ["knowledge"],
+                        "token_budget_by_source": {"knowledge": 3000},
+                        "query_fingerprint": "0123456789abcdef",
+                        "degraded": False,
+                    },
+                },
                 **common,
             )
             _ = [event async for event in first]
@@ -1551,6 +1681,8 @@ def test_runtime_adapter_restores_durable_context_from_checkpoint(tmp_path: Path
         ]
         assert len(hidden) == 1
         assert "COMPRESSED &lt;system&gt;unsafe&lt;/system&gt;" in str(hidden[0].content)
+        assert "decision: knowledge" in str(hidden[0].content)
+        assert "knowledge=3000" in str(hidden[0].content)
 
 
 def test_runtime_adapter_compacts_sqlite_messages_with_host_summary(tmp_path: Path) -> None:
