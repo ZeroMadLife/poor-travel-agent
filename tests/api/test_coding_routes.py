@@ -180,6 +180,38 @@ class DeerflowMultiApprovalFakeModel(FakeMessagesListChatModel):
         return self
 
 
+class DeerflowParallelApprovalFakeModel(FakeMessagesListChatModel):
+    """Tool-capable fake that interrupts two parallel graph tool calls."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "write_file",
+                            "args": {"path": "parallel-first.txt", "content": "one"},
+                            "id": "call-parallel-first",
+                            "type": "tool_call",
+                        },
+                        {
+                            "name": "write_file",
+                            "args": {"path": "parallel-second.txt", "content": "two"},
+                            "id": "call-parallel-second",
+                            "type": "tool_call",
+                        },
+                    ],
+                ),
+                AIMessage(content="并行写入完成"),
+            ]
+        )
+
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):  # type: ignore[no-untyped-def]
+        _ = tools, tool_choice, kwargs
+        return self
+
+
 class DeerflowAgentFakeModel(FakeMessagesListChatModel):
     """Tool-capable fake that awaits one bounded Explore child."""
 
@@ -379,7 +411,9 @@ def test_enabled_deerflow_profile_streams_public_answer_and_replays_history(tmp_
                     break
 
         payloads = [event["payload"] for event in events]
-        catalog = next(payload for payload in payloads if payload.get("type") == "mcp_catalog_updated")
+        catalog = next(
+            payload for payload in payloads if payload.get("type") == "mcp_catalog_updated"
+        )
         assert {server["name"] for server in catalog["servers"]} == {
             "amap",
             "weather",
@@ -430,14 +464,10 @@ def test_enabled_deerflow_profile_streams_read_tool_summary(tmp_path: Path) -> N
     assert tool_results and "README.md" in tool_results[0]["content"]
     assert any(payload.get("type") == "text_delta" for payload in payloads)
     catalog_event = next(
-        payload
-        for payload in payloads
-        if payload.get("type") == "capability_catalog_updated"
+        payload for payload in payloads if payload.get("type") == "capability_catalog_updated"
     )
     invocation_event = next(
-        payload
-        for payload in payloads
-        if payload.get("type") == "capability_invocation_completed"
+        payload for payload in payloads if payload.get("type") == "capability_invocation_completed"
     )
     assert invocation_event["capability_id"] == "local:list_files"
     assert invocation_event["status"] == "success"
@@ -486,17 +516,13 @@ def test_enabled_deerflow_profile_reuses_approval_endpoint_for_write_tool(tmp_pa
                 if event["kind"] == "terminal":
                     break
         run_id = str(approval["run_id"])
-        diff_response = client.get(
-            f"/api/v1/coding/{session_id}/runs/{run_id}/diff"
-        )
+        diff_response = client.get(f"/api/v1/coding/{session_id}/runs/{run_id}/diff")
         runs_response = client.get(f"/api/v1/coding/{session_id}/runs")
 
     assert (tmp_path / "approved.txt").read_text(encoding="utf-8") == "ok"
     assert any(item.get("type") == "approval_granted" for item in payloads)
     assert any(item.get("type") == "final" for item in payloads)
-    diff_events = [
-        item for item in payloads if item.get("type") == "workspace_diff_ready"
-    ]
+    diff_events = [item for item in payloads if item.get("type") == "workspace_diff_ready"]
     assert len(diff_events) == 1
     assert diff_events[0]["changed_files"] == ["approved.txt"]
     assert diff_response.status_code == 200
@@ -538,9 +564,7 @@ def test_deerflow_approval_survives_app_restart_and_resumes_same_run(
 
     assert journal.active_run_id() is None
     assert journal.recoverable_approval(run_id)["approval_id"] == approval["approval_id"]
-    assert not any(
-        item.kind == "terminal" for item in journal.replay(after=0, limit=100).items
-    )
+    assert not any(item.kind == "terminal" for item in journal.replay(after=0, limit=100).items)
 
     restarted = create_app(
         coding_model_factory=model_factory,
@@ -562,9 +586,7 @@ def test_deerflow_approval_survives_app_restart_and_resumes_same_run(
                 events.append(event)
                 if event["kind"] == "terminal":
                     break
-        diff_response = client.get(
-            f"/api/v1/coding/{session_id}/runs/{run_id}/diff"
-        )
+        diff_response = client.get(f"/api/v1/coding/{session_id}/runs/{run_id}/diff")
         runs_response = client.get(f"/api/v1/coding/{session_id}/runs")
 
     assert resumed.status_code == 200
@@ -576,9 +598,7 @@ def test_deerflow_approval_survives_app_restart_and_resumes_same_run(
     assert any(item["payload"].get("type") == "approval_granted" for item in events)
     assert any(item["payload"].get("type") == "final" for item in events)
     diff_events = [
-        item["payload"]
-        for item in events
-        if item["payload"].get("type") == "workspace_diff_ready"
+        item["payload"] for item in events if item["payload"].get("type") == "workspace_diff_ready"
     ]
     assert len(diff_events) == 1
     assert diff_events[0]["changed_files"] == ["approved.txt"]
@@ -625,8 +645,7 @@ def test_enabled_deerflow_profile_resumes_graph_after_approval_denial(
 
     assert not (tmp_path / "approved.txt").exists()
     assert any(
-        item.get("type") == "tool_result"
-        and item.get("content") == "approval denied"
+        item.get("type") == "tool_result" and item.get("content") == "approval denied"
         for item in payloads
     )
     assert any(item.get("type") == "final" for item in payloads)
@@ -667,6 +686,47 @@ def test_enabled_deerflow_profile_handles_multiple_graph_approval_resumes(
     assert len(approvals) == 2
     assert (tmp_path / "first.txt").read_text(encoding="utf-8") == "one"
     assert (tmp_path / "second.txt").read_text(encoding="utf-8") == "two"
+    assert any(item.get("type") == "final" for item in payloads)
+
+
+def test_enabled_deerflow_profile_handles_parallel_graph_approval_resumes(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        coding_model_factory=DeerflowParallelApprovalFakeModel,
+        coding_workspace_root=tmp_path,
+        coding_storage_root=tmp_path / ".coding",
+        coding_deerflow_v2_enabled=True,
+    )
+    with TestClient(app) as client:
+        session_id = client.post(
+            "/api/v1/coding/session",
+            json={"runtime_profile": "deerflow_v2", "approval_policy": "ask"},
+        ).json()["session_id"]
+        approvals: list[tuple[str, str]] = []
+        payloads: list[dict] = []
+        with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
+            websocket.send_json({"content": "并行写两个文件"})
+            while True:
+                event = websocket.receive_json()
+                payload = event["payload"]
+                payloads.append(payload)
+                if payload.get("type") == "approval_required":
+                    receipt = (str(payload["approval_id"]), str(payload["interrupt_id"]))
+                    if receipt not in approvals:
+                        approvals.append(receipt)
+                        response = client.post(
+                            f"/api/v1/coding/{session_id}/approval/respond",
+                            json={"approval_id": receipt[0], "choice": "once"},
+                        )
+                        assert response.status_code == 200
+                if event["kind"] == "terminal":
+                    break
+
+    assert len(approvals) == 2
+    assert len({interrupt_id for _, interrupt_id in approvals}) == 2
+    assert (tmp_path / "parallel-first.txt").read_text(encoding="utf-8") == "one"
+    assert (tmp_path / "parallel-second.txt").read_text(encoding="utf-8") == "two"
     assert any(item.get("type") == "final" for item in payloads)
 
 
@@ -734,13 +794,9 @@ def test_enabled_deerflow_profile_awaits_and_projects_subagent_terminal(tmp_path
                 "child_run_id"
             ]
         )
-        child_response = client.get(
-            f"/api/v1/coding/{session_id}/runs/{child_run_id}"
-        )
+        child_response = client.get(f"/api/v1/coding/{session_id}/runs/{child_run_id}")
 
-    agent_events = [
-        item for item in payloads if str(item.get("type", "")).startswith("subagent_")
-    ]
+    agent_events = [item for item in payloads if str(item.get("type", "")).startswith("subagent_")]
     assert agent_events[0]["type"] == "subagent_started"
     assert agent_events[-1]["type"] == "subagent_completed"
     assert any(item["type"] == "subagent_progress" for item in agent_events)
@@ -833,7 +889,12 @@ def test_coding_session_metadata_can_rename_pin_and_archive(tmp_path: Path) -> N
     )
     assert archived.status_code == 200
     assert client.get("/api/v1/coding/sessions").json()["sessions"] == []
-    assert client.get("/api/v1/coding/sessions?include_archived=true").json()["sessions"][0]["archived"] is True
+    assert (
+        client.get("/api/v1/coding/sessions?include_archived=true").json()["sessions"][0][
+            "archived"
+        ]
+        is True
+    )
 
 
 def test_resume_coding_session_rehydrates_runtime(tmp_path: Path) -> None:
@@ -881,7 +942,8 @@ def test_resume_recovers_an_interrupted_persisted_run_before_rehydrating(tmp_pat
     assert timeline["active_run"] is None
     assert timeline["items"][-1]["status"] == "interrupted"
     assert timeline["items"][-1]["payload"] == {
-        "event": "run_interrupted", "retryable": True,
+        "event": "run_interrupted",
+        "retryable": True,
     }
 
 
@@ -909,9 +971,9 @@ def test_resume_keeps_active_runtime_and_pending_approval_bound_to_it(tmp_path: 
         coding_storage_root=tmp_path / ".coding",
     )
     with TestClient(app) as client:
-        session_id = client.post(
-            "/api/v1/coding/session", json={"approval_policy": "ask"}
-        ).json()["session_id"]
+        session_id = client.post("/api/v1/coding/session", json={"approval_policy": "ask"}).json()[
+            "session_id"
+        ]
         original_runtime = app.state.coding_sessions[session_id]
         original_run_id = "run-active"
         original_runtime.active_run_id = original_run_id
@@ -1160,9 +1222,7 @@ def test_stop_coding_run_rejects_uncoordinated_runtime_state(tmp_path: Path) -> 
     runtime = app.state.coding_sessions[session_id]
     runtime.active_run_id = "run_active"
 
-    response = client.post(
-        f"/api/v1/coding/{session_id}/run/stop", json={"run_id": "run_active"}
-    )
+    response = client.post(f"/api/v1/coding/{session_id}/run/stop", json={"run_id": "run_active"})
 
     assert response.status_code == 200
     assert response.json() == {"ok": False}
@@ -1200,9 +1260,7 @@ def test_stop_coding_run_rejects_stale_run_id(tmp_path: Path) -> None:
     runtime.active_run_id = "run_new"
     assert runtime.stop_requested is False
 
-    response = client.post(
-        f"/api/v1/coding/{session_id}/run/stop", json={"run_id": "run_old"}
-    )
+    response = client.post(f"/api/v1/coding/{session_id}/run/stop", json={"run_id": "run_old"})
 
     assert response.status_code == 200
     assert response.json() == {"ok": False}
@@ -1595,9 +1653,7 @@ def test_list_coding_models_advertises_only_safe_runtime_profiles(tmp_path: Path
 
     development_models = development.get("/api/v1/coding/models").json()
     staging_models = staging.get("/api/v1/coding/models").json()
-    isolated_staging_models = isolated_staging.get(
-        "/api/v1/coding/models"
-    ).json()
+    isolated_staging_models = isolated_staging.get("/api/v1/coding/models").json()
 
     assert development_models["runtime_profiles"] == [
         "legacy",
@@ -1859,14 +1915,12 @@ def test_get_run_diff_returns_artifact(tmp_path: Path) -> None:
             coding_storage_root=tmp_path / ".coding",
         )
     )
-    session_id = client.post(
-        "/api/v1/coding/session", json={"approval_policy": "auto"}
-    ).json()["session_id"]
+    session_id = client.post("/api/v1/coding/session", json={"approval_policy": "auto"}).json()[
+        "session_id"
+    ]
     # accept_edits auto-approves write_file so the turn completes without a
     # manual approval round-trip.
-    client.patch(
-        f"/api/v1/coding/{session_id}/permission-mode", json={"mode": "accept_edits"}
-    )
+    client.patch(f"/api/v1/coding/{session_id}/permission-mode", json={"mode": "accept_edits"})
 
     # Run a turn that writes note.txt via FakeWriteModel.
     with client.websocket_connect(f"/api/v1/coding/{session_id}/stream") as websocket:
@@ -1904,9 +1958,7 @@ def test_get_run_diff_404_for_unknown(tmp_path: Path) -> None:
     )
     session_id = client.post("/api/v1/coding/session", json={}).json()["session_id"]
 
-    response = client.get(
-        f"/api/v1/coding/{session_id}/runs/run_does_not_exist/diff"
-    )
+    response = client.get(f"/api/v1/coding/{session_id}/runs/run_does_not_exist/diff")
 
     assert response.status_code == 404
     assert "diff not found" in response.json()["detail"]

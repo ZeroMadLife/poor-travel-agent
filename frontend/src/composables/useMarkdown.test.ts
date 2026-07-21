@@ -44,6 +44,22 @@ it('repairs compact headings and table rows from streamed assistant output', () 
   expect(output).toContain('不可用')
 })
 
+it('repairs indented, adjacent, and repeated headings without changing inline hashes', () => {
+  const { render } = useMarkdown()
+
+  const output = render(
+    '根据当前能力列表：\n   #可用工具审计\n查询知识库。##文件摘要\n## # 1️⃣ 网页证据\n版本 C# 保持原样。',
+  )
+
+  expect(output).toContain('<h1>可用工具审计</h1>')
+  expect(output).toContain('<h2>文件摘要</h2>')
+  expect(output).toContain('<h2>1️⃣ 网页证据</h2>')
+  expect(output).toContain('版本 C# 保持原样。')
+  expect(output).not.toContain('#可用工具审计')
+  expect(output).not.toContain('##文件摘要')
+  expect(output).not.toContain('# 1️⃣ 网页证据')
+})
+
 it('hides legacy tool protocol from stored assistant messages', () => {
   const { render } = useMarkdown()
 

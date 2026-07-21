@@ -274,49 +274,48 @@ class HarnessEventAdapter:
             {"type": "checkpoint_update", **bounded_state_summary(payload)},
             source_event_id=source_event_id,
         )
-        interrupt = _graph_interrupt(payload)
+        interrupts = _graph_interrupts(payload)
         budget_events = (
             *self._budget_usage_from_state(payload, source_event_id),
             *self._budget_from_state(payload, source_event_id),
         )
-        if interrupt is None:
+        if not interrupts:
             return (*budget_events, checkpoint_event)
-        interrupt_payload, interrupt_id = interrupt
-        interrupt_event_type = str(interrupt_payload.get("type", "graph_interrupt"))
-        if interrupt_event_type == "approval_required":
-            interrupt_payload.setdefault("interrupt_id", interrupt_id)
-            approval_call = self._tool_call_event(
-                tool_call_id=str(interrupt_payload.get("tool_call_id", "")),
-                tool_name=str(interrupt_payload.get("tool", "")),
-                args=interrupt_payload.get("args", {}),
-                source_event_id=f"{source_event_id}:approval-call",
-            )
-            approval_events = (
+        interrupt_events: list[RunEvent] = []
+        for interrupt_payload, interrupt_id in interrupts:
+            interrupt_event_type = str(interrupt_payload.get("type", "graph_interrupt"))
+            if interrupt_event_type == "approval_required":
+                interrupt_payload.setdefault("interrupt_id", interrupt_id)
+                approval_call = self._tool_call_event(
+                    tool_call_id=str(interrupt_payload.get("tool_call_id", "")),
+                    tool_name=str(interrupt_payload.get("tool", "")),
+                    args=interrupt_payload.get("args", {}),
+                    source_event_id=f"{source_event_id}:approval-call:{interrupt_id}",
+                )
+                if approval_call is not None:
+                    interrupt_events.append(approval_call)
+                interrupt_events.append(
+                    self._event(
+                        "approval",
+                        "blocked",
+                        interrupt_payload,
+                        source_event_id=f"{source_event_id}:interrupt:{interrupt_id}",
+                    )
+                )
+                continue
+            interrupt_events.append(
                 self._event(
-                    "approval",
+                    "harness",
                     "blocked",
-                    interrupt_payload,
+                    {
+                        "type": "graph_interrupt",
+                        "interrupt_id": interrupt_id,
+                        "value": interrupt_payload,
+                    },
                     source_event_id=f"{source_event_id}:interrupt:{interrupt_id}",
-                ),
-                checkpoint_event,
+                )
             )
-            if approval_call is None:
-                return (*budget_events, *approval_events)
-            return (*budget_events, approval_call, *approval_events)
-        return (
-            *budget_events,
-            self._event(
-                "harness",
-                "blocked",
-                {
-                    "type": "graph_interrupt",
-                    "interrupt_id": interrupt_id,
-                    "value": interrupt_payload,
-                },
-                source_event_id=f"{source_event_id}:interrupt:{interrupt_id}",
-            ),
-            checkpoint_event,
-        )
+        return (*budget_events, *interrupt_events, checkpoint_event)
 
     def _custom(self, payload: Any, source_event_id: str) -> tuple[RunEvent, ...]:
         if not isinstance(payload, Mapping):
@@ -1250,19 +1249,20 @@ def _tool_result_signature(tool_name: str, content: object) -> str:
     return hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()
 
 
-def _graph_interrupt(value: Any) -> tuple[dict[str, Any], str] | None:
-    """Project one LangGraph interrupt from a checkpoint value.
+def _graph_interrupts(value: Any) -> tuple[tuple[dict[str, Any], str], ...]:
+    """Project all LangGraph interrupts from a checkpoint value.
 
     Interrupt values are provider/tool-owned data.  Only bounded JSON-like
     fields are exposed to the Sage timeline; opaque exception objects and
     checkpoint internals never cross this boundary.
     """
     if not isinstance(value, Mapping):
-        return None
+        return ()
     raw_interrupts = value.get("__interrupt__")
     if raw_interrupts is None:
-        return None
+        return ()
     items = raw_interrupts if isinstance(raw_interrupts, list | tuple) else (raw_interrupts,)
+    projected_interrupts: list[tuple[dict[str, Any], str]] = []
     for item in items:
         raw_value = getattr(item, "value", item)
         interrupt_id = str(getattr(item, "id", "") or "")[:256]
@@ -1272,8 +1272,8 @@ def _graph_interrupt(value: Any) -> tuple[dict[str, Any], str] | None:
             str(key): _bounded_value(item_value) for key, item_value in list(raw_value.items())[:64]
         }
         projected.setdefault("type", "graph_interrupt")
-        return projected, interrupt_id or "anonymous"
-    return None
+        projected_interrupts.append((projected, interrupt_id or "anonymous"))
+    return tuple(projected_interrupts)
 
 
 __all__ = ["HarnessEventAdapter"]

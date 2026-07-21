@@ -1,0 +1,30 @@
+use_default_settings:
+  engines:
+    keep_only:
+      - sogou
+
+engines:
+  - name: sogou
+    engine: sogou
+    shortcut: sogou
+    disabled: false
+
+general:
+  debug: false
+  instance_name: Sage Local Search
+
+search:
+  safe_search: 1
+  autocomplete: ""
+  formats:
+    - html
+    - json
+
+server:
+  secret_key: sage-local-search-not-for-production
+  limiter: false
+  public_instance: false
+  image_proxy: false
+  method: GET
+
+plugins: {}

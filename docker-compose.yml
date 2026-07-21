@@ -34,6 +34,32 @@ services:
       timeout: 3s
       retries: 5
 
+  searxng:
+    image: searxng/searxng:2026.7.15-5cb4cb2bc
+    container_name: sage-searxng
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${SAGE_SEARXNG_PORT:-8088}:8080"
+    environment:
+      SEARXNG_BASE_URL: http://127.0.0.1:${SAGE_SEARXNG_PORT:-8088}/
+      SEARXNG_BIND_ADDRESS: 0.0.0.0
+      SEARXNG_PORT: 8080
+      SEARXNG_SECRET: ${SAGE_SEARXNG_SECRET:-sage-local-search-not-for-production}
+    volumes:
+      - ./infra/dev/searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - searxng_data:/var/cache/searxng
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+
 volumes:
   postgres_data:
   redis_data:
+  searxng_data:

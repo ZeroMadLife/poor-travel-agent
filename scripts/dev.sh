@@ -77,6 +77,39 @@ env_file_has_value() {
   ' "${ENV_FILE}"
 }
 
+env_file_value() {
+  local key="$1"
+  awk -F= -v key="${key}" '
+    /^[[:space:]]*#/ { next }
+    {
+      candidate = $1
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", candidate)
+      if (candidate != key) { next }
+      value = substr($0, index($0, "=") + 1)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      print value
+      exit
+    }
+  ' "${ENV_FILE}"
+}
+
+resolve_dev_setting() {
+  local key="$1"
+  local fallback="$2"
+  local shell_value="${!key:-}"
+  local file_value
+  if [[ -n "${shell_value}" ]]; then
+    printf '%s' "${shell_value}"
+    return
+  fi
+  file_value="$(env_file_value "${key}")"
+  if [[ -n "${file_value}" ]]; then
+    printf '%s' "${file_value}"
+    return
+  fi
+  printf '%s' "${fallback}"
+}
+
 configured_providers=()
 for provider_key in \
   DEEPSEEK_API_KEY \
@@ -102,11 +135,20 @@ fi
 
 if [[ "${SAGE_SKIP_DOCKER:-0}" != "1" ]]; then
   if command -v docker >/dev/null 2>&1; then
-    docker compose up -d
+    docker compose up -d --wait --wait-timeout 90
   else
     echo "Docker not found; skipping docker compose. Set SAGE_SKIP_DOCKER=1 to silence this."
   fi
 fi
+
+# The repository-owned local search service is loopback-only. Explicit shell
+# or .env values still win, so developers can disable or replace either port.
+export SAGE_WEB_SEARCH_ENABLED="$(resolve_dev_setting SAGE_WEB_SEARCH_ENABLED true)"
+export SAGE_WEB_SEARCH_ENDPOINT="$(
+  resolve_dev_setting SAGE_WEB_SEARCH_ENDPOINT \
+    "http://127.0.0.1:${SAGE_SEARXNG_PORT:-8088}"
+)"
+export SAGE_WEB_FETCH_ENABLED="$(resolve_dev_setting SAGE_WEB_FETCH_ENABLED true)"
 
 echo "Starting backend: http://${BACKEND_HOST}:${BACKEND_PORT}"
 "${PYTHON_BIN}" -m uvicorn api.main:app \

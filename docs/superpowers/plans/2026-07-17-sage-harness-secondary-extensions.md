@@ -267,6 +267,14 @@ search_web(query, freshness, domains, top_k)
 
 H2.5A 联调后增加前置收口 `H2.5B0`：不提高 `100000` 本轮硬上限，而是将同一 `run_id` 的累计 token、模型调用和工具调用实时投影到状态画布；`search_web` 另设默认 `2000 tokens` 的单次证据预算，避免长摘要被后续模型循环重复放大。`run_shell` timeout 改为进程组清理并输出可审计错误分类，同时拒绝根目录扫描和无完整网络 timeout 的 shell 兜底。完整契约见 `2026-07-18-sage-h2-5b0-runtime-budget-shell-reliability.md`。
 
+稳定化状态（2026-07-21）：本地开发栈新增仅绑定 `127.0.0.1` 的固定版本
+SearXNG，并默认向开发 Harness 开放 `search_web` 与安全 `fetch_web`；生产环境仍须配置
+独立 HTTPS Provider。SearXNG 的 JSON 输出、引擎启用与回环端口由契约测试锁定，实际
+结果继续经过 HTTPS、token budget、excerpt 和稳定 `wcite_` 过滤。并行 Graph Tool
+审批改为按 LangGraph `interrupt_id` 精确恢复全部 pending interrupt，避免同一轮两个
+Shell/写工具审批后运行终止。该收口只恢复已设计能力的可用性，不代表 H2.8B 的
+Semantic/Episodic Retrieval 或全来源硬路由已经交付。
+
 #### H2.5B：Fetch + Artifact
 
 H2.5B 拆为独立小版本：H2.5B0 已交付本轮累计预算、Web Search 单次证据预算与 Shell 进程组超时清理；H2.5B1 交付只读公开 HTTPS HTML 的 `fetch_web`，逐跳执行 SSRF 校验并将完整正文归档为 run-scoped 私有 Artifact，模型与 timeline 只接收预算内 excerpt 和 opaque 引用。H2.5B2 已将 PDF 解析接入现有 Knowledge Job：显式授权后 MinerU 优先，远程任务以持久化 ticket 异步 submit/poll，worker 等待期间释放 lease，失败或超时后回退本地文本层解析。用户确认后的 Knowledge Source 提案仍保留到 H2.5C。

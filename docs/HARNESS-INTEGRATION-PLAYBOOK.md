@@ -21,7 +21,6 @@
 ```bash
 PATH="/tmp/sage-h2-4a-venv-0717/bin:$PATH" \
 PYTHONPATH="packages/sage_harness:." \
-SAGE_SKIP_DOCKER=1 \
 BACKEND_PORT=8002 \
 FRONTEND_PORT=5182 \
 bash scripts/dev.sh
@@ -39,6 +38,10 @@ curl -fsS -X POST http://127.0.0.1:8002/api/v1/coding/session \
 
 打开 `http://127.0.0.1:5182/#/coding`，确认新会话标记为 Harness 2.0。联调期间同时观察浏览器 Network/Console 和后端终端；不要只根据最终回答判断是否通过。
 
+上述命令会同时启动仅绑定本机 `127.0.0.1:8088` 的 SearXNG，并默认开放
+`search_web` 与 SSRF-safe `fetch_web`。已有独立基础设施时可设置
+`SAGE_SKIP_DOCKER=1`，但必须在 `.env` 中显式提供可用的 `SAGE_WEB_SEARCH_ENDPOINT`。
+
 ## 3. 用户 Prompt 矩阵
 
 以下 Prompt 可以直接粘贴。每条使用新会话，或在记录中注明前置状态。
@@ -55,7 +58,8 @@ curl -fsS -X POST http://127.0.0.1:8002/api/v1/coding/session \
 | F8 子 Agent | `请让只读 Explore 子 Agent 比较 README.md 与 docs/GETTING-STARTED.md 的启动步骤，只返回差异摘要，不要修改文件。` | child started/terminal 可追溯；父运行等待结果；点击子运行可打开完整 child timeline；子 Agent 不获得写权限 |
 | F9 Knowledge RAG | `根据知识库说明 Harness 2.0 的目标，并给出可点击引用；没有证据就明确说没有。` | 只使用 revision-bound citation；引用能回到来源；无证据不编造 |
 | F10 恢复 | `读取 README.md 后给出三点摘要。` 在工具运行或流式输出时刷新页面 | 历史 replay 不重复；活动 run 恢复；同一工具不二次执行 |
-| F11 Web Search | `只搜索 LangGraph checkpoint 的官方文档，比较 thread 恢复与 checkpoint 恢复，给出每条结论的网页引用；不要保存到知识库。` | 先发现并提升 `web:search`；只返回 HTTPS 证据和稳定 `wcite_` 引用；不读取正文、不写 Knowledge |
+| F11 Web Search | `只搜索 LangGraph checkpoint 的官方文档，比较 thread 恢复与 checkpoint 恢复，给出每条结论的网页引用；不要保存到知识库。` | 先发现并提升 `web:search`；只返回 HTTPS 证据和稳定 `wcite_` 引用；不写 Knowledge |
+| F11B Web Fetch | `搜索 LangGraph checkpoint 官方文档，选择一条官方 HTTPS 结果读取正文，再用网页引用回答；不要使用 shell/curl，不要保存到知识库。` | `search_web -> fetch_web`；正文进入 run-scoped Artifact，聊天只显示受限 excerpt 与引用 |
 | F12 断连草稿 | 停止后端后输入 `连接恢复后只回答：消息没有丢失。` 并按回车 | 输入框保留原文；显示“连接正在恢复”；连接成功后由用户再次发送，不能静默丢消息或重复提交 |
 
 MCP 只在已配置低权限测试服务时追加：
