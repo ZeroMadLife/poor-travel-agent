@@ -14,12 +14,16 @@ ARG SAGE_IMAGE_TAG
 LABEL org.opencontainers.image.revision=${SAGE_IMAGE_TAG}
 
 RUN setcap -r /usr/bin/caddy \
-    && test -z "$(getcap /usr/bin/caddy)"
+    && test -z "$(getcap /usr/bin/caddy)" \
+    && chown -R 65532:65532 /data /config
 
+COPY infra/proxy/Caddyfile.public-static /etc/caddy/public-static
+COPY infra/proxy/Caddyfile.public-candidate /etc/caddy/Caddyfile.candidate
 COPY infra/proxy/Caddyfile.public /etc/caddy/Caddyfile
-RUN caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+RUN caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile \
+    && caddy validate --config /etc/caddy/Caddyfile.candidate --adapter caddyfile
 COPY --from=build /src/dist-public /srv
 
 USER 65532:65532
 
-EXPOSE 8081
+EXPOSE 8081 8443

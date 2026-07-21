@@ -3,6 +3,7 @@
 > 日期：2026-07-20
 > 基线：`dev/sage-v7@a60fcc4`
 > 范围：公开静态门面的 CI、受限 ECS 发布、健康检查与回滚
+> 域名 TLS 增量基线：`dev/sage-v7@9f9843e`
 
 ## 1. 问题
 
@@ -33,8 +34,9 @@ dev/sage-v7 新 SHA
   -> 导入 root Docker
   -> 127.0.0.1:18081 候选容器 smoke
   -> 当前 live 停止并改名为 previous
-  -> 新容器绑定 80，执行宿主机健康检查
-  -> 本机从公网 IP 再做外部 smoke
+  -> 新容器绑定 80/443，复用持久化 Caddy ACME volume
+  -> 宿主机通过 /healthz 检查 HTTP 监听
+  -> 本机等待 https://sagecompanion.top/ 证书与页面就绪
   -> 写入 current / previous / deployed_at
 ```
 
@@ -79,10 +81,26 @@ printf '%s\n' '{"action":"rollback","tag":"<previous SHA>"}' \
   | sudo -n /usr/local/sbin/sage-public-releasectl
 ```
 
-## 6. 非目标与后续
+## 6. 域名与 TLS 增量
+
+`sagecompanion.top` 与 `www.sagecompanion.top` 都解析到 ECS 公网 IP。生产 Caddy 在非 root
+用户下监听容器 `8081/8443`，由 root Docker 精确映射 ECS 私网网卡 `172.20.67.88` 的
+`80/443`；HTTP 除 `/healthz` 之外固定跳转到原 Host 的 HTTPS。额外的
+`127.0.0.1:18082` 只供控制器健康检查，避免与 `100.126.143.47:443` 的 Tailscale 私有入口
+争用端口。`/data` 与 `/config` 使用 root Docker named volume，保证
+证书、ACME account 与续期状态在容器替换和 previous 回滚之间保留。
+
+候选 smoke、GitHub `public-release` job 与 private Canary 的 public 服务都显式使用
+`Caddyfile.public-candidate`，只监听 HTTP 8081，不申请证书、不挂生产证书卷。只有受限的
+root-owned `public_releasectl` 能启动生产 Caddy 配置。
+
+域名正式在杭州 ECS 对公网提供服务前必须完成 ICP 备案；备案不由 CI/CD 自动化，也不能用
+HTTPS 证书替代。安全组只开放公开门面所需的 TCP 80/443，不开放私人 Harness、数据库、
+Redis 或 Docker 控制面。
+
+## 7. 非目标与后续
 
 - 不开放私人 Harness、API、PostgreSQL 或 Redis。
 - 不把 root 密钥或服务器环境文件交给 GitHub Actions。
-- 不在本切片实现域名、TLS 或 ICP；原始 IP 的 HTTP 仍会产生 COOP 不可信来源警告。
 - 不在本切片实现 public-only Agent API；公开问答仍是独立静态、确定性体验。
-- 域名可用后，将外部 smoke 地址替换为 HTTPS 域名，并由主机网关负责证书和 80/443。
+- ICP 备案、公安联网备案与域名内容合规审核仍由站点所有者在阿里云控制台完成。

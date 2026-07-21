@@ -40,7 +40,7 @@ DEFAULT_REMOTE_APP = "/opt/sage/app"
 DEFAULT_ENV_FILE = "/etc/sage/env"
 DEFAULT_DOCKER_HOST = "unix:///run/user/1002/docker.sock"
 DEFAULT_HEALTH_URL = "https://sage-agent-canary.tail74531c.ts.net/health"
-DEFAULT_PUBLIC_HEALTH_URL = "http://121.40.185.188/"
+DEFAULT_PUBLIC_HEALTH_URL = "https://sagecompanion.top/"
 DEFAULT_GITHUB_REPO = "ZeroMadLife/sage-agent"
 DEFAULT_HOST_KEY_ALIAS = "121.40.185.188"
 DEFAULT_GIT_BIN = shutil.which("git") or "/usr/bin/git"
@@ -557,6 +557,14 @@ class CanaryController:
             and "<title>ZeroMadLife / Sage</title>" in curl.stdout
         )
 
+    def _wait_public_http_healthy(self, attempts: int = 30) -> bool:
+        for attempt in range(attempts):
+            if self._public_http_healthy():
+                return True
+            if attempt + 1 < attempts:
+                time.sleep(1)
+        return False
+
     def _notify(self, message: str) -> bool:
         if not self.config.notify_project or not self.config.notify_session:
             return False
@@ -728,7 +736,7 @@ class CanaryController:
             if self._command_failed(result):
                 raise CanaryError("Canary 部署失败；旧服务应保持不变，请查看服务器 deployctl 状态")
         public_result = self._remote_public_request("apply", sha)
-        if not self._public_http_healthy():
+        if not self._wait_public_http_healthy():
             previous_public = str(public_result.get("previous") or "")
             if _COMMIT.fullmatch(previous_public):
                 self._remote_public_request("rollback", previous_public)

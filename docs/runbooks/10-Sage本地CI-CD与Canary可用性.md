@@ -1,6 +1,6 @@
 # Sage 本地 CI/CD 与 Canary 可用性
 
-> 适用范围：`dev/sage-v7` 私有 Canary。`main` 仍然只保留可发布版本，不由本流程自动合入或发布。
+> 适用范围：`dev/sage-v7` 私有 Canary 与 `sagecompanion.top` 公开静态门面。`main` 仍然只保留可发布版本，不由本流程自动合入或发布。
 
 ## 1. 运行模型
 
@@ -10,20 +10,22 @@ PR -> GitHub Actions 全量 CI -> 合入 dev/sage-v7
                                   v
 Mac LaunchAgent（每 15 分钟）
   -> 读取 origin/dev/sage-v7 完整 SHA
-  -> 检查 python/backend-quality/frontend-quality 全部成功
+  -> 检查 python/backend-quality/frontend-quality/public-release 全部成功
   -> SSH 到 sage-agent-canary
   -> deployctl preflight -> fetch/checkout SHA -> deployctl apply --execute
   -> 备份、迁移、健康检查、失败回退
+  -> public_releasectl 候选 smoke -> 80/443 切换 -> HTTPS 外部 smoke
 ```
 
 本机控制器是 `scripts/canaryctl.py`，服务器控制器是
 `scripts/deployctl.py`。前者不读取 `/etc/sage/env`，不构建镜像，也不拥有数据库或
-Docker socket；后者只在 `sage-deploy` 的 rootless Docker 环境中执行固定部署流程。
+Docker socket；后者只在 `sage-deploy` 的 rootless Docker 环境中执行固定部署流程。公开门面
+另由 root-owned `scripts/public_releasectl.py` 执行受限的镜像导入、80/443 切换和回滚。
 
 ## 2. 自动化边界
 
 - 只部署完整的 `dev/sage-v7` SHA；不接受 `main`、分支名、短 SHA 或自由 shell 文本。
-- GitHub 必须同时存在并通过 `python`、`backend-quality`、`frontend-quality` 三项检查。
+- GitHub 必须同时存在并通过 `python`、`backend-quality`、`frontend-quality`、`public-release` 四项检查。
 - Canary 代码目录必须干净；部署前先执行服务器 `deployctl preflight`。
 - 服务器 `deployctl apply` 负责不可变镜像、PostgreSQL 备份、幂等 migration、健康检查和
   应用失败回退。数据库 down migration 和数据库恢复仍然是人工高危操作。
@@ -149,4 +151,6 @@ sage-canaryctl uninstall
 - 基础设施、认证、数据库、Docker、备份和公网入口 PR 不属于 Loop Tier A 自动合并范围。
 - 所有小版本必须跑匹配的测试、生产构建和 `git diff --check`，并把 source commit、验证
   证据、关闭风险和遗留问题写入 Obsidian `sage-learning`。
-- Canary 只是私有体验环境；域名、ICP、公网 80/443 和正式发布另走独立发布门禁。
+- 私有 Canary 只通过 Tailnet 暴露；公开静态门面只开放域名 TCP 80/443，并继续保持
+  `connect-src 'none'`，不接入私人 Harness 数据。
+- 杭州 ECS 上的域名网站必须完成 ICP 备案；证书自动签发和 CI/CD 全绿都不能替代备案。
