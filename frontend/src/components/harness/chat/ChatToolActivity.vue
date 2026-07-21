@@ -17,6 +17,7 @@ import {
 import type { ToolActivityViewModel } from '../../../harness/chatTypes'
 
 const RESULT_PREVIEW_LIMIT = 800
+const DEFERRED_TOOL_MARKER = 'is deferred and has not been promoted'
 
 const props = defineProps<{
   tools: ToolActivityViewModel[]
@@ -30,7 +31,10 @@ const copiedPanel = ref('')
 let copyTimer: ReturnType<typeof setTimeout> | undefined
 
 const doneCount = computed(() => props.tools.filter((tool) => tool.status === 'done').length)
-const errorCount = computed(() => props.tools.filter((tool) => tool.status === 'error').length)
+const deferredCount = computed(() => props.tools.filter(isDeferredTool).length)
+const errorCount = computed(() => props.tools.filter((tool) => (
+  tool.status === 'error' && !isDeferredTool(tool)
+)).length)
 const runningCount = computed(() => props.tools.filter((tool) => tool.status === 'running').length)
 
 onBeforeUnmount(() => {
@@ -65,8 +69,18 @@ function toggleCitation(index: number, citationId: string) {
 
 function iconFor(tool: ToolActivityViewModel) {
   if (tool.status === 'running') return Circle
+  if (isDeferredTool(tool)) return Circle
   if (tool.status === 'error') return XCircle
   return CheckCircle2
+}
+
+function isDeferredTool(tool: ToolActivityViewModel) {
+  return tool.status === 'error' && tool.content.includes(DEFERRED_TOOL_MARKER)
+}
+
+function displayStatus(tool: ToolActivityViewModel) {
+  if (isDeferredTool(tool)) return 'deferred'
+  return tool.status
 }
 
 function stringArg(args: Record<string, unknown>, key: string) {
@@ -102,9 +116,10 @@ function toolSummary(tool: ToolActivityViewModel) {
   return tool.tool.replaceAll('_', ' ')
 }
 
-function statusLabel(status: ToolActivityViewModel['status']) {
-  if (status === 'running') return '执行中'
-  if (status === 'error') return '失败'
+function statusLabel(tool: ToolActivityViewModel) {
+  if (isDeferredTool(tool)) return '待提升'
+  if (tool.status === 'running') return '执行中'
+  if (tool.status === 'error') return '失败'
   return '已完成'
 }
 
@@ -154,11 +169,12 @@ async function copyPanel(key: string, content: string) {
       <span>工具执行 · {{ tools.length }} 项</span>
       <span v-if="runningCount" class="activity-status running">{{ runningCount }} 执行中</span>
       <span v-else-if="errorCount" class="activity-status error">{{ errorCount }} 失败</span>
+      <span v-else-if="deferredCount" class="activity-status deferred">{{ deferredCount }} 待提升</span>
       <span v-else class="activity-status done">{{ doneCount }} 已完成</span>
     </div>
 
     <div class="tool-list">
-      <article v-for="(tool, index) in tools" :key="`${tool.tool}:${index}`" class="tool-item" :class="tool.status">
+      <article v-for="(tool, index) in tools" :key="`${tool.tool}:${index}`" class="tool-item" :class="displayStatus(tool)">
         <button class="tool-row" type="button" :aria-expanded="expandedTools.has(index)" @click="toggleTool(index)">
           <span class="timeline-node">
             <span v-if="tool.status === 'running'" class="tool-spinner"></span>
@@ -169,7 +185,7 @@ async function copyPanel(key: string, content: string) {
           <Search v-else-if="tool.tool === 'knowledge_search'" :size="13" />
           <span class="tool-name">{{ tool.tool }}</span>
           <span class="tool-summary">{{ toolSummary(tool) }}</span>
-          <span class="tool-status">{{ statusLabel(tool.status) }}</span>
+          <span class="tool-status">{{ statusLabel(tool) }}</span>
         </button>
 
         <div v-if="expandedTools.has(index)" class="tool-detail">
@@ -219,12 +235,12 @@ async function copyPanel(key: string, content: string) {
 
           <details v-if="tool.retrieval && tool.content" class="raw-result">
             <summary>查看原始检索结果</summary>
-            <section class="code-panel result-panel" :class="{ failed: tool.status === 'error' }">
+            <section class="code-panel result-panel" :class="{ failed: tool.status === 'error' && !isDeferredTool(tool) }">
               <pre class="hljs"><code v-html="panelContent(tool.content, 'result', expandedResults.has(index)).html"></code></pre>
             </section>
           </details>
 
-          <section v-else-if="tool.content" class="code-panel result-panel" :class="{ failed: tool.status === 'error' }">
+          <section v-else-if="tool.content" class="code-panel result-panel" :class="{ failed: tool.status === 'error' && !isDeferredTool(tool) }">
             <header class="code-panel-header">
               <span>结果 · {{ panelContent(tool.content, 'result', expandedResults.has(index)).language.toUpperCase() }}</span>
               <button type="button" title="复制结果" aria-label="复制结果" @click="copyPanel(`result:${index}`, tool.content)">
@@ -245,14 +261,14 @@ async function copyPanel(key: string, content: string) {
 <style scoped>
 .tool-activity { width: 100%; margin: 4px 0 14px; }
 .activity-header { display:flex; align-items:center; gap:6px; min-height:32px; padding-left:2px; color:var(--sage-text-muted); font-size:var(--sage-font-xs); font-weight:650; }
-.activity-status { margin-left:auto; font-size:var(--sage-font-xs); font-weight:600; }.activity-status.running { color:var(--sage-warning); }.activity-status.error { color:var(--sage-danger); }.activity-status.done { color:var(--sage-success); }
+.activity-status { margin-left:auto; font-size:var(--sage-font-xs); font-weight:600; }.activity-status.running,.activity-status.deferred { color:var(--sage-warning); }.activity-status.error { color:var(--sage-danger); }.activity-status.done { color:var(--sage-success); }
 .tool-list { position:relative; display:grid; gap:2px; padding-left:14px; }
 .tool-list::before { position:absolute; top:17px; bottom:17px; left:7px; width:1px; background:var(--sage-border-strong); content:''; }
 .tool-item { position:relative; min-width:0; }
 .tool-row { display:grid; grid-template-columns:18px 14px auto auto minmax(0,1fr) auto; align-items:center; gap:6px; width:100%; min-height:34px; padding:3px 2px 3px 0; border:0; color:var(--sage-text-secondary); background:transparent; text-align:left; }
 .tool-row:hover { color:var(--sage-text); }
 .timeline-node { position:relative; z-index:1; display:grid; place-items:center; width:16px; height:16px; border-radius:50%; color:var(--sage-success); background:var(--sage-surface); }
-.tool-item.running .timeline-node,.tool-item.running .tool-status { color:var(--sage-warning); }.tool-item.error .timeline-node,.tool-item.error .tool-status { color:var(--sage-danger); }
+.tool-item.running .timeline-node,.tool-item.running .tool-status,.tool-item.deferred .timeline-node,.tool-item.deferred .tool-status { color:var(--sage-warning); }.tool-item.error .timeline-node,.tool-item.error .tool-status { color:var(--sage-danger); }
 .tool-spinner { width:10px; height:10px; border:2px solid var(--sage-border); border-top-color:var(--sage-warning); border-radius:50%; animation:spin .65s linear infinite; }
 .tool-name { font-family:var(--sage-font-mono); font-size:var(--sage-font-xs); font-weight:700; }
 .tool-summary { min-width:0; overflow:hidden; color:var(--sage-text-muted); font-size:var(--sage-font-xs); text-overflow:ellipsis; white-space:nowrap; }

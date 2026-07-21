@@ -70,4 +70,28 @@ describe('ChatToolActivity knowledge evidence', () => {
 
     expect(wrapper.text()).toContain('Practice · 只读检查 README.md')
   })
+
+  it('presents an unpromoted deferred tool as a recoverable promotion step', () => {
+    const wrapper = mount(ChatToolActivity, {
+      props: {
+        isThinking: false,
+        tools: [{
+          tool: 'search_web',
+          args: { query: 'LangGraph checkpoint' },
+          status: 'error',
+          content: "Tool 'search_web' is deferred and has not been promoted. Call tool_search first, then retry with the returned schema.",
+        }, {
+          tool: 'search_web',
+          args: { query: 'LangGraph checkpoint' },
+          status: 'done',
+          content: '{"results":[]}',
+        }],
+      },
+    })
+
+    expect(wrapper.text()).toContain('1 待提升')
+    expect(wrapper.text()).not.toContain('失败')
+    expect(wrapper.find('.tool-item.deferred').exists()).toBe(true)
+    expect(wrapper.find('.tool-item.error').exists()).toBe(false)
+  })
 })
