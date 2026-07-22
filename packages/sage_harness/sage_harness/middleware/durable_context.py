@@ -122,7 +122,22 @@ def _normalize_durable_context(value: object) -> dict[str, object]:
     memory_refs = _record_list(
         value.get("memory_refs"),
         limit=_MAX_MEMORY_REFS,
-        allowed_fields=frozenset({"memory_id", "topic", "summary", "revision"}),
+        allowed_fields=frozenset(
+            {
+                "memory_id",
+                "topic",
+                "summary",
+                "revision",
+                "memory_kind",
+                "created_at",
+                "provenance",
+                "source_ref",
+                "run_id",
+                "evidence_refs",
+                "conflict",
+                "conflict_group",
+            }
+        ),
     )
     if memory_refs:
         result["memory_refs"] = memory_refs
@@ -226,9 +241,30 @@ def _render_durable_context(value: Mapping[str, object]) -> str:
         if len(lines) > 1:
             sections.append("\n".join(lines))
 
+    memory_records = value.get("memory_refs")
+    if isinstance(memory_records, list) and memory_records:
+        lines = ["## Memory references"]
+        for item in memory_records:
+            if not isinstance(item, Mapping):
+                continue
+            memory_id = escape(str(item.get("memory_id", "reference")), quote=False)
+            summary = escape(str(item.get("summary", "")), quote=False)
+            kind = escape(str(item.get("memory_kind", "semantic")), quote=False)
+            revision = escape(str(item.get("revision", "")), quote=False)
+            provenance = escape(str(item.get("provenance", "")), quote=False)
+            qualifiers = [part for part in (kind, revision, provenance) if part]
+            conflict_group = str(item.get("conflict_group", "")).strip()
+            conflict = (
+                f" conflict={escape(conflict_group, quote=False)}" if conflict_group else ""
+            )
+            lines.append(
+                f"- [{', '.join(qualifiers)}] {memory_id}{conflict}: {summary}".strip()
+            )
+        if len(lines) > 1:
+            sections.append("\n".join(lines))
+
     for key, heading in (
         ("delegations", "Delegations"),
-        ("memory_refs", "Memory references"),
         ("skill_context", "Loaded skills"),
     ):
         records = value.get(key)

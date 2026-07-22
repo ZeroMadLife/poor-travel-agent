@@ -8,11 +8,21 @@ from datetime import UTC, datetime
 
 import httpx
 from langchain_core.messages import ToolMessage
+from langchain_core.tools import StructuredTool
+from sage_harness import (
+    McpCatalogSnapshot,
+    McpScope,
+    McpToolDescriptor,
+)
 from sage_harness.runtime.events import HarnessStreamItem
 
 from core.coding.runtime import CodingRuntime
 from core.harness.event_adapter import HarnessEventAdapter
-from core.harness.tools_adapter import build_deerflow_coding_tool_bundle
+from core.harness.tools_adapter import (
+    _route_mcp_catalog,
+    _with_mcp_capability_ids,
+    build_deerflow_coding_tool_bundle,
+)
 from core.harness.web_search import SearxngWebSearchAdapter, build_web_search_tool
 
 
@@ -231,3 +241,69 @@ def test_search_web_is_discoverable_but_deferred_from_initial_model_tools(tmp_pa
     }
     selected = bundle.deferred_setup.selection_index.select(("web:search",))
     assert [match.tool_name for match in selected.selected] == ["search_web"]
+
+
+def test_gate_filters_only_network_mcp_tools_when_web_is_not_selected() -> None:
+    async def lookup(query: str) -> str:
+        return query
+
+    network = StructuredTool.from_function(
+        coroutine=lookup,
+        name="docs_lookup",
+        description="Network docs lookup",
+        metadata={
+            "mcp_tool_id": "docs:lookup",
+            "source_capabilities": ("network",),
+        },
+    )
+    local = StructuredTool.from_function(
+        coroutine=lookup,
+        name="local_lookup",
+        description="Local dataset lookup",
+        metadata={
+            "mcp_tool_id": "local:lookup",
+            "source_capabilities": ("local_data",),
+        },
+    )
+
+    gated = _with_mcp_capability_ids(
+        (network, local),
+        allow_network_retrieval=False,
+    )
+    web_selected = _with_mcp_capability_ids(
+        (network, local),
+        allow_network_retrieval=True,
+    )
+
+    assert [tool.name for tool in gated] == ["local_lookup"]
+    assert [tool.name for tool in web_selected] == ["docs_lookup", "local_lookup"]
+
+
+def test_gate_removes_network_mcp_from_discoverable_catalog() -> None:
+    def descriptor(tool_id: str, capability: str) -> McpToolDescriptor:
+        return McpToolDescriptor.from_schema(
+            tool_id=tool_id,
+            server_name=tool_id.split(":", 1)[0],
+            name=tool_id.replace(":", "_"),
+            original_name="lookup",
+            description="Lookup",
+            schema={"type": "object", "properties": {}},
+            metadata={"source_capabilities": (capability,)},
+        )
+
+    network = descriptor("docs:lookup", "network")
+    local = descriptor("local:lookup", "local_data")
+    catalog = McpCatalogSnapshot(
+        revision="mcp-r1",
+        scope=McpScope("owner", "workspace", "thread"),
+        servers=(),
+        tools=(network, local),
+        catalog_hash="catalog-original",
+    )
+
+    routed = _route_mcp_catalog(catalog, allow_network_retrieval=False)
+
+    assert routed is not None
+    assert [tool.tool_id for tool in routed.tools] == ["local:lookup"]
+    assert routed.catalog_hash != catalog.catalog_hash
+    assert _route_mcp_catalog(catalog, allow_network_retrieval=True) is catalog

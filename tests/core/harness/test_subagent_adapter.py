@@ -153,19 +153,21 @@ class FakeEvidenceBundlePort:
         )
 
 
-def test_research_profile_is_server_owned_and_fails_closed_when_ports_are_unavailable() -> None:
-    enabled = build_coding_subagent_config(
+def test_research_profile_is_server_owned_and_uses_only_gate_selected_sources() -> None:
+    mixed = build_coding_subagent_config(
         FakeKnowledgePort(),
         FakeWebSearchPort(),
         None,
     )
-    disabled = build_coding_subagent_config(
+    web_only = build_coding_subagent_config(
         UnavailableKnowledgePort(),
         FakeWebSearchPort(),
         None,
     )
+    knowledge_only = build_coding_subagent_config(FakeKnowledgePort(), None, None)
+    disabled = build_coding_subagent_config(UnavailableKnowledgePort(), None, None)
 
-    research = enabled.resolve("research")
+    research = mixed.resolve("research")
     assert research is not None
     assert research.tool_scope == (
         "list_files",
@@ -176,6 +178,18 @@ def test_research_profile_is_server_owned_and_fails_closed_when_ports_are_unavai
     )
     assert research.token_budget == 24_000
     assert research.max_steps == 16
+    assert web_only.resolve("research").tool_scope == (
+        "list_files",
+        "read_file",
+        "search",
+        "search_web",
+    )
+    assert knowledge_only.resolve("research").tool_scope == (
+        "list_files",
+        "read_file",
+        "search",
+        "knowledge_search",
+    )
     assert disabled.resolve("research") is None
 
 
