@@ -128,6 +128,7 @@ from core.coding.persistence import (
 )
 from core.coding.persistence.session_event_journal import (
     SessionEvent,
+    SessionEventJournal,
     SessionEventJournalError,
     SessionRunLeaseConflictError,
     SessionThreadGoalConflictError,
@@ -154,7 +155,9 @@ from core.harness.mcp_adapter import mcp_catalog_event
 from core.harness.memory_adapter import CodingMemoryPort
 from core.harness.retrieval_gate import (
     decide_retrieval_gate,
+    memory_retrieval_events,
     retrieval_source_event,
+    retrieval_sources_from_events,
 )
 from core.harness.runtime_adapter import SageHarnessRuntimeAdapter
 from core.harness.sandbox_factory import create_coding_sandbox
@@ -522,6 +525,12 @@ async def _deerflow_timeline_events(
             # would replace the decision frozen before the interrupted model/tool step.
             durable_context = {}
             retrieval_gate = None
+            retrieval_sources = retrieval_sources_from_events(
+                SessionEventJournal(
+                    runtime.storage_root,
+                    runtime.session_id,
+                ).events_for_run(run_id)
+            )
         else:
             retrieval_gate = decide_retrieval_gate(
                 content,
@@ -531,31 +540,37 @@ async def _deerflow_timeline_events(
                 knowledge_available=knowledge_port.available,
                 web_available=_port_available(web_search_port),
             )
-            memory_token_budget = sum(
-                budget
+            memory_source_budgets = {
+                source: budget
                 for source, budget in retrieval_gate.token_budget_by_source.items()
                 if source in {"semantic_memory", "episodic_memory"}
-            )
-            memory_refs = (
-                await memory_port.load_context(
+            }
+            memory_result = (
+                await memory_port.query_context(
                     runtime.session_id,
-                    token_budget=memory_token_budget,
+                    content,
+                    token_budget_by_source=memory_source_budgets,
+                    current_run_id=run_id,
                 )
-                if retrieval_gate.memory_selected and memory_token_budget > 0
-                else ()
+                if memory_source_budgets
+                else None
             )
             durable_context = build_deerflow_durable_context(
                 runtime,
                 thread_goal=thread_goal,
-                memory_refs=memory_refs,
+                memory_refs=memory_result.references if memory_result is not None else (),
                 retrieval_gate=retrieval_gate.to_context(),
             )
+            retrieval_sources = frozenset(retrieval_gate.selected_sources)
             yield RunEvent(
                 kind="harness",
                 status="completed",
                 payload=retrieval_gate.to_payload(run_id=run_id),
                 event_id=f"harness:{run_id}:retrieval-gate",
             )
+            if memory_result is not None:
+                for memory_event in memory_retrieval_events(memory_result, run_id=run_id):
+                    yield memory_event
         context_event = (
             None if is_resume else context_status_event(runtime, run_id, durable_context)
         )
@@ -628,20 +643,26 @@ async def _deerflow_timeline_events(
         )
         try:
             evidence_bundle_port = CodingEvidenceBundlePort(runtime)
+            knowledge_routed = retrieval_sources is None or "knowledge" in retrieval_sources
+            web_routed = retrieval_sources is None or "web" in retrieval_sources
+            routed_knowledge_port = knowledge_port if knowledge_routed else None
+            routed_web_search_port = web_search_port if web_routed else None
+            routed_web_fetch_port = web_fetch_port if web_routed else None
             subagent_config = build_coding_subagent_config(
-                knowledge_port,
-                web_search_port,
-                web_fetch_port,
+                routed_knowledge_port,
+                routed_web_search_port,
+                routed_web_fetch_port,
                 evidence_bundle_port=evidence_bundle_port,
                 base_config=SubagentToolConfig(),
             )
             subagent_executor = CodingSubagentExecutor(
                 runtime,
-                knowledge_port=knowledge_port,
-                web_search_port=web_search_port,
-                web_fetch_port=web_fetch_port,
+                knowledge_port=routed_knowledge_port,
+                web_search_port=routed_web_search_port,
+                web_fetch_port=routed_web_fetch_port,
                 evidence_bundle_port=evidence_bundle_port,
                 sandbox=sandbox,
+                allow_shell_network=web_routed,
             )
             artifact_store = ToolResultStore(
                 runtime.storage_root,
@@ -671,6 +692,7 @@ async def _deerflow_timeline_events(
                     knowledge_source_proposal_service,
                 ),
                 graph_approvals=True,
+                retrieval_sources=retrieval_sources,
             )
             if not is_resume:
                 yield RunEvent(

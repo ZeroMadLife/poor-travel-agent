@@ -84,14 +84,26 @@ def build_deerflow_durable_context(
         summary_text = " ".join(reference.summary.split())[:500]
         if not reference.memory_id.strip() or not summary_text:
             continue
-        projected_memory_refs.append(
-            {
-                "memory_id": reference.memory_id[:120],
-                "topic": str(reference.metadata.get("topic", ""))[:120],
-                "summary": summary_text,
-                "revision": reference.revision[:80],
-            }
-        )
+        projected_reference = {
+            "memory_id": reference.memory_id[:120],
+            "topic": str(reference.metadata.get("topic", ""))[:120],
+            "summary": summary_text,
+            "revision": reference.revision[:80],
+        }
+        for field, limit in (
+            ("memory_kind", 40),
+            ("created_at", 80),
+            ("provenance", 80),
+            ("source_ref", 160),
+            ("run_id", 160),
+            ("evidence_refs", 1_024),
+            ("conflict", 10),
+            ("conflict_group", 120),
+        ):
+            value = str(reference.metadata.get(field, "")).strip()
+            if value:
+                projected_reference[field] = value[:limit]
+        projected_memory_refs.append(projected_reference)
     if projected_memory_refs:
         projected["memory_refs"] = projected_memory_refs
     if retrieval_gate:

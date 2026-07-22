@@ -71,7 +71,11 @@ def _manager(transport: FakeTransport) -> McpManager:
         McpConfigSnapshot(
             revision="config-r1",
             servers=(
-                McpServerConfig(name="docs", transport="stdio"),
+                McpServerConfig(
+                    name="docs",
+                    transport="stdio",
+                    capabilities=frozenset({"network"}),
+                ),
                 McpServerConfig(
                     name="remote",
                     transport="streamable_http",
@@ -103,6 +107,7 @@ def test_manager_discovers_once_per_scope_and_builds_secret_free_wrappers() -> N
     assert [tool.name for tool in first.tools] == ["docs_lookup"]
     assert first.tools[0].metadata["remote_content"] is True
     assert first.tools[0].metadata["mcp_tool_id"] == "docs:lookup"
+    assert first.tools[0].metadata["source_capabilities"] == ("network",)
     assert result == "found:sage"
     assert "secret" not in repr(first.catalog)
 

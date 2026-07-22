@@ -12,7 +12,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal, Protocol
 
 from langchain_core.tools import BaseTool, StructuredTool
@@ -371,7 +371,11 @@ class McpManager:
             if tool.name in names:
                 raise ValueError(f"MCP tool name collision: {tool.name}")
             names.add(tool.name)
-            valid.append(tool)
+            metadata = {
+                **dict(tool.metadata),
+                "source_capabilities": tuple(sorted(server.capabilities)),
+            }
+            valid.append(replace(tool, metadata=metadata))
         return tuple(valid)
 
 

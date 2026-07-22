@@ -212,6 +212,17 @@ class MemoryReference:
 
 
 @dataclass(frozen=True, slots=True)
+class MemoryRetrievalResult:
+    """Bounded semantic/episodic references plus content-free source receipts."""
+
+    references: tuple[MemoryReference, ...] = ()
+    token_budget_by_source: Mapping[str, int] = field(default_factory=dict)
+    used_tokens_by_source: Mapping[str, int] = field(default_factory=dict)
+    omitted_count_by_source: Mapping[str, int] = field(default_factory=dict)
+    unavailable_sources: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class MemoryProposalReceipt:
     """Host-owned receipt for a proposal that has not bypassed confirmation."""
 
@@ -371,6 +382,15 @@ class KnowledgeSourceProposalPort(Protocol):
 
 class MemoryPort(Protocol):
     """Read context references and propose durable memory through the host."""
+
+    async def query_context(
+        self,
+        thread_id: str,
+        query: str,
+        *,
+        token_budget_by_source: Mapping[str, int],
+        current_run_id: str = "",
+    ) -> MemoryRetrievalResult: ...
 
     async def load_context(
         self,

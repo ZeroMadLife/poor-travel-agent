@@ -115,6 +115,14 @@ class MemoryRef(TypedDict, total=False):
     topic: str
     summary: str
     revision: str
+    memory_kind: str
+    created_at: str
+    provenance: str
+    source_ref: str
+    run_id: str
+    evidence_refs: str
+    conflict: str
+    conflict_group: str
 
 
 class RetrievalGateState(TypedDict, total=False):

@@ -1,9 +1,13 @@
 """Deterministic H2.8 retrieval routing and public receipts."""
 
+from sage_harness import MemoryReference, MemoryRetrievalResult
+
 from core.coding.run_coordinator import RunEvent
 from core.harness.retrieval_gate import (
     decide_retrieval_gate,
+    memory_retrieval_events,
     retrieval_source_event,
+    retrieval_sources_from_events,
 )
 
 
@@ -67,6 +71,18 @@ def test_frozen_knowledge_selection_routes_to_knowledge() -> None:
     assert receipt.reason_code == "explicit_source_signal"
 
 
+def test_knowledge_retrieval_word_routes_to_knowledge() -> None:
+    receipt = decide_retrieval_gate(
+        "检索 Phoenix checkpoint 的当前修订证据",
+        memory_available=True,
+        knowledge_available=True,
+        web_available=True,
+    )
+
+    assert receipt.decision == "knowledge"
+    assert receipt.selected_sources == ("knowledge",)
+
+
 def test_retrieval_result_projects_actual_hits_without_content() -> None:
     event = RunEvent(
         kind="tool",
@@ -97,3 +113,52 @@ def test_retrieval_result_projects_actual_hits_without_content() -> None:
         "omitted_count": 2,
     }
     assert "secret" not in repr(projected.payload)
+
+
+def test_memory_retrieval_projects_per_source_receipts_without_content() -> None:
+    result = MemoryRetrievalResult(
+        references=(
+            MemoryReference(
+                memory_id="memory-secret",
+                summary="private preference",
+                metadata={"memory_kind": "semantic"},
+            ),
+        ),
+        token_budget_by_source={"semantic_memory": 1200, "episodic_memory": 1600},
+        used_tokens_by_source={"semantic_memory": 12, "episodic_memory": 0},
+        omitted_count_by_source={"semantic_memory": 1, "episodic_memory": 0},
+    )
+
+    events = memory_retrieval_events(result, run_id="run-1")
+
+    assert [event.payload["source"] for event in events] == [
+        "semantic_memory",
+        "episodic_memory",
+    ]
+    assert events[0].payload["status"] == "evidence_found"
+    assert events[0].payload["actual_hit_count"] == 1
+    assert events[1].payload["status"] == "no_evidence"
+    assert "private preference" not in repr(events)
+
+
+def test_retrieval_sources_restore_explicit_skip_and_legacy_absence() -> None:
+    skip = RunEvent(
+        kind="harness",
+        status="completed",
+        payload={
+            "type": "retrieval_gate_decided",
+            "selected_sources": [],
+        },
+    )
+    mixed = RunEvent(
+        kind="harness",
+        status="completed",
+        payload={
+            "type": "retrieval_gate_decided",
+            "selected_sources": ["knowledge", "web", "forged"],
+        },
+    )
+
+    assert retrieval_sources_from_events(()) is None
+    assert retrieval_sources_from_events((skip,)) == frozenset()
+    assert retrieval_sources_from_events((skip, mixed)) == frozenset({"knowledge", "web"})

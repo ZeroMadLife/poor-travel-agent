@@ -39,6 +39,7 @@ from core.coding.multiagent.runtime import (
 from core.coding.persistence.tool_result_store import ToolResultStore
 from core.coding.runtime import CodingRuntime
 from core.coding.tool_executor.executor import ToolExecutor
+from core.coding.tool_executor.policy import ToolPolicyChecker
 from core.coding.tools.base import RegisteredTool, ToolResult
 from core.coding.tools.registry import (
     ToolArgumentValidationError,
@@ -109,7 +110,7 @@ def _settled_token_usage(request: SubagentRequest, token_usage: int, model_calls
 
 
 def build_coding_subagent_config(
-    knowledge_port: KnowledgePort,
+    knowledge_port: KnowledgePort | None,
     web_search_port: WebSearchPort | None,
     web_fetch_port: WebFetchPort | None,
     evidence_bundle_port: EvidenceBundlePort | None = None,
@@ -134,12 +135,16 @@ def build_coding_subagent_config(
             max_steps=20,
         )
     )
-    research_available = (
-        knowledge_port.available and web_search_port is not None and web_search_port.available
-    )
+    knowledge_available = bool(knowledge_port is not None and knowledge_port.available)
+    web_available = bool(web_search_port is not None and web_search_port.available)
+    research_available = knowledge_available or web_available
     if research_available:
-        tools = [*_READ_ONLY_CHILD_TOOL_SCOPE, "knowledge_search", "search_web"]
-        if web_fetch_port is not None and web_fetch_port.available:
+        tools = [*_READ_ONLY_CHILD_TOOL_SCOPE]
+        if knowledge_available:
+            tools.append("knowledge_search")
+        if web_available:
+            tools.append("search_web")
+        if web_available and web_fetch_port is not None and web_fetch_port.available:
             tools.append("fetch_web")
         allowed_types.add("research")
         profiles.append(
@@ -184,6 +189,7 @@ class CodingSubagentExecutor:
         web_fetch_port: WebFetchPort | None = None,
         evidence_bundle_port: EvidenceBundlePort | None = None,
         sandbox: SandboxPort | None = None,
+        allow_shell_network: bool = True,
     ) -> None:
         self.runtime = runtime
         self.knowledge_port = knowledge_port
@@ -191,6 +197,7 @@ class CodingSubagentExecutor:
         self.web_fetch_port = web_fetch_port
         self.evidence_bundle_port = evidence_bundle_port
         self.sandbox = sandbox
+        self.allow_shell_network = allow_shell_network
         self._cancel_events: dict[str, asyncio.Event] = {}
         self._cancel_reasons: dict[str, SubagentCancelReason] = {}
 
@@ -346,7 +353,10 @@ class CodingSubagentExecutor:
                     tools=child_tools,
                     workspace=self.runtime.workspace,
                     permission_checker=self.runtime.permission_checker,
-                    policy_checker=self.runtime.policy_checker,
+                    policy_checker=ToolPolicyChecker(
+                        self.runtime.workspace,
+                        allow_network_retrieval=self.allow_shell_network,
+                    ),
                     approval_manager=self.runtime.approval_manager,
                     session_id=self.runtime.session_id,
                     should_stop=child_should_stop,
@@ -488,9 +498,17 @@ class CodingSubagentExecutor:
         if not set(request.tool_scope).issubset(allowed_scope):
             raise ValueError("subagent requested tools outside its server-owned scope")
         if profile == "research":
-            if self.knowledge_port is None or not self.knowledge_port.available:
+            knowledge_requested = "knowledge_search" in request.tool_scope
+            web_requested = bool({"search_web", "fetch_web"}.intersection(request.tool_scope))
+            if not knowledge_requested and not web_requested:
+                raise ValueError("research subagent requires a selected evidence source")
+            if knowledge_requested and (
+                self.knowledge_port is None or not self.knowledge_port.available
+            ):
                 raise ValueError("research subagent requires Knowledge retrieval")
-            if self.web_search_port is None or not self.web_search_port.available:
+            if web_requested and (
+                self.web_search_port is None or not self.web_search_port.available
+            ):
                 raise ValueError("research subagent requires Web Search")
             if "fetch_web" in request.tool_scope and (
                 self.web_fetch_port is None or not self.web_fetch_port.available

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Annotated, Any, cast
 
 from langchain_core.tools import BaseTool, InjectedToolCallId, StructuredTool
@@ -31,6 +31,7 @@ from core.coding.engine.events import ToolResultEvent, event_to_dict
 from core.coding.runtime import CodingRuntime
 from core.coding.tool_executor.approval import ApprovalChoice
 from core.coding.tool_executor.executor import ToolExecutor
+from core.coding.tool_executor.policy import ToolPolicyChecker
 from core.harness.capability_adapter import (
     build_sage_capability_registry,
     local_tool_capability_id,
@@ -117,6 +118,7 @@ def build_deerflow_coding_tool_bundle(
     knowledge_source_proposal_port: KnowledgeSourceProposalPort | None = None,
     graph_approvals: bool = False,
     enable_deferred_tools: bool = True,
+    retrieval_sources: frozenset[str] | None = None,
 ) -> CodingToolBundle:
     """Build V2 tools while preserving Sage execution and approval boundaries."""
     resident_tools: list[BaseTool] = []
@@ -150,6 +152,9 @@ def build_deerflow_coding_tool_bundle(
             args_schema=definition.schema_model,
             sandbox=sandbox,
             graph_approvals=graph_approvals,
+            allow_network_retrieval=(
+                retrieval_sources is None or "web" in retrieval_sources
+            ),
         )
         target = (
             deferred_tools
@@ -157,7 +162,9 @@ def build_deerflow_coding_tool_bundle(
             else resident_tools
         )
         target.append(tool)
-    if knowledge_port is not None:
+    knowledge_routed = retrieval_sources is None or "knowledge" in retrieval_sources
+    web_routed = retrieval_sources is None or "web" in retrieval_sources
+    if knowledge_port is not None and knowledge_routed:
         search_definition = definitions.get("knowledge_search")
         if search_definition is not None:
 
@@ -273,11 +280,16 @@ def build_deerflow_coding_tool_bundle(
         task_metadata["capability_id"] = "subagent:explore"
         resident_tools.append(task_tool.model_copy(update={"metadata": task_metadata}))
 
-    web_search_available = bool(web_search_port is not None and web_search_port.available)
+    web_search_available = bool(
+        web_routed and web_search_port is not None and web_search_port.available
+    )
     if web_search_available and web_search_port is not None:
         deferred_tools.append(build_web_search_tool(web_search_port))
     web_fetch_available = bool(
-        web_fetch_port is not None and web_fetch_port.available and artifact_store is not None
+        web_routed
+        and web_fetch_port is not None
+        and web_fetch_port.available
+        and artifact_store is not None
     )
     if web_fetch_available and web_fetch_port is not None and artifact_store is not None:
         deferred_tools.append(build_web_fetch_tool(web_fetch_port, artifact_store))
@@ -337,12 +349,22 @@ def build_deerflow_coding_tool_bundle(
             )
         )
 
-    deferred_tools.extend(_with_mcp_capability_ids(extra_deferred_tools))
+    allow_network_retrieval = retrieval_sources is None or "web" in retrieval_sources
+    deferred_tools.extend(
+        _with_mcp_capability_ids(
+            extra_deferred_tools,
+            allow_network_retrieval=allow_network_retrieval,
+        )
+    )
+    routed_mcp_catalog = _route_mcp_catalog(
+        mcp_catalog,
+        allow_network_retrieval=allow_network_retrieval,
+    )
 
     capability_registry = build_sage_capability_registry(
         tools=runtime.tools,
         skills=runtime.skill_registry.list(),
-        mcp_catalog=mcp_catalog,
+        mcp_catalog=routed_mcp_catalog,
         web_search_available=web_search_available,
         web_fetch_available=web_fetch_available,
         web_source_proposal_available=web_source_proposal_available,
@@ -383,11 +405,20 @@ def _capability_bindings(tools: Sequence[BaseTool]) -> Mapping[str, str]:
     return bindings
 
 
-def _with_mcp_capability_ids(tools: Sequence[BaseTool]) -> list[BaseTool]:
+def _with_mcp_capability_ids(
+    tools: Sequence[BaseTool],
+    *,
+    allow_network_retrieval: bool,
+) -> list[BaseTool]:
     """Copy MCP wrappers with Sage stable IDs while preserving neutral source metadata."""
     annotated: list[BaseTool] = []
     for tool in tools:
         metadata = dict(tool.metadata) if isinstance(tool.metadata, Mapping) else {}
+        if not _mcp_metadata_is_routed(
+            metadata,
+            allow_network_retrieval=allow_network_retrieval,
+        ):
+            continue
         tool_id = str(metadata.get("mcp_tool_id", "")).strip()
         if tool_id:
             metadata["capability_id"] = mcp_tool_capability_id(tool_id)
@@ -395,6 +426,45 @@ def _with_mcp_capability_ids(tools: Sequence[BaseTool]) -> list[BaseTool]:
         else:
             annotated.append(tool)
     return annotated
+
+
+def _route_mcp_catalog(
+    catalog: McpCatalogSnapshot | None,
+    *,
+    allow_network_retrieval: bool,
+) -> McpCatalogSnapshot | None:
+    if catalog is None or allow_network_retrieval:
+        return catalog
+    routed_tools = tuple(
+        descriptor
+        for descriptor in catalog.tools
+        if _mcp_metadata_is_routed(
+            descriptor.metadata,
+            allow_network_retrieval=False,
+        )
+    )
+    if routed_tools == catalog.tools:
+        return catalog
+    identity = "\0".join((catalog.catalog_hash, *(tool.tool_id for tool in routed_tools)))
+    return replace(
+        catalog,
+        tools=routed_tools,
+        catalog_hash=hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16],
+    )
+
+
+def _mcp_metadata_is_routed(
+    metadata: Mapping[str, object],
+    *,
+    allow_network_retrieval: bool,
+) -> bool:
+    if allow_network_retrieval:
+        return True
+    source_capabilities = metadata.get("source_capabilities", ())
+    return not (
+        isinstance(source_capabilities, list | tuple | set | frozenset)
+        and "network" in {str(item) for item in source_capabilities}
+    )
 
 
 def _build_runtime_tool(
@@ -405,6 +475,7 @@ def _build_runtime_tool(
     args_schema: Any,
     sandbox: SandboxPort | None,
     graph_approvals: bool,
+    allow_network_retrieval: bool,
 ) -> BaseTool:
     registered = runtime.tools[name]
 
@@ -413,7 +484,10 @@ def _build_runtime_tool(
             tools=runtime.tools,
             workspace=runtime.workspace,
             permission_checker=runtime.permission_checker,
-            policy_checker=runtime.policy_checker,
+            policy_checker=ToolPolicyChecker(
+                runtime.workspace,
+                allow_network_retrieval=allow_network_retrieval,
+            ),
             approval_manager=runtime.approval_manager,
             session_id=runtime.session_id,
             should_stop=lambda: runtime.stop_requested,

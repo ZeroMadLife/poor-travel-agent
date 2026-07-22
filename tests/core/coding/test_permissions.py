@@ -293,3 +293,41 @@ def test_policy_allows_bounded_curl_for_coding_diagnostics(tmp_path: Path) -> No
     )
 
     assert decision.allowed is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "curl --connect-timeout 3 --max-time 10 https://example.com/docs",
+        "python3 -c 'import urllib.request; urllib.request.urlopen(\"https://example.com\")'",
+        "git clone https://example.com/repo.git tmp/repo",
+        "npm install example-package",
+    ],
+)
+def test_retrieval_gate_blocks_shell_network_fallbacks(
+    tmp_path: Path,
+    command: str,
+) -> None:
+    workspace, tools = _tools(tmp_path)
+
+    decision = ToolPolicyChecker(
+        workspace,
+        allow_network_retrieval=False,
+    ).check(tools["run_shell"], {"command": command})
+
+    assert decision.allowed is False
+    assert decision.reason == "retrieval_gate_web_not_selected"
+
+
+def test_retrieval_gate_keeps_local_shell_validation_available(tmp_path: Path) -> None:
+    workspace, tools = _tools(tmp_path)
+
+    decision = ToolPolicyChecker(
+        workspace,
+        allow_network_retrieval=False,
+    ).check(
+        tools["run_shell"],
+        {"command": "npm run build && pytest -q tests/unit"},
+    )
+
+    assert decision.allowed is True

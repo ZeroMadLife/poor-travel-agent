@@ -22,6 +22,7 @@ from core.coding.engine.events import (
     ContextCompactionStartedEvent,
     ContextUsageUpdatedEvent,
 )
+from core.coding.persistence.session_event_journal import SessionEventJournal
 from core.coding.persistence.tool_result_store import ToolResultStore
 from core.coding.run_coordinator import RunEvent
 from core.coding.runtime import CodingRuntime
@@ -211,6 +212,23 @@ class RecordingAdapter:
         )
 
 
+class AvailableWebSearchPort:
+    available = True
+
+    async def search(self, *args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        raise AssertionError("resume routing test must not execute web search")
+
+
+class AvailableKnowledgePort:
+    available = True
+    workspace_id = "knowledge-workspace"
+
+    async def search(self, *args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        raise AssertionError("routing test must not execute Knowledge search")
+
+
 @pytest.mark.asyncio
 async def test_v2_compacts_before_graph_and_injects_new_summary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -307,6 +325,97 @@ async def test_v2_emits_retrieval_gate_and_loads_only_selected_memory(
 
 
 @pytest.mark.asyncio
+async def test_v2_gate_hard_routes_web_tool_visibility(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(coding_api, "SageHarnessRuntimeAdapter", RecordingAdapter)
+
+    skip_root = tmp_path / "skip"
+    skip_root.mkdir()
+    skip_runtime = _runtime(skip_root)
+    RecordingAdapter.runtime = skip_runtime
+    _ = [
+        event
+        async for event in coding_api._deerflow_timeline_events(
+            skip_runtime,
+            content="1 + 1 等于多少？",
+            run_id="run-web-skip",
+            surface_context={"surface": "coding"},
+            thread_goal=None,
+            checkpointer=object(),
+            mcp_catalog=None,
+            web_search_port=AvailableWebSearchPort(),  # type: ignore[arg-type]
+        )
+    ]
+    skip_deferred = RecordingAdapter.init_kwargs["deferred_setup"]
+    assert "search_web" not in skip_deferred.deferred_names
+    skip_subagents = RecordingAdapter.init_kwargs["subagent_tool_config"]
+    assert skip_subagents.resolve("research") is None
+
+    web_root = tmp_path / "web"
+    web_root.mkdir()
+    web_runtime = _runtime(web_root)
+    RecordingAdapter.runtime = web_runtime
+    _ = [
+        event
+        async for event in coding_api._deerflow_timeline_events(
+            web_runtime,
+            content="请联网搜索最新的 LangGraph checkpoint 官方资料。",
+            run_id="run-web-selected",
+            surface_context={"surface": "coding"},
+            thread_goal=None,
+            checkpointer=object(),
+            mcp_catalog=None,
+            web_search_port=AvailableWebSearchPort(),  # type: ignore[arg-type]
+        )
+    ]
+    selected_deferred = RecordingAdapter.init_kwargs["deferred_setup"]
+    assert "search_web" in selected_deferred.deferred_names
+    selected_subagents = RecordingAdapter.init_kwargs["subagent_tool_config"]
+    assert selected_subagents.resolve("research").tool_scope == (
+        "list_files",
+        "read_file",
+        "search",
+        "search_web",
+    )
+
+
+@pytest.mark.asyncio
+async def test_v2_gate_builds_knowledge_only_research_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _runtime(tmp_path)
+    RecordingAdapter.runtime = runtime
+    monkeypatch.setattr(coding_api, "SageHarnessRuntimeAdapter", RecordingAdapter)
+    monkeypatch.setattr(
+        coding_api,
+        "CodingKnowledgePort",
+        lambda runtime: AvailableKnowledgePort(),
+    )
+
+    _ = [
+        event
+        async for event in coding_api._deerflow_timeline_events(
+            runtime,
+            content="请检索知识库里的 checkpoint 设计。",
+            run_id="run-knowledge-selected",
+            surface_context={"surface": "coding"},
+            thread_goal=None,
+            checkpointer=object(),
+            mcp_catalog=None,
+        )
+    ]
+
+    config = RecordingAdapter.init_kwargs["subagent_tool_config"]
+    assert config.resolve("research").tool_scope == (
+        "list_files",
+        "read_file",
+        "search",
+        "knowledge_search",
+    )
+
+
+@pytest.mark.asyncio
 async def test_v2_subagent_approval_continues_without_graph_checkpoint_resume(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -384,6 +493,138 @@ async def test_v2_external_resume_preserves_checkpoint_retrieval_gate(
     assert not any(event.payload.get("type") == "retrieval_gate_decided" for event in events)
     assert RecordingAdapter.durable_contexts == [{}]
     assert RecordingAdapter.stream_kwargs[0]["resume"] is True
+
+
+@pytest.mark.asyncio
+async def test_v2_external_resume_restores_gate_tool_filter_from_timeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _runtime(tmp_path)
+    RecordingAdapter.runtime = runtime
+    monkeypatch.setattr(coding_api, "SageHarnessRuntimeAdapter", RecordingAdapter)
+    SessionEventJournal(runtime.storage_root, runtime.session_id).append(
+        run_id="run-resume-skip",
+        kind="harness",
+        status="completed",
+        payload={
+            "type": "retrieval_gate_decided",
+            "selected_sources": [],
+        },
+        event_id="harness:run-resume-skip:retrieval-gate",
+    )
+
+    _ = [
+        event
+        async for event in coding_api._deerflow_timeline_events(
+            runtime,
+            content="resume original request",
+            run_id="run-resume-skip",
+            surface_context={"surface": "coding"},
+            thread_goal=None,
+            checkpointer=object(),
+            mcp_catalog=None,
+            web_search_port=AvailableWebSearchPort(),  # type: ignore[arg-type]
+            resume_value={"interrupt-1": {"approval_id": "approval-1", "choice": "once"}},
+            resume_attempt=1,
+        )
+    ]
+
+    deferred_setup = RecordingAdapter.init_kwargs["deferred_setup"]
+    assert "search_web" not in deferred_setup.deferred_names
+
+
+@pytest.mark.asyncio
+async def test_v2_external_resume_restores_web_only_research_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _runtime(tmp_path)
+    RecordingAdapter.runtime = runtime
+    monkeypatch.setattr(coding_api, "SageHarnessRuntimeAdapter", RecordingAdapter)
+    SessionEventJournal(runtime.storage_root, runtime.session_id).append(
+        run_id="run-resume-web",
+        kind="harness",
+        status="completed",
+        payload={
+            "type": "retrieval_gate_decided",
+            "version": 1,
+            "selected_sources": ["web"],
+        },
+        event_id="harness:run-resume-web:retrieval-gate",
+    )
+
+    _ = [
+        event
+        async for event in coding_api._deerflow_timeline_events(
+            runtime,
+            content="resume original request",
+            run_id="run-resume-web",
+            surface_context={"surface": "coding"},
+            thread_goal=None,
+            checkpointer=object(),
+            mcp_catalog=None,
+            web_search_port=AvailableWebSearchPort(),  # type: ignore[arg-type]
+            resume_value={"interrupt-1": {"approval_id": "approval-1", "choice": "once"}},
+            resume_attempt=1,
+        )
+    ]
+
+    deferred_setup = RecordingAdapter.init_kwargs["deferred_setup"]
+    config = RecordingAdapter.init_kwargs["subagent_tool_config"]
+    assert "search_web" in deferred_setup.deferred_names
+    assert config.resolve("research").tool_scope == (
+        "list_files",
+        "read_file",
+        "search",
+        "search_web",
+    )
+
+
+@pytest.mark.asyncio
+async def test_v2_external_resume_restores_knowledge_only_research_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _runtime(tmp_path)
+    RecordingAdapter.runtime = runtime
+    monkeypatch.setattr(coding_api, "SageHarnessRuntimeAdapter", RecordingAdapter)
+    monkeypatch.setattr(
+        coding_api,
+        "CodingKnowledgePort",
+        lambda runtime: AvailableKnowledgePort(),
+    )
+    SessionEventJournal(runtime.storage_root, runtime.session_id).append(
+        run_id="run-resume-knowledge",
+        kind="harness",
+        status="completed",
+        payload={
+            "type": "retrieval_gate_decided",
+            "version": 1,
+            "selected_sources": ["knowledge"],
+        },
+        event_id="harness:run-resume-knowledge:retrieval-gate",
+    )
+
+    _ = [
+        event
+        async for event in coding_api._deerflow_timeline_events(
+            runtime,
+            content="resume original request",
+            run_id="run-resume-knowledge",
+            surface_context={"surface": "coding"},
+            thread_goal=None,
+            checkpointer=object(),
+            mcp_catalog=None,
+            resume_value={"interrupt-1": {"approval_id": "approval-1", "choice": "once"}},
+            resume_attempt=1,
+        )
+    ]
+
+    config = RecordingAdapter.init_kwargs["subagent_tool_config"]
+    assert config.resolve("research").tool_scope == (
+        "list_files",
+        "read_file",
+        "search",
+        "knowledge_search",
+    )
 
 
 @pytest.mark.asyncio

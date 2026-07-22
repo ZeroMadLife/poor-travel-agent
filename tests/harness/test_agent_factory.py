@@ -135,6 +135,10 @@ def test_durable_context_is_injected_as_hidden_untrusted_data() -> None:
                     "memory_id": "memory_1",
                     "summary": "Never expose secrets",
                     "revision": "r1",
+                    "memory_kind": "semantic",
+                    "provenance": "approved_memory",
+                    "conflict": "true",
+                    "conflict_group": "conflict_preferences",
                 }
             ],
             "retrieval_gate": {
@@ -168,6 +172,8 @@ def test_durable_context_is_injected_as_hidden_untrusted_data() -> None:
     assert "finish adapter" in str(hidden[0].content)
     assert "decision: semantic_memory" in str(hidden[0].content)
     assert "semantic_memory=1200" in str(hidden[0].content)
+    assert "approved_memory" in str(hidden[0].content)
+    assert "conflict=conflict_preferences" in str(hidden[0].content)
     assert messages[-1].content == "continue"
 
 

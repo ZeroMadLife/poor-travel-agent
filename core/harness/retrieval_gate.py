@@ -6,9 +6,11 @@ import hashlib
 import json
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, cast
+
+from sage_harness import MemoryRetrievalResult
 
 from core.coding.run_coordinator import RunEvent
 
@@ -26,7 +28,7 @@ _WEB_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _KNOWLEDGE_PATTERN = re.compile(
-    r"(?:知识库|知识图谱|节点|wiki|资料库|文档库|代码仓库|项目资料|README|源码|本地文件)",
+    r"(?:知识库|知识图谱|节点|wiki|资料库|文档库|代码仓库|项目资料|README|源码|本地文件|检索)",
     re.IGNORECASE,
 )
 _SEMANTIC_MEMORY_PATTERN = re.compile(
@@ -197,6 +199,81 @@ def retrieval_source_event(event: RunEvent, *, run_id: str) -> RunEvent | None:
     )
 
 
+def memory_retrieval_events(
+    result: MemoryRetrievalResult,
+    *,
+    run_id: str,
+) -> tuple[RunEvent, ...]:
+    """Project content-free semantic/episodic retrieval receipts."""
+    events: list[RunEvent] = []
+    unavailable = set(result.unavailable_sources)
+    for source, token_budget in result.token_budget_by_source.items():
+        expected_kind = {
+            "semantic_memory": "semantic",
+            "episodic_memory": "episodic",
+        }.get(source)
+        if expected_kind is None:
+            continue
+        actual_hit_count = sum(
+            1
+            for reference in result.references
+            if reference.metadata.get("memory_kind") == expected_kind
+        )
+        status = (
+            "unavailable"
+            if source in unavailable
+            else "evidence_found"
+            if actual_hit_count
+            else "no_evidence"
+        )
+        events.append(
+            RunEvent(
+                kind="harness",
+                status="error" if status == "unavailable" else "completed",
+                payload={
+                    "type": "retrieval_source_completed",
+                    "version": 1,
+                    "run_id": run_id,
+                    "source": source,
+                    "status": status,
+                    "actual_hit_count": actual_hit_count,
+                    "used_tokens": _non_negative_int(
+                        result.used_tokens_by_source.get(source)
+                    ),
+                    "token_budget": _non_negative_int(token_budget),
+                    "omitted_count": _non_negative_int(
+                        result.omitted_count_by_source.get(source)
+                    ),
+                },
+                event_id=f"harness:{run_id}:retrieval-source:{source}",
+            )
+        )
+    return tuple(events)
+
+
+def retrieval_sources_from_events(events: Sequence[object]) -> frozenset[str] | None:
+    """Restore the server-owned Gate decision for an interrupted run.
+
+    ``None`` means the run predates Retrieval Gate receipts and keeps the legacy
+    compatibility path. An explicit empty set is a persisted ``skip`` decision.
+    """
+    for event in reversed(events):
+        payload = getattr(event, "payload", None)
+        if not isinstance(payload, Mapping):
+            continue
+        if payload.get("type") != "retrieval_gate_decided":
+            continue
+        raw_sources = payload.get("selected_sources")
+        if not isinstance(raw_sources, list | tuple):
+            return frozenset()
+        return frozenset(
+            str(source)
+            for source in raw_sources
+            if str(source) in _SOURCE_BUDGETS
+        )
+    return None
+
+
 def _has_knowledge_selection(surface_context: Mapping[str, Any] | None) -> bool:
     if not isinstance(surface_context, Mapping):
         return False
@@ -230,5 +307,7 @@ def _non_negative_int(value: object) -> int:
 __all__ = [
     "RetrievalGateReceipt",
     "decide_retrieval_gate",
+    "memory_retrieval_events",
     "retrieval_source_event",
+    "retrieval_sources_from_events",
 ]

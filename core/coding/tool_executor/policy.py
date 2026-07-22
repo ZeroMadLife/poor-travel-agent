@@ -38,8 +38,14 @@ class ToolPolicyDecision:
 class ToolPolicyChecker:
     """Check higher-level usage policies such as prior reads."""
 
-    def __init__(self, workspace: WorkspaceContext) -> None:
+    def __init__(
+        self,
+        workspace: WorkspaceContext,
+        *,
+        allow_network_retrieval: bool = True,
+    ) -> None:
         self.workspace = workspace
+        self.allow_network_retrieval = allow_network_retrieval
 
     def check(self, tool: RegisteredTool, args: dict[str, Any]) -> ToolPolicyDecision:
         """Return whether this tool call follows coding-agent policy."""
@@ -55,6 +61,13 @@ class ToolPolicyChecker:
                 return self._prior_read_required(tool.name, str(args.get("path", "")))
         if tool.name == "run_shell":
             command = str(args.get("command", "")).strip()
+            if not self.allow_network_retrieval and _contains_network_access(command):
+                return ToolPolicyDecision.deny(
+                    "retrieval_gate_web_not_selected",
+                    "error: this turn did not select Web retrieval; use a new turn that "
+                    "explicitly requests Web evidence instead of accessing the network "
+                    "through run_shell",
+                )
             if _contains_root_filesystem_scan(command):
                 return ToolPolicyDecision.deny(
                     "shell_root_scan_forbidden",
@@ -138,4 +151,109 @@ def _network_command_lacks_timeout(command: str) -> bool:
             return True
     if re.search(r"(?:^|[;&|]\s*)wget(?:\s|$)", command, flags=re.IGNORECASE):
         return not bool(re.search(r"--timeout(?:=|\s+)\d", command, flags=re.IGNORECASE))
+    return False
+
+
+_NETWORK_PROGRAMS = frozenset(
+    {
+        "curl",
+        "wget",
+        "ssh",
+        "scp",
+        "sftp",
+        "ftp",
+        "telnet",
+        "nc",
+        "netcat",
+    }
+)
+_PACKAGE_NETWORK_SUBCOMMANDS = frozenset(
+    {
+        "add",
+        "audit",
+        "download",
+        "fetch",
+        "info",
+        "install",
+        "publish",
+        "search",
+        "update",
+        "upgrade",
+        "view",
+    }
+)
+
+
+def _contains_network_access(command: str) -> bool:
+    """Conservatively detect network-capable shell fallbacks for a gated turn.
+
+    Production container sandboxes also run with ``--network none``. This
+    check keeps trusted local-development runs on the same model-visible
+    retrieval route without disabling ordinary tests and local build commands.
+    """
+    lowered = command.casefold()
+    if re.search(
+        r"\b(?:curl|wget|ssh|scp|sftp|ftp|telnet|netcat)\b|(?:^|[\s;&|])nc(?:\s|$)",
+        lowered,
+    ):
+        return True
+    if re.search(
+        r"\b(?:urllib(?:\.request)?|requests|aiohttp|httpx|socket|http\.client)\b",
+        lowered,
+    ):
+        return True
+    if re.search(r"\b(?:fetch\s*\(|https?\.(?:get|request)\s*\(|net\.)", lowered):
+        return True
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError:
+        return True
+
+    command_tokens: list[list[str]] = []
+    current: list[str] = []
+    for token in tokens:
+        if SHELL_OPERATOR_RE.fullmatch(token):
+            if current:
+                command_tokens.append(current)
+                current = []
+            continue
+        current.append(token)
+    if current:
+        command_tokens.append(current)
+
+    for segment in command_tokens:
+        program = segment[0].rsplit("/", 1)[-1].casefold()
+        if program in _NETWORK_PROGRAMS:
+            return True
+        if program in {
+            "pip",
+            "pip3",
+            "npm",
+            "pnpm",
+            "yarn",
+            "brew",
+            "apt",
+            "apt-get",
+        } and any(
+            token.casefold() in _PACKAGE_NETWORK_SUBCOMMANDS
+            for token in segment[1:]
+        ):
+            return True
+        if program == "cargo" and any(
+            token.casefold() in {"add", "fetch", "install", "publish", "search", "update"}
+            for token in segment[1:]
+        ):
+            return True
+        if program == "go" and any(
+            token.casefold() in {"get", "install"} for token in segment[1:]
+        ):
+            return True
+        if program == "git" and any(
+            token.casefold() in {"clone", "fetch", "pull", "push", "ls-remote"}
+            for token in segment[1:]
+        ):
+            return True
     return False
