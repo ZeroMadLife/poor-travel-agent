@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from scripts.public_releasectl import (
+    AGENT_IMAGE_REPOSITORY,
+    CANDIDATE_AGENT_CONTAINER,
     CANDIDATE_CONTAINER,
+    LIVE_AGENT_CONTAINER,
     LIVE_CONTAINER,
+    PREVIOUS_AGENT_CONTAINER,
     PREVIOUS_CONTAINER,
     PUBLIC_BIND_ADDRESS,
     PUBLIC_CONFIG_VOLUME,
@@ -28,13 +33,22 @@ NEXT_SHA = "b" * 40
 
 
 def _config(tmp_path: Path) -> PublicReleaseConfig:
+    env_file = tmp_path / "public-agent.env"
+    env_file.write_text("SAGE_PUBLIC_AGENT_API_KEY=test\n", encoding="utf-8")
+    env_file.chmod(0o600)
     return PublicReleaseConfig(
         source_docker_host="unix:///run/user/1002/docker.sock",
         target_docker_host="unix:///var/run/docker.sock",
         state_file=tmp_path / "state.json",
         lock_file=tmp_path / "release.lock",
         candidate_url="http://127.0.0.1:18081/",
+        candidate_agent_url="http://127.0.0.1:18083/healthz",
+        candidate_api_url="http://127.0.0.1:18081/api/public/v1/ask",
         live_url="http://127.0.0.1:18082/healthz",
+        agent_env_file=env_file,
+        agent_env_owner_uid=os.getuid(),
+        agent_budget_state_file=tmp_path / "agent-budget.json",
+        agent_runtime_uid=os.getuid(),
     )
 
 
@@ -60,7 +74,10 @@ def test_request_is_bounded_json_with_exact_fields() -> None:
 class FakeDocker:
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
-        self.containers: dict[str, str] = {LIVE_CONTAINER: f"sage-public:{SHA}"}
+        self.containers: dict[str, str] = {
+            LIVE_CONTAINER: f"sage-public:{SHA}",
+            LIVE_AGENT_CONTAINER: f"{AGENT_IMAGE_REPOSITORY}:{SHA}",
+        }
         self.images = {SHA, NEXT_SHA}
         self.volumes = {PUBLIC_DATA_VOLUME, PUBLIC_CONFIG_VOLUME}
         self.fail_live = False
@@ -101,6 +118,8 @@ class FakeDocker:
             return CommandResult(0)
         if args[:2] == ["container", "start"]:
             return CommandResult(0)
+        if args[:2] == ["container", "exec"]:
+            return CommandResult(0)
         if args[:2] == ["image", "save"]:
             Path(args[args.index("--output") + 1]).write_bytes(b"image")
             return CommandResult(0)
@@ -108,7 +127,11 @@ class FakeDocker:
             return CommandResult(0)
         if args and args[0] == "run":
             name = args[args.index("--name") + 1]
-            image = next(arg for arg in args if arg.startswith("sage-public:"))
+            image = next(
+                arg
+                for arg in args
+                if arg.startswith(("sage-public:", f"{AGENT_IMAGE_REPOSITORY}:"))
+            )
             if name == LIVE_CONTAINER and self.fail_live:
                 return CommandResult(1, stderr="port failure")
             self.containers[name] = image
@@ -116,10 +139,15 @@ class FakeDocker:
         raise AssertionError((host, args))
 
 
-def test_existing_manual_gateway_is_adopted_without_redeployment(tmp_path: Path) -> None:
+def test_existing_p2_pair_is_adopted_without_redeployment(tmp_path: Path) -> None:
     docker = FakeDocker()
     controller = PublicReleaseController(
-        _config(tmp_path), runner=docker, http_probe=lambda _url: True, clock=lambda: "now"
+        _config(tmp_path),
+        runner=docker,
+        http_probe=lambda _url: True,
+        agent_probe=lambda _url: True,
+        api_probe=lambda _url: True,
+        clock=lambda: "now",
     )
 
     result = controller.apply(SHA)
@@ -128,6 +156,7 @@ def test_existing_manual_gateway_is_adopted_without_redeployment(tmp_path: Path)
     assert json.loads((_config(tmp_path).state_file).read_text(encoding="utf-8")) == {
         "current": SHA,
         "previous": None,
+        "agent_enabled": True,
         "deployed_at": "now",
     }
     assert not any("save" in call for call in docker.calls)
@@ -142,7 +171,12 @@ def test_apply_verifies_candidate_then_atomically_switches_live(tmp_path: Path) 
         return True
 
     controller = PublicReleaseController(
-        _config(tmp_path), runner=docker, http_probe=probe, clock=lambda: "now"
+        _config(tmp_path),
+        runner=docker,
+        http_probe=probe,
+        agent_probe=probe,
+        api_probe=probe,
+        clock=lambda: "now",
     )
     result = controller.apply(NEXT_SHA)
 
@@ -153,23 +187,33 @@ def test_apply_verifies_candidate_then_atomically_switches_live(tmp_path: Path) 
         "deployed_at": "now",
     }
     assert probes == [
+        "http://127.0.0.1:18083/healthz",
+        "http://127.0.0.1:18081/api/public/v1/ask",
         "http://127.0.0.1:18081/",
         "http://127.0.0.1:18082/healthz",
     ]
     assert docker.containers[LIVE_CONTAINER] == f"sage-public:{NEXT_SHA}"
     assert docker.containers[PREVIOUS_CONTAINER] == f"sage-public:{SHA}"
+    assert docker.containers[LIVE_AGENT_CONTAINER] == f"{AGENT_IMAGE_REPOSITORY}:{NEXT_SHA}"
+    assert docker.containers[PREVIOUS_AGENT_CONTAINER] == f"{AGENT_IMAGE_REPOSITORY}:{SHA}"
     assert CANDIDATE_CONTAINER not in docker.containers
+    assert CANDIDATE_AGENT_CONTAINER not in docker.containers
     image_inspects = [call for call in docker.calls if call[3:5] == ["image", "inspect"]]
     assert image_inspects
     assert all(call.count("--format") == 1 for call in image_inspects)
     state = json.loads((_config(tmp_path).state_file).read_text(encoding="utf-8"))
     assert state["current"] == NEXT_SHA
     assert state["previous"] == SHA
+    assert state["agent_enabled"] is True
 
     runs = [call[3:] for call in docker.calls if call[3:4] == ["run"]]
     candidate = next(call for call in runs if CANDIDATE_CONTAINER in call)
     live = next(call for call in runs if LIVE_CONTAINER in call)
+    candidate_agent = next(call for call in runs if CANDIDATE_AGENT_CONTAINER in call)
+    live_agent = next(call for call in runs if LIVE_AGENT_CONTAINER in call)
     assert "127.0.0.1:18081:8081" in candidate
+    assert "/config:rw,noexec,nosuid,mode=1777,size=8m" in candidate
+    assert "/data:rw,noexec,nosuid,mode=1777,size=8m" in candidate
     assert candidate[-6:] == [
         "caddy",
         "run",
@@ -185,20 +229,32 @@ def test_apply_verifies_candidate_then_atomically_switches_live(tmp_path: Path) 
     assert f"type=volume,source={PUBLIC_CONFIG_VOLUME},target=/config" in live
     assert PUBLIC_DATA_VOLUME not in candidate
     assert PUBLIC_CONFIG_VOLUME not in candidate
+    assert "127.0.0.1:18083:8082" in candidate_agent
+    assert "--env-file" in candidate_agent
+    assert "SAGE_PUBLIC_BUDGET_STATE_PATH=/var/lib/sage-public-agent/budget.json" in candidate_agent
+    assert any(value.startswith("type=bind,source=") for value in candidate_agent)
+    assert f"SAGE_PUBLIC_AGENT_UPSTREAM={CANDIDATE_AGENT_CONTAINER}:8082" in candidate
+    assert not any(value.startswith("0.0.0.0:") for value in live_agent)
 
 
 def test_failed_live_switch_restores_previous_container(tmp_path: Path) -> None:
     docker = FakeDocker()
     docker.fail_live = True
     controller = PublicReleaseController(
-        _config(tmp_path), runner=docker, http_probe=lambda _url: True
+        _config(tmp_path),
+        runner=docker,
+        http_probe=lambda _url: True,
+        agent_probe=lambda _url: True,
+        api_probe=lambda _url: True,
     )
 
     with pytest.raises(PublicReleaseError):
         controller.apply(NEXT_SHA)
 
     assert docker.containers[LIVE_CONTAINER] == f"sage-public:{SHA}"
+    assert docker.containers[LIVE_AGENT_CONTAINER] == f"{AGENT_IMAGE_REPOSITORY}:{SHA}"
     assert PREVIOUS_CONTAINER not in docker.containers
+    assert PREVIOUS_AGENT_CONTAINER not in docker.containers
     assert not _config(tmp_path).state_file.exists()
 
 
@@ -206,7 +262,11 @@ def test_apply_creates_missing_local_certificate_volumes(tmp_path: Path) -> None
     docker = FakeDocker()
     docker.volumes.clear()
     controller = PublicReleaseController(
-        _config(tmp_path), runner=docker, http_probe=lambda _url: True
+        _config(tmp_path),
+        runner=docker,
+        http_probe=lambda _url: True,
+        agent_probe=lambda _url: True,
+        api_probe=lambda _url: True,
     )
 
     controller.apply(NEXT_SHA)
@@ -221,13 +281,20 @@ def test_rollback_restores_retained_legacy_previous_without_oci_label(
     docker.containers = {
         LIVE_CONTAINER: f"sage-public:{NEXT_SHA}",
         PREVIOUS_CONTAINER: f"sage-public:{SHA}",
+        LIVE_AGENT_CONTAINER: f"{AGENT_IMAGE_REPOSITORY}:{NEXT_SHA}",
+        PREVIOUS_AGENT_CONTAINER: f"{AGENT_IMAGE_REPOSITORY}:{SHA}",
     }
     _config(tmp_path).state_file.write_text(
         json.dumps({"current": NEXT_SHA, "previous": SHA}), encoding="utf-8"
     )
     docker.images.remove(SHA)
     controller = PublicReleaseController(
-        _config(tmp_path), runner=docker, http_probe=lambda _url: True, clock=lambda: "now"
+        _config(tmp_path),
+        runner=docker,
+        http_probe=lambda _url: True,
+        agent_probe=lambda _url: True,
+        api_probe=lambda _url: True,
+        clock=lambda: "now",
     )
 
     result = controller.rollback(SHA)
@@ -239,6 +306,7 @@ def test_rollback_restores_retained_legacy_previous_without_oci_label(
         "rolled_back_at": "now",
     }
     assert docker.containers[LIVE_CONTAINER] == f"sage-public:{SHA}"
+    assert docker.containers[LIVE_AGENT_CONTAINER] == f"{AGENT_IMAGE_REPOSITORY}:{SHA}"
     assert not any(call[3:5] == ["image", "inspect"] for call in docker.calls)
 
 
@@ -268,3 +336,29 @@ def test_release_rejects_an_existing_network_with_drifted_attributes(tmp_path: P
 
     with pytest.raises(PublicReleaseError, match="网络安全属性"):
         controller.apply(NEXT_SHA)
+
+
+def test_release_requires_a_root_owned_private_public_agent_env(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.agent_env_file.chmod(0o644)
+    controller = PublicReleaseController(
+        config,
+        runner=FakeDocker(),
+        http_probe=lambda _url: True,
+        agent_probe=lambda _url: True,
+        api_probe=lambda _url: True,
+    )
+
+    with pytest.raises(PublicReleaseError, match="0600"):
+        controller.apply(NEXT_SHA)
+
+
+def test_status_keeps_a_legacy_static_release_healthy(tmp_path: Path) -> None:
+    docker = FakeDocker()
+    docker.containers.pop(LIVE_AGENT_CONTAINER)
+    controller = PublicReleaseController(
+        _config(tmp_path), runner=docker, http_probe=lambda _url: True
+    )
+
+    assert controller.status()["status"] == "healthy"
+    assert controller.status()["agent_container"] is None

@@ -10,6 +10,11 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
+from public_agent.budget import DailyTokenBudget, PublicBudgetExceeded
+from public_agent.client_identity import (
+    PublicClientIdentityError,
+    PublicClientIdentityResolver,
+)
 from public_agent.corpus import PublicPackage
 from public_agent.limiter import SlidingWindowRateLimiter
 from public_agent.model import OpenAIPublicAnswerModel, PublicAnswerModel
@@ -24,11 +29,20 @@ def create_public_agent_app(
     package_path: str | Path | None = None,
     model: PublicAnswerModel | None = None,
     limiter: SlidingWindowRateLimiter | None = None,
+    client_identity: PublicClientIdentityResolver | None = None,
+    token_budget: DailyTokenBudget | None = None,
 ) -> FastAPI:
     resolved_package_path = package_path or os.getenv("SAGE_PUBLIC_PACKAGE") or DEFAULT_PACKAGE
     package = PublicPackage.load(resolved_package_path)
     resolved_model = model if model is not None else _model_from_env()
-    service = PublicAgentService(package, resolved_model)
+    resolved_budget = token_budget or DailyTokenBudget(
+        token_limit=_bounded_int("SAGE_PUBLIC_DAILY_TOKEN_LIMIT", 120_000, 1_000, 10_000_000),
+        reservation_tokens=_bounded_int(
+            "SAGE_PUBLIC_REQUEST_TOKEN_RESERVATION", 8_000, 500, 100_000
+        ),
+        state_path=os.getenv("SAGE_PUBLIC_BUDGET_STATE_PATH") or None,
+    )
+    service = PublicAgentService(package, resolved_model, token_budget=resolved_budget)
     rate_limiter = limiter or SlidingWindowRateLimiter(
         requests=int(os.getenv("SAGE_PUBLIC_RATE_LIMIT_REQUESTS", "12")),
         window_seconds=int(os.getenv("SAGE_PUBLIC_RATE_LIMIT_WINDOW_SECONDS", "60")),
@@ -36,6 +50,10 @@ def create_public_agent_app(
     app = FastAPI(title="Sage Public Agent", docs_url=None, redoc_url=None)
     app.state.public_agent_service = service
     app.state.public_agent_limiter = rate_limiter
+    identity_resolver = client_identity or PublicClientIdentityResolver.from_cidrs(
+        os.getenv("SAGE_PUBLIC_TRUSTED_PROXY_CIDRS", ""),
+        header_name=os.getenv("SAGE_PUBLIC_TRUSTED_CLIENT_HEADER", "X-Sage-Public-Client-IP"),
+    )
 
     @app.middleware("http")
     async def public_security_headers(
@@ -62,7 +80,10 @@ def create_public_agent_app(
     async def ask(
         payload: PublicAskRequest, request: Request, response: Response
     ) -> PublicAskResponse | Response:
-        client_key = request.client.host if request.client is not None else "unknown"
+        try:
+            client_key = identity_resolver.resolve(request)
+        except PublicClientIdentityError as exc:
+            raise HTTPException(status_code=400, detail="invalid public proxy identity") from exc
         decision = rate_limiter.check(client_key)
         response.headers["X-RateLimit-Limit"] = str(rate_limiter.requests)
         response.headers["X-RateLimit-Remaining"] = str(decision.remaining)
@@ -90,6 +111,12 @@ def create_public_agent_app(
             )
         try:
             result = await service.answer(payload.question)
+        except PublicBudgetExceeded as exc:
+            raise HTTPException(
+                status_code=429,
+                detail="public Agent usage budget exceeded",
+                headers={"Retry-After": "3600"},
+            ) from exc
         except Exception as exc:
             raise HTTPException(
                 status_code=503, detail="public Agent is temporarily unavailable"
@@ -110,7 +137,27 @@ def _model_from_env() -> PublicAnswerModel | None:
     model = os.getenv("SAGE_PUBLIC_AGENT_MODEL", "").strip()
     if not all((api_key, base_url, model)):
         return None
-    return OpenAIPublicAnswerModel(api_key=api_key, base_url=base_url, model=model)
+    return OpenAIPublicAnswerModel(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        timeout_seconds=_bounded_float("SAGE_PUBLIC_AGENT_TIMEOUT_SECONDS", 15.0, 2.0, 60.0),
+        max_output_tokens=_bounded_int("SAGE_PUBLIC_AGENT_MAX_OUTPUT_TOKENS", 500, 64, 2_000),
+    )
+
+
+def _bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    value = int(os.getenv(name, str(default)))
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+def _bounded_float(name: str, default: float, minimum: float, maximum: float) -> float:
+    value = float(os.getenv(name, str(default)))
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
 
 
 app = create_public_agent_app()

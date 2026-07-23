@@ -1,6 +1,6 @@
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import PublicProfileView from './PublicProfileView.vue'
 
 function mountPublicProfile() {
@@ -26,16 +26,15 @@ it('leads with the public product identity and three truthful engineering proofs
   wrapper.unmount()
 })
 
-it('labels Ask Sage as a bounded static public-corpus experience', async () => {
+it('labels Ask Sage as a bounded public Agent with transparent fallback', async () => {
   const wrapper = mountPublicProfile()
 
   await wrapper.get('.ask-sage').trigger('click')
 
   expect(wrapper.get('.public-agent').attributes('aria-label')).toBe('受限公开资料问答')
   expect(wrapper.text()).toContain('无私人数据')
-  expect(wrapper.text()).toContain('静态公开 corpus')
-  expect(wrapper.text()).toContain('CSP connect-src none')
-  expect(wrapper.text()).not.toContain('/api/')
+  expect(wrapper.text()).toContain('失败时透明回退')
+  expect(wrapper.text()).toContain('same-origin API')
   expect(wrapper.text()).not.toContain('/Users/')
 
   wrapper.unmount()
@@ -51,5 +50,20 @@ it('opens evidence detail without leaving the public surface', async () => {
   expect(wrapper.get('[data-work-evidence="mastery"]').text()).toContain('怎么判断有效')
   expect(wrapper.get('[data-work-evidence="mastery"]').text()).toContain('固定 rubric')
 
+  wrapper.unmount()
+})
+
+it('shows a visible public-corpus fallback when the Agent cannot be reached', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('offline') }))
+  const wrapper = mountPublicProfile()
+
+  await wrapper.get('.ask-sage').trigger('click')
+  await wrapper.get('.agent-prompts button').trigger('click')
+  await wrapper.get('.agent-form').trigger('submit')
+  await flushPromises()
+
+  expect(wrapper.text()).toContain('公开问答连接失败')
+  expect(wrapper.text()).toContain('以下为本页公开资料回退')
+  expect(wrapper.text()).not.toContain('资料包 2026-07-22.1')
   wrapper.unmount()
 })

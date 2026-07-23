@@ -14,5 +14,8 @@ http://:8081 {
 }
 
 sagecompanion.top, www.sagecompanion.top {
-	import /etc/caddy/public-static
+	route {
+		import /etc/caddy/public-agent
+		import /etc/caddy/public-static
+	}
 }

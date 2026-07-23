@@ -27,6 +27,23 @@ function createTestRouter() {
 beforeEach(() => {
   setActivePinia(createPinia())
   localStorage.clear()
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+    status: 'answered',
+    answer: 'Sage 是一个 Personal AI Learning Companion。[E1]',
+    citations: [{
+      citation_id: 'E1',
+      document_id: 'sage',
+      title: 'Sage 项目现场',
+      url: 'https://sagecompanion.top/#work',
+      revision: 'r1',
+      excerpt: '目标、Knowledge、Practice 与 Evidence 的产品闭环',
+    }],
+    receipt: {
+      request_id: 'pub_test',
+      package_revision: '2026-07-22.1',
+      package_digest: 'digest',
+    },
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } })))
 })
 
 it('renders growth from real summary counts without inventing a mastery percentage', async () => {
@@ -80,9 +97,11 @@ it('opens the public Sage preview with source-scoped answers', async () => {
   expect(wrapper.text()).toContain('只回答这页已经公开的项目、方法和成长记录')
   await wrapper.get('.agent-prompts button').trigger('click')
   await wrapper.get('.agent-form').trigger('submit')
+  await flushPromises()
   expect(wrapper.text()).toContain('Sage 是一个 Personal AI Learning Companion')
   expect(wrapper.text()).toContain('回答依据')
-  expect(wrapper.get('.agent-source').attributes('data-target')).toBe('work')
+  expect(wrapper.get('.agent-source').attributes('data-target')).toBe('sage')
+  expect(wrapper.text()).toContain('资料包 2026-07-22.1')
   expect(wrapper.text()).not.toContain('/Users/')
   wrapper.unmount()
 })

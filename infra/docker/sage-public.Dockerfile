@@ -18,6 +18,7 @@ RUN setcap -r /usr/bin/caddy \
     && chown -R 65532:65532 /data /config
 
 COPY infra/proxy/Caddyfile.public-static /etc/caddy/public-static
+COPY infra/proxy/Caddyfile.public-agent /etc/caddy/public-agent
 COPY infra/proxy/Caddyfile.public-candidate /etc/caddy/Caddyfile.candidate
 COPY infra/proxy/Caddyfile.public /etc/caddy/Caddyfile
 RUN caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile \
