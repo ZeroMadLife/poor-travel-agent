@@ -157,6 +157,50 @@ def test_dry_run_plan_never_calls_external_commands(tmp_path: Path) -> None:
     ]
 
 
+def test_public_agent_build_uses_the_same_sha_without_joining_private_compose(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / "env"
+    _write_env(env_file, _valid_environment())
+    commands: list[list[str]] = []
+
+    def runner(command, **_kwargs):
+        commands.append(list(command))
+        return CommandResult(0)
+
+    controller = DeployController(
+        DeployConfig(
+            repo_root=tmp_path,
+            compose_file=tmp_path / "compose.yml",
+            env_file=env_file,
+            state_file=tmp_path / "state.json",
+            backup_root=tmp_path / "backups",
+            gateway_url="http://127.0.0.1:9/health",
+        ),
+        runner=runner,
+    )
+    tag = "a" * 40
+
+    controller._build_public_agent_image(tag)
+
+    assert commands == [
+        [
+            "docker",
+            "build",
+            "--file",
+            str(tmp_path / "infra/docker/sage-public-agent.Dockerfile"),
+            "--build-arg",
+            "SAGE_DOCKER_REGISTRY=docker.m.daocloud.io",
+            "--build-arg",
+            f"SAGE_IMAGE_TAG={tag}",
+            "--tag",
+            f"sage-public-agent:{tag}",
+            ".",
+        ]
+    ]
+    assert "compose" not in commands[0]
+
+
 def test_cleanup_removes_only_rebuildable_data_and_retains_release_images(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -168,9 +212,7 @@ def test_cleanup_removes_only_rebuildable_data_and_retains_release_images(
     current = "a" * 40
     previous = "b" * 40
     old = "c" * 40
-    state_file.write_text(
-        json.dumps({"current": current, "previous": previous}), encoding="utf-8"
-    )
+    state_file.write_text(json.dumps({"current": current, "previous": previous}), encoding="utf-8")
     commands: list[list[str]] = []
     deploy_uid = os.getuid()
 
@@ -211,6 +253,7 @@ def test_cleanup_removes_only_rebuildable_data_and_retains_release_images(
                         f"sage-web:{previous}",
                         f"sage-api:{old}",
                         f"sage-web:{old}",
+                        f"sage-public-agent:{old}",
                         "other:latest",
                     )
                 ),
@@ -231,7 +274,7 @@ def test_cleanup_removes_only_rebuildable_data_and_retains_release_images(
 
     result = controller.cleanup(execute=True)
 
-    assert result["removed_sage_images"] == 2
+    assert result["removed_sage_images"] == 3
     assert result["volumes"] == "untouched"
     assert [
         "docker",
@@ -242,10 +285,15 @@ def test_cleanup_removes_only_rebuildable_data_and_retains_release_images(
         "until=168h",
     ] in commands
     assert ["docker", "image", "prune", "--force"] in commands
-    remove = next(
-        command for command in commands if command[:3] == ["docker", "image", "rm"]
-    )
-    assert remove == ["docker", "image", "rm", f"sage-api:{old}", f"sage-web:{old}"]
+    remove = next(command for command in commands if command[:3] == ["docker", "image", "rm"])
+    assert remove == [
+        "docker",
+        "image",
+        "rm",
+        f"sage-api:{old}",
+        f"sage-public-agent:{old}",
+        f"sage-web:{old}",
+    ]
     assert all("volume" not in command for command in commands)
     assert all(
         current not in command and previous not in command
@@ -324,9 +372,7 @@ def test_status_is_degraded_when_one_expected_service_is_missing(tmp_path: Path)
         if command[:2] == ["docker", "compose"]:
             return CommandResult(
                 0,
-                json.dumps(
-                    {"Service": "api", "State": "running", "Health": "healthy"}
-                ),
+                json.dumps({"Service": "api", "State": "running", "Health": "healthy"}),
             )
         raise AssertionError(command)
 

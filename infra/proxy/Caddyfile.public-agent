@@ -1,0 +1,15 @@
+@public_agent {
+	path /api/public/v1/ask
+	method POST
+}
+reverse_proxy @public_agent http://{$SAGE_PUBLIC_AGENT_UPSTREAM:sage-public-agent:8082} {
+	header_up -X-Sage-Public-Client-IP
+	header_up X-Sage-Public-Client-IP {http.request.remote.host}
+	header_down -Server
+}
+
+@other_public_api path /api/public/*
+respond @other_public_api "not found" 404
+
+@other_api path /api/*
+respond @other_api "not found" 404

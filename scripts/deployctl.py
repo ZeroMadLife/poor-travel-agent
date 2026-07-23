@@ -37,7 +37,7 @@ SECRET_KEYS = {
     "MODEL_PROVIDER_ENCRYPTION_SECRET",
 }
 EXPECTED_SERVICES = {"api", "web", "public", "postgres", "redis"}
-SAGE_IMAGE = re.compile(r"sage-(?:api|web|public):([0-9a-f]{40})")
+SAGE_IMAGE = re.compile(r"sage-(?:api|web|public|public-agent):([0-9a-f]{40})")
 REQUIRED_KEYS = SECRET_KEYS | {
     "APP_ENV",
     "CLOUD_FRONTEND_URL",
@@ -292,6 +292,27 @@ class DeployController:
             *arguments,
         ]
 
+    def _build_public_agent_image(self, tag: str) -> None:
+        tag = validate_commit_tag(tag)
+        self._run(
+            [
+                "docker",
+                "build",
+                "--file",
+                str(self.config.repo_root / "infra/docker/sage-public-agent.Dockerfile"),
+                "--build-arg",
+                f"SAGE_DOCKER_REGISTRY={self.values['SAGE_DOCKER_REGISTRY']}",
+                "--build-arg",
+                f"SAGE_IMAGE_TAG={tag}",
+                "--tag",
+                f"sage-public-agent:{tag}",
+                ".",
+            ],
+            label="构建公开 Agent 镜像",
+            tag=tag,
+            timeout=BUILD_TIMEOUT_SECONDS,
+        )
+
     def _run(
         self,
         command: Sequence[str],
@@ -517,6 +538,7 @@ class DeployController:
             tag=tag,
             timeout=BUILD_TIMEOUT_SECONDS,
         )
+        self._build_public_agent_image(tag)
         self._run(
             self._compose("up", "-d", "--wait", "postgres", "redis"),
             label="启动数据服务",
@@ -572,7 +594,12 @@ class DeployController:
         if not execute:
             return self.dry_run_plan("rollback", tag)
         self.preflight()
-        for image in (f"sage-api:{tag}", f"sage-web:{tag}", f"sage-public:{tag}"):
+        for image in (
+            f"sage-api:{tag}",
+            f"sage-web:{tag}",
+            f"sage-public:{tag}",
+            f"sage-public-agent:{tag}",
+        ):
             self._run(["docker", "image", "inspect", image], label="检查回滚镜像")
         state = self._load_state()
         current = str(state.get("current", "")) or None

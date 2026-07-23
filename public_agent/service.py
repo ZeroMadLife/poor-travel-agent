@@ -6,6 +6,7 @@ import re
 import secrets
 from dataclasses import dataclass
 
+from public_agent.budget import DailyTokenBudget
 from public_agent.corpus import PublicDocument, PublicPackage
 from public_agent.model import PublicAnswerModel, PublicModelAnswer
 
@@ -70,10 +71,12 @@ class PublicAgentService:
         model: PublicAnswerModel | None,
         *,
         retrieval_limit: int = 3,
+        token_budget: DailyTokenBudget | None = None,
     ) -> None:
         self.package = package
         self.model = model
         self.retrieval_limit = retrieval_limit
+        self.token_budget = token_budget
 
     @property
     def ready(self) -> bool:
@@ -88,7 +91,20 @@ class PublicAgentService:
             return self._result(request_id, "no_match", _NO_MATCH, (), PublicModelAnswer(""))
         if self.model is None:
             raise RuntimeError("public answer model is not configured")
-        model_answer = await self.model.answer(question, evidence)
+        budget = self.token_budget
+        reservation = budget.reserve() if budget is not None else None
+        try:
+            model_answer = await self.model.answer(question, evidence)
+        except Exception:
+            if reservation is not None and budget is not None:
+                budget.release(reservation)
+            raise
+        if reservation is not None and budget is not None:
+            reported_tokens = model_answer.input_tokens + model_answer.output_tokens
+            budget.commit(
+                reservation,
+                reported_tokens if reported_tokens > 0 else reservation.tokens,
+            )
         if not model_answer.text or _contains_leak(model_answer.text):
             return self._result(request_id, "refused", _REFUSAL, (), model_answer)
         citations = tuple(_citation(index, item) for index, item in enumerate(evidence, start=1))
@@ -129,12 +145,15 @@ def _contains_leak(answer: str) -> bool:
 
 
 def _citation(index: int, document: PublicDocument) -> PublicCitation:
+    excerpt = document.content[:280].rstrip()
+    if len(document.content) > len(excerpt):
+        excerpt += "…"
     return PublicCitation(
         citation_id=f"E{index}",
         document_id=document.document_id,
         title=document.title,
         url=document.url,
         revision=document.revision,
-        excerpt=document.content,
+        excerpt=excerpt,
         content_sha256=document.content_sha256,
     )

@@ -3,9 +3,12 @@
 from collections.abc import Sequence
 from pathlib import Path
 
+import httpx
 from fastapi.testclient import TestClient
 
 from public_agent.app import create_public_agent_app
+from public_agent.budget import DailyTokenBudget
+from public_agent.client_identity import PublicClientIdentityResolver
 from public_agent.corpus import PublicDocument
 from public_agent.limiter import SlidingWindowRateLimiter
 from public_agent.model import PublicModelAnswer
@@ -66,6 +69,86 @@ def test_public_api_limits_by_socket_client_without_trusting_forwarded_header() 
     assert limited.headers["x-public-package-revision"] == "2026-07-22.1"
     assert limited.headers["retry-after"] == "60"
     assert limited.json() == {"detail": "public Agent rate limit exceeded"}
+
+
+async def test_trusted_proxy_header_separates_clients_but_untrusted_peers_cannot_forge_it() -> None:
+    resolver = PublicClientIdentityResolver.from_cidrs("172.16.0.0/12")
+    app = create_public_agent_app(
+        package_path=Path("data/public/sage-public-v1.json"),
+        model=StubModel(),
+        limiter=SlidingWindowRateLimiter(requests=1, window_seconds=60),
+        client_identity=resolver,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=("172.20.0.2", 50000)),
+        base_url="http://testserver",
+    ) as trusted:
+        first = await trusted.post(
+            "/api/public/v1/ask",
+            json={"question": "Sage 是什么？"},
+            headers={"X-Sage-Public-Client-IP": "198.51.100.1"},
+        )
+        second = await trusted.post(
+            "/api/public/v1/ask",
+            json={"question": "Knowledge 是什么？"},
+            headers={"X-Sage-Public-Client-IP": "198.51.100.2"},
+        )
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=("203.0.113.9", 50000)),
+        base_url="http://testserver",
+    ) as untrusted:
+        assert (
+            await untrusted.post(
+                "/api/public/v1/ask",
+                json={"question": "Sage 是什么？"},
+                headers={"X-Sage-Public-Client-IP": "198.51.100.8"},
+            )
+        ).status_code == 200
+        assert (
+            await untrusted.post(
+                "/api/public/v1/ask",
+                json={"question": "Knowledge 是什么？"},
+                headers={"X-Sage-Public-Client-IP": "198.51.100.9"},
+            )
+        ).status_code == 429
+
+
+async def test_trusted_proxy_without_a_valid_internal_header_fails_closed() -> None:
+    app = create_public_agent_app(
+        package_path=Path("data/public/sage-public-v1.json"),
+        model=StubModel(),
+        client_identity=PublicClientIdentityResolver.from_cidrs("172.16.0.0/12"),
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=("172.20.0.2", 50000)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post("/api/public/v1/ask", json={"question": "Sage 是什么？"})
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "invalid public proxy identity"}
+
+
+def test_daily_token_budget_rejects_a_second_model_call_but_not_a_no_match() -> None:
+    app = create_public_agent_app(
+        package_path=Path("data/public/sage-public-v1.json"),
+        model=StubModel(),
+        token_budget=DailyTokenBudget(token_limit=100, reservation_tokens=100),
+    )
+    client = TestClient(app)
+
+    assert client.post("/api/public/v1/ask", json={"question": "Sage 是什么？"}).status_code == 200
+    no_match = client.post("/api/public/v1/ask", json={"question": "今天天气怎么样？"})
+    limited = client.post("/api/public/v1/ask", json={"question": "Harness 如何恢复？"})
+
+    assert no_match.status_code == 200
+    assert no_match.json()["status"] == "no_match"
+    assert limited.status_code == 429
+    assert limited.headers["retry-after"] == "3600"
+    assert limited.json() == {"detail": "public Agent usage budget exceeded"}
 
 
 def test_public_api_has_no_private_routes_or_schema_browser() -> None:

@@ -26,9 +26,8 @@ def test_public_profile_is_built_as_an_api_isolated_static_surface() -> None:
     compose = (ROOT / "infra/compose/private-canary.yml").read_text(encoding="utf-8")
     dockerfile = (ROOT / "infra/docker/sage-public.Dockerfile").read_text(encoding="utf-8")
     caddyfile = (ROOT / "infra/proxy/Caddyfile.public").read_text(encoding="utf-8")
-    static_caddyfile = (ROOT / "infra/proxy/Caddyfile.public-static").read_text(
-        encoding="utf-8"
-    )
+    static_caddyfile = (ROOT / "infra/proxy/Caddyfile.public-static").read_text(encoding="utf-8")
+    agent_caddyfile = (ROOT / "infra/proxy/Caddyfile.public-agent").read_text(encoding="utf-8")
     router = (ROOT / "frontend/src/router/public.ts").read_text(encoding="utf-8")
 
     public_service = compose[compose.index("  public:") : compose.index("\nnetworks:")]
@@ -45,12 +44,19 @@ def test_public_profile_is_built_as_an_api_isolated_static_surface() -> None:
     assert "EXPOSE 8081 8443" in dockerfile
     assert "Caddyfile.candidate" in dockerfile
     assert "/etc/caddy/Caddyfile.candidate" in public_service
-    assert "reverse_proxy" not in caddyfile + static_caddyfile
+    assert "reverse_proxy" not in static_caddyfile
+    assert "path /api/public/v1/ask" in agent_caddyfile
+    assert "method POST" in agent_caddyfile
+    assert "X-Sage-Public-Client-IP {http.request.remote.host}" in agent_caddyfile
+    assert "header_up -X-Sage-Public-Client-IP" in agent_caddyfile
+    assert "path /api/public/*" in agent_caddyfile
+    assert "path /api/*" in agent_caddyfile
+    assert 'respond @other_api "not found" 404' in agent_caddyfile
     assert "sagecompanion.top, www.sagecompanion.top" in caddyfile
     assert "http_port 8081" in caddyfile
     assert "https_port 8443" in caddyfile
     assert "auto_https off" not in caddyfile
-    assert "connect-src 'none'" in static_caddyfile
+    assert "connect-src 'self'" in static_caddyfile
     assert "frame-ancestors 'none'" in static_caddyfile
     assert "PublicProfileView" in router
     assert "AssistantHomeView" not in router
@@ -78,16 +84,18 @@ def test_public_release_pipeline_has_a_bounded_root_boundary() -> None:
     assert sudoers.strip().endswith('/usr/local/sbin/sage-public-releasectl ""')
     assert "visudo -cf" in installer
     assert "/var/lib/sage-public-release" in installer
+    assert "/etc/sage/public-agent.env" in installer
+    assert "root:root 600" in installer
     assert "/opt/sage/state" not in installer
     assert "parse_request(sys.stdin)" in controller
     assert 'COMMIT_TAG = re.compile(r"[0-9a-f]{40}")' in controller
     assert "/etc/sage/env" not in controller
+    assert "sage-public-agent" in controller
+    assert "candidate_api_url" in controller
 
 
 def test_public_agent_image_contains_only_public_runtime_inputs() -> None:
-    dockerfile = (ROOT / "infra/docker/sage-public-agent.Dockerfile").read_text(
-        encoding="utf-8"
-    )
+    dockerfile = (ROOT / "infra/docker/sage-public-agent.Dockerfile").read_text(encoding="utf-8")
 
     assert "requirements-public-agent.txt" in dockerfile
     assert "COPY public_agent ./public_agent" in dockerfile
@@ -103,18 +111,13 @@ def test_public_agent_image_contains_only_public_runtime_inputs() -> None:
 
 
 def test_private_canary_environment_template_tracks_server_topology() -> None:
-    template = (ROOT / "infra/env/private-canary.env.example").read_text(
-        encoding="utf-8"
-    )
+    template = (ROOT / "infra/env/private-canary.env.example").read_text(encoding="utf-8")
 
     assert "SAGE_DOCKER_REGISTRY=docker.m.daocloud.io" in template
     assert "SAGE_ROOTLESS_DOCKER_SOCKET=/run/user/1002/sage-sandbox.sock" in template
     assert "SAGE_SANDBOX_DOCKER_SOCKET=/run/user/1003/docker.sock" in template
     assert "SAGE_SANDBOX_UID=1003" in template
-    assert (
-        "SAGE_CODING_SANDBOX_IMAGE=docker.m.daocloud.io/library/python:3.12-slim"
-        in template
-    )
+    assert "SAGE_CODING_SANDBOX_IMAGE=docker.m.daocloud.io/library/python:3.12-slim" in template
     assert "CLOUD_CANARY_INVITE_LOGIN_ENABLED=true" in template
 
 
@@ -126,9 +129,7 @@ def test_private_canary_requires_a_rootless_sandbox_socket() -> None:
     assert "/opt/sage/data/workspaces:/opt/sage/data/workspaces" in compose
     assert "no-new-privileges:true" in compose
 
-    proxy = (ROOT / "infra/systemd/sage-sandbox-proxy.service").read_text(
-        encoding="utf-8"
-    )
+    proxy = (ROOT / "infra/systemd/sage-sandbox-proxy.service").read_text(encoding="utf-8")
     assert "mode=0600,user=sage-deploy,group=sage-deploy" in proxy
     assert "UNIX-CONNECT:/run/user/1003/docker.sock" in proxy
     assert "ProtectHome=false" in proxy
@@ -162,8 +163,7 @@ def test_api_image_uses_configurable_debian_mirrors_and_ipv4() -> None:
 
     assert "ARG SAGE_DEBIAN_MIRROR=https://mirrors.aliyun.com/debian" in dockerfile
     assert (
-        "ARG SAGE_DEBIAN_SECURITY_MIRROR=https://mirrors.aliyun.com/debian-security"
-        in dockerfile
+        "ARG SAGE_DEBIAN_SECURITY_MIRROR=https://mirrors.aliyun.com/debian-security" in dockerfile
     )
     assert "http://deb.debian.org/debian-security" in dockerfile
     assert "Acquire::ForceIPv4=true update" in dockerfile
@@ -186,9 +186,7 @@ def test_api_entrypoint_runs_explicit_migration_commands() -> None:
 
 
 def test_web_image_cannot_disable_the_production_login_gate() -> None:
-    dockerfile = (ROOT / "infra/docker/sage-web.Dockerfile").read_text(
-        encoding="utf-8"
-    )
+    dockerfile = (ROOT / "infra/docker/sage-web.Dockerfile").read_text(encoding="utf-8")
     compose = (ROOT / "infra/compose/private-canary.yml").read_text(encoding="utf-8")
 
     assert "RUN VITE_CLOUD_AUTH_REQUIRED=true npm run build" in dockerfile

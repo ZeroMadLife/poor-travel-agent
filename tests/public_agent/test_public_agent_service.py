@@ -3,6 +3,9 @@
 from collections.abc import Sequence
 from pathlib import Path
 
+import pytest
+
+from public_agent.budget import DailyTokenBudget, PublicBudgetExceeded
 from public_agent.corpus import PublicDocument, PublicPackage
 from public_agent.model import PublicModelAnswer
 from public_agent.service import PublicAgentService
@@ -73,3 +76,23 @@ async def test_no_match_does_not_spend_model_tokens() -> None:
     assert result.status == "no_match"
     assert result.citations == ()
     assert model.calls == []
+
+
+async def test_missing_provider_usage_is_charged_at_the_full_reservation() -> None:
+    package = PublicPackage.load(Path("data/public/sage-public-v1.json"))
+    model = RecordingModel()
+    model.result = "公开回答 [E1]"
+    budget = DailyTokenBudget(token_limit=100, reservation_tokens=100)
+    service = PublicAgentService(package, model, token_budget=budget)
+
+    async def answer_without_usage(
+        question: str, evidence: Sequence[PublicDocument]
+    ) -> PublicModelAnswer:
+        model.calls.append((question, evidence))
+        return PublicModelAnswer("公开回答 [E1]")
+
+    model.answer = answer_without_usage  # type: ignore[method-assign]
+    await service.answer("Sage 是什么？")
+
+    with pytest.raises(PublicBudgetExceeded):
+        await service.answer("Harness 如何恢复？")

@@ -22,6 +22,7 @@ import {
 import knowledgeWorkbenchImage from '../assets/public/sage-knowledge-workbench.jpg'
 import {
   answerPublicProfileQuestion,
+  type PublicAgentReceipt,
   type PublicAgentSource,
 } from '../harness/publicAgent'
 
@@ -29,6 +30,9 @@ type AgentMessage = {
   role: 'visitor' | 'sage'
   text: string
   sources?: PublicAgentSource[]
+  receipt?: PublicAgentReceipt
+  mode?: 'live' | 'fallback'
+  notice?: string
 }
 
 const drawerOpen = ref(false)
@@ -181,7 +185,14 @@ async function answerQuestion() {
   isAnswering.value = true
   try {
     const response = await answerPublicProfileQuestion(value)
-    agentMessages.value.push({ role: 'sage', text: response.answer, sources: response.sources })
+    agentMessages.value.push({
+      role: 'sage',
+      text: response.answer,
+      sources: response.sources,
+      receipt: response.receipt,
+      mode: response.mode,
+      notice: response.notice,
+    })
   } finally {
     isAnswering.value = false
   }
@@ -197,6 +208,7 @@ function toggleWork(id: string) {
 }
 
 function openSource(source: PublicAgentSource) {
+  if (!source.target) return
   drawerOpen.value = false
   selectSection(source.target)
 }
@@ -458,12 +470,12 @@ onBeforeUnmount(() => {
           <div>
             <span>ASK SAGE</span>
             <h2 id="ask-boundary-title">受限公开资料问答</h2>
-            <p>用于快速理解公开项目，不连接私人工作台，也不冒充正在运行的公网 Agent。</p>
+            <p>只依据审核发布的公开资料回答；服务不可用时会明确切换为本页资料回退。</p>
           </div>
           <ul>
             <li><FileCheck2 :size="15" />只回答已发布 corpus</li>
             <li><LockKeyhole :size="15" />不读取私人 Knowledge / Memory</li>
-            <li><ShieldCheck :size="15" />静态构建，无外部 API 请求</li>
+            <li><ShieldCheck :size="15" />独立 Public Agent，不连接私人应用</li>
           </ul>
           <button type="button" @click="openAgent('Sage 是做什么的？')">
             打开 Ask Sage <ArrowRight :size="15" />
@@ -497,27 +509,35 @@ onBeforeUnmount(() => {
           <div class="agent-boundary">
             <span><FileCheck2 :size="13" />已发布资料</span>
             <span><LockKeyhole :size="13" />无私人数据</span>
-            <span><RotateCcw :size="13" />确定性回答</span>
+            <span><RotateCcw :size="13" />失败时透明回退</span>
           </div>
 
           <section class="agent-body" aria-live="polite">
             <div v-for="(message, index) in agentMessages" :key="index" class="agent-message" :class="message.role">
               <span>{{ message.role === 'sage' ? 'Sage' : '你' }}</span>
               <p>{{ message.text }}</p>
+              <p v-if="message.notice" class="agent-notice">{{ message.notice }}，以下为本页公开资料回退。</p>
+              <p v-if="message.receipt" class="agent-receipt">
+                资料包 {{ message.receipt.packageRevision }} · {{ message.receipt.requestId }}
+              </p>
               <div v-if="message.sources?.length" class="agent-sources">
                 <strong>回答依据</strong>
-                <button
+                <component
                   v-for="source in message.sources"
                   :key="source.id"
-                  type="button"
+                  :is="source.url ? 'a' : 'button'"
+                  :type="source.url ? undefined : 'button'"
+                  :href="source.url"
+                  :target="source.url ? '_blank' : undefined"
+                  :rel="source.url ? 'noreferrer' : undefined"
                   class="agent-source"
-                  :data-target="source.target"
+                  :data-target="source.target || source.id"
                   @click="openSource(source)"
                 >
                   <span>{{ source.label }}</span>
-                  <small>{{ source.detail }}</small>
+                  <small>{{ source.detail }}<template v-if="source.revision"> · {{ source.revision }}</template></small>
                   <ArrowRight :size="13" />
-                </button>
+                </component>
               </div>
             </div>
           </section>
@@ -533,7 +553,7 @@ onBeforeUnmount(() => {
             <textarea v-model="question" rows="3" aria-label="询问公开资料" placeholder="询问公开的项目与方法…" :disabled="isAnswering"></textarea>
             <button type="submit" aria-label="发送问题" title="发送问题" :disabled="isAnswering || !question.trim()"><Send :size="16" /></button>
           </form>
-          <p class="agent-disclaimer">静态公开 corpus · CSP connect-src none</p>
+          <p class="agent-disclaimer">versioned public corpus · no private session · same-origin API</p>
         </aside>
       </div>
     </Transition>
@@ -947,9 +967,12 @@ onBeforeUnmount(() => {
 .agent-message.visitor { justify-items: end; }
 .agent-message.visitor > span { text-align: right; }
 .agent-message.visitor p { border-color: var(--public-green); color: #fff; background: var(--public-green); }
+.agent-message .agent-notice { border-color: #e4c878; color: #725415; background: #fff9e7; font-size: 10px; }
+.agent-message .agent-receipt { border: 0; padding: 0; color: var(--public-faint); background: transparent; font-family: var(--public-font-mono); font-size: 9px; }
 .agent-sources { display: grid; width: min(88%, 340px); margin-top: 7px; border: 1px solid var(--public-line); border-radius: 4px; background: #fff; }
 .agent-sources > strong { padding: 9px 11px 6px; color: var(--public-faint); font-size: 9px; }
 .agent-source { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; padding: 8px 11px; border: 0; border-top: 1px solid #edf1ee; color: var(--public-green); background: transparent; text-align: left; }
+.agent-source { text-decoration: none; }
 .agent-source > span { font-size: 11px; font-weight: 650; }
 .agent-source small { grid-column: 1; color: var(--public-muted); font-size: 9px; line-height: 1.45; }
 .agent-source svg { grid-row: 1 / span 2; grid-column: 2; align-self: center; }

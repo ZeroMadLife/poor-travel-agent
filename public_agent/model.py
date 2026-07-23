@@ -33,14 +33,17 @@ class OpenAIPublicAnswerModel:
         api_key: str,
         base_url: str,
         model: str,
+        timeout_seconds: float = 15.0,
+        max_output_tokens: int = 500,
         client: AsyncOpenAI | None = None,
     ) -> None:
         self.model = model
+        self.max_output_tokens = max_output_tokens
         self._client = client or AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
             max_retries=1,
-            timeout=20.0,
+            timeout=timeout_seconds,
         )
 
     async def answer(
@@ -55,7 +58,7 @@ class OpenAIPublicAnswerModel:
         completion = await self._client.chat.completions.create(
             model=self.model,
             temperature=0.1,
-            max_tokens=700,
+            max_tokens=self.max_output_tokens,
             messages=[
                 {
                     "role": "system",

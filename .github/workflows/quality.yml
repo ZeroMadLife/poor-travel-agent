@@ -80,6 +80,7 @@ jobs:
           trap 'docker rm --force sage-public-ci sage-public-agent-ci >/dev/null 2>&1 || true; docker network rm sage-public-ci >/dev/null 2>&1 || true' EXIT
           docker run --detach --name sage-public-ci --publish 127.0.0.1:18081:8081 \
             --network sage-public-ci \
+            --env SAGE_PUBLIC_AGENT_UPSTREAM=sage-public-agent-ci:8082 \
             --read-only --cap-drop ALL --security-opt no-new-privileges:true \
             --tmpfs /config:rw,noexec,nosuid,mode=1777,size=8m \
             --tmpfs /data:rw,noexec,nosuid,mode=1777,size=8m \
@@ -103,6 +104,16 @@ jobs:
             test "$attempt" -lt 20
             sleep 1
           done
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
+            --header 'Content-Type: application/json' \
+            --data '{"question":"Sage 是什么？"}' \
+            http://127.0.0.1:18081/api/public/v1/ask)" = "503"
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
+            http://127.0.0.1:18081/api/public/v1/ask)" = "404"
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
+            --request POST http://127.0.0.1:18081/api/public/v1/private)" = "404"
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
+            http://127.0.0.1:18081/api/v1/coding/models)" = "404"
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:18082/api/v1/coding/models)" = "404"
           docker exec sage-public-agent-ci test ! -e /app/api
           docker exec sage-public-agent-ci test ! -e /app/core
