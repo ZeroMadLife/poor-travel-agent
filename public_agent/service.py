@@ -14,7 +14,9 @@ from public_agent.registry import PublishedPackageProvider
 _PRIVATE_REQUESTS = (
     re.compile(
         r"(?:读取|显示|告诉|列出|泄露|导出|忽略).{0,28}"
-        r"(?:私有|内部|session|memory|workspace|api.?key|token|系统提示|system prompt)",
+        r"(?:私有|私人|内部|我的.{0,8}(?:会话|记忆|知识库)|"
+        r"个人(?:会话|记忆|知识库)|session|memory|workspace|api.?key|token|"
+        r"系统提示|system prompt)",
         re.IGNORECASE,
     ),
     re.compile(r"ignore (?:all |the )?(?:previous|prior|system) instructions", re.IGNORECASE),
