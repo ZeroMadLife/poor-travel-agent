@@ -148,6 +148,7 @@ def test_api_image_uses_the_configurable_canary_package_index() -> None:
     dockerfile = (ROOT / "infra/docker/sage-api.Dockerfile").read_text(encoding="utf-8")
     compose = (ROOT / "infra/compose/private-canary.yml").read_text(encoding="utf-8")
 
+    assert "COPY public_agent ./public_agent" in dockerfile
     assert "ARG SAGE_PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/" in dockerfile
     assert "PIP_INDEX_URL=${SAGE_PIP_INDEX_URL}" in dockerfile
     assert "SAGE_PIP_INDEX_URL: ${SAGE_PIP_INDEX_URL:-" in compose
