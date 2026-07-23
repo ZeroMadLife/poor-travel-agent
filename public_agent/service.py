@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from public_agent.budget import DailyTokenBudget
 from public_agent.corpus import PublicDocument, PublicPackage
 from public_agent.model import PublicAnswerModel, PublicModelAnswer
+from public_agent.registry import PublishedPackageProvider
 
 _PRIVATE_REQUESTS = (
     re.compile(
@@ -67,13 +68,15 @@ class PublicAgentResult:
 class PublicAgentService:
     def __init__(
         self,
-        package: PublicPackage,
+        package: PublicPackage | PublishedPackageProvider,
         model: PublicAnswerModel | None,
         *,
         retrieval_limit: int = 3,
         token_budget: DailyTokenBudget | None = None,
     ) -> None:
-        self.package = package
+        self._package_provider = (
+            package if isinstance(package, PublishedPackageProvider) else _StaticPackageProvider(package)
+        )
         self.model = model
         self.retrieval_limit = retrieval_limit
         self.token_budget = token_budget
@@ -82,13 +85,26 @@ class PublicAgentService:
     def ready(self) -> bool:
         return self.model is not None
 
-    async def answer(self, question: str) -> PublicAgentResult:
+    @property
+    def package(self) -> PublicPackage:
+        """Return the current package for compatibility with P2 callers."""
+
+        return self._package_provider.current()
+
+    async def answer(
+        self, question: str, *, package: PublicPackage | None = None
+    ) -> PublicAgentResult:
         request_id = f"pub_{secrets.token_hex(6)}"
+        current_package = package or self._package_provider.current()
         if _private_request(question):
-            return self._result(request_id, "refused", _REFUSAL, (), PublicModelAnswer(""))
-        evidence = self.package.retrieve(question, limit=self.retrieval_limit)
+            return self._result(
+                current_package, request_id, "refused", _REFUSAL, (), PublicModelAnswer("")
+            )
+        evidence = current_package.retrieve(question, limit=self.retrieval_limit)
         if not evidence:
-            return self._result(request_id, "no_match", _NO_MATCH, (), PublicModelAnswer(""))
+            return self._result(
+                current_package, request_id, "no_match", _NO_MATCH, (), PublicModelAnswer("")
+            )
         if self.model is None:
             raise RuntimeError("public answer model is not configured")
         budget = self.token_budget
@@ -106,12 +122,15 @@ class PublicAgentService:
                 reported_tokens if reported_tokens > 0 else reservation.tokens,
             )
         if not model_answer.text or _contains_leak(model_answer.text):
-            return self._result(request_id, "refused", _REFUSAL, (), model_answer)
+            return self._result(current_package, request_id, "refused", _REFUSAL, (), model_answer)
         citations = tuple(_citation(index, item) for index, item in enumerate(evidence, start=1))
-        return self._result(request_id, "answered", model_answer.text, citations, model_answer)
+        return self._result(
+            current_package, request_id, "answered", model_answer.text, citations, model_answer
+        )
 
     def _result(
         self,
+        package: PublicPackage,
         request_id: str,
         status: str,
         answer: str,
@@ -120,9 +139,9 @@ class PublicAgentService:
     ) -> PublicAgentResult:
         receipt = PublicAnswerReceipt(
             request_id=request_id,
-            package_id=self.package.package_id,
-            package_revision=self.package.revision,
-            package_digest=self.package.digest,
+            package_id=package.package_id,
+            package_revision=package.revision,
+            package_digest=package.digest,
             evidence_ids=tuple(item.document_id for item in citations),
             retrieval_limit=self.retrieval_limit,
         )
@@ -134,6 +153,14 @@ class PublicAgentService:
             input_tokens=model_answer.input_tokens,
             output_tokens=model_answer.output_tokens,
         )
+
+
+class _StaticPackageProvider:
+    def __init__(self, package: PublicPackage) -> None:
+        self._package = package
+
+    def current(self) -> PublicPackage:
+        return self._package
 
 
 def _private_request(question: str) -> bool:

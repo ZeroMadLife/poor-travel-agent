@@ -81,9 +81,11 @@ def test_public_release_pipeline_has_a_bounded_root_boundary() -> None:
     assert "evals/ public_agent/ tests/" in workflow
     assert "evals/ public_agent/" in workflow
     assert "NOPASSWD: /usr/local/sbin/sage-public-releasectl" in sudoers
-    assert sudoers.strip().endswith('/usr/local/sbin/sage-public-releasectl ""')
+    assert "NOPASSWD: /usr/local/sbin/sage-public-packagectl" in sudoers
     assert "visudo -cf" in installer
     assert "/var/lib/sage-public-release" in installer
+    assert "sage-public-packagectl" in installer
+    assert "--bootstrap-package" in installer
     assert "/etc/sage/public-agent.env" in installer
     assert "root:root 600" in installer
     assert "/opt/sage/state" not in installer

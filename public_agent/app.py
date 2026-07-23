@@ -18,6 +18,7 @@ from public_agent.client_identity import (
 from public_agent.corpus import PublicPackage
 from public_agent.limiter import SlidingWindowRateLimiter
 from public_agent.model import OpenAIPublicAnswerModel, PublicAnswerModel
+from public_agent.registry import PublishedPackageError, PublishedPackageProvider
 from public_agent.schemas import PublicAskRequest, PublicAskResponse, PublicHealthResponse
 from public_agent.service import PublicAgentService
 
@@ -27,13 +28,20 @@ DEFAULT_PACKAGE = Path(__file__).resolve().parent.parent / "data" / "public" / "
 def create_public_agent_app(
     *,
     package_path: str | Path | None = None,
+    package_registry_root: str | Path | None = None,
     model: PublicAnswerModel | None = None,
     limiter: SlidingWindowRateLimiter | None = None,
     client_identity: PublicClientIdentityResolver | None = None,
     token_budget: DailyTokenBudget | None = None,
 ) -> FastAPI:
-    resolved_package_path = package_path or os.getenv("SAGE_PUBLIC_PACKAGE") or DEFAULT_PACKAGE
-    package = PublicPackage.load(resolved_package_path)
+    resolved_registry_root = package_registry_root or os.getenv("SAGE_PUBLIC_PACKAGE_REGISTRY")
+    if resolved_registry_root:
+        package_source: PublicPackage | PublishedPackageProvider = PublishedPackageProvider(
+            resolved_registry_root
+        )
+    else:
+        resolved_package_path = package_path or os.getenv("SAGE_PUBLIC_PACKAGE") or DEFAULT_PACKAGE
+        package_source = PublicPackage.load(resolved_package_path)
     resolved_model = model if model is not None else _model_from_env()
     resolved_budget = token_budget or DailyTokenBudget(
         token_limit=_bounded_int("SAGE_PUBLIC_DAILY_TOKEN_LIMIT", 120_000, 1_000, 10_000_000),
@@ -42,7 +50,7 @@ def create_public_agent_app(
         ),
         state_path=os.getenv("SAGE_PUBLIC_BUDGET_STATE_PATH") or None,
     )
-    service = PublicAgentService(package, resolved_model, token_budget=resolved_budget)
+    service = PublicAgentService(package_source, resolved_model, token_budget=resolved_budget)
     rate_limiter = limiter or SlidingWindowRateLimiter(
         requests=int(os.getenv("SAGE_PUBLIC_RATE_LIMIT_REQUESTS", "12")),
         window_seconds=int(os.getenv("SAGE_PUBLIC_RATE_LIMIT_WINDOW_SECONDS", "60")),
@@ -64,11 +72,26 @@ def create_public_agent_app(
         response.headers["Cache-Control"] = "no-store"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Public-Package-Revision"] = package.revision
+        if "X-Public-Package-Revision" not in response.headers:
+            try:
+                response.headers["X-Public-Package-Revision"] = service.package.revision
+            except PublishedPackageError:
+                response.headers["X-Public-Package-Revision"] = "unavailable"
         return response
 
     @app.get("/healthz", response_model=PublicHealthResponse)
-    async def health() -> PublicHealthResponse:
+    async def health(response: Response) -> PublicHealthResponse:
+        try:
+            package = service.package
+        except PublishedPackageError:
+            response.headers["X-Public-Package-Revision"] = "unavailable"
+            return PublicHealthResponse(
+                status="degraded",
+                package_id="unavailable",
+                package_revision="unavailable",
+                package_digest="unavailable",
+            )
+        response.headers["X-Public-Package-Revision"] = package.revision
         return PublicHealthResponse(
             status="ready" if service.ready else "not_configured",
             package_id=package.package_id,
@@ -84,6 +107,10 @@ def create_public_agent_app(
             client_key = identity_resolver.resolve(request)
         except PublicClientIdentityError as exc:
             raise HTTPException(status_code=400, detail="invalid public proxy identity") from exc
+        try:
+            package = service.package
+        except PublishedPackageError as exc:
+            raise HTTPException(status_code=503, detail="public package unavailable") from exc
         decision = rate_limiter.check(client_key)
         response.headers["X-RateLimit-Limit"] = str(rate_limiter.requests)
         response.headers["X-RateLimit-Remaining"] = str(decision.remaining)
@@ -110,7 +137,7 @@ def create_public_agent_app(
                 },
             )
         try:
-            result = await service.answer(payload.question)
+            result = await service.answer(payload.question, package=package)
         except PublicBudgetExceeded as exc:
             raise HTTPException(
                 status_code=429,

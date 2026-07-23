@@ -44,6 +44,7 @@ DEFAULT_LIVE_URL = "http://127.0.0.1:18082/healthz"
 DEFAULT_AGENT_ENV_FILE = Path("/etc/sage/public-agent.env")
 DEFAULT_AGENT_BUDGET_STATE_FILE = Path("/var/lib/sage-public-release/agent-budget.json")
 AGENT_BUDGET_CONTAINER_PATH = "/var/lib/sage-public-agent/budget.json"
+AGENT_PACKAGE_REGISTRY_CONTAINER_PATH = "/var/lib/sage-public-agent/packages"
 
 
 class PublicReleaseError(RuntimeError):
@@ -70,6 +71,8 @@ class PublicReleaseConfig:
     agent_env_file: Path = DEFAULT_AGENT_ENV_FILE
     agent_env_owner_uid: int = 0
     agent_budget_state_file: Path = DEFAULT_AGENT_BUDGET_STATE_FILE
+    agent_package_registry_root: Path = Path("/var/lib/sage-public-release/packages")
+    agent_package_registry_owner_uid: int = 0
     agent_runtime_uid: int = 65532
 
 
@@ -293,6 +296,13 @@ class PublicReleaseController:
                 "type=bind,source="
                 f"{self.config.agent_budget_state_file},target={AGENT_BUDGET_CONTAINER_PATH}"
             ),
+            "--mount",
+            (
+                "type=bind,source="
+                f"{self.config.agent_package_registry_root},target={AGENT_PACKAGE_REGISTRY_CONTAINER_PATH},readonly"
+            ),
+            "--env",
+            f"SAGE_PUBLIC_PACKAGE_REGISTRY={AGENT_PACKAGE_REGISTRY_CONTAINER_PATH}",
             "--health-cmd",
             (
                 'python -c "import json,urllib.request; '
@@ -411,6 +421,26 @@ class PublicReleaseController:
             raise PublicReleaseError("无法设置公开 Agent 预算账本所有者") from exc
         if not path.is_file():
             raise PublicReleaseError("公开 Agent 预算账本不是普通文件")
+
+    def _verify_agent_package_registry(self) -> None:
+        root = self.config.agent_package_registry_root
+        try:
+            stat = root.stat()
+        except OSError as exc:
+            raise PublicReleaseError("公开资料包注册表目录不存在") from exc
+        if root.is_symlink() or not root.is_dir():
+            raise PublicReleaseError("公开资料包注册表目录必须是普通目录")
+        if stat.st_uid != self.config.agent_package_registry_owner_uid or stat.st_mode & 0o022:
+            raise PublicReleaseError("公开资料包注册表目录必须由 root 持有且不可被组/其他用户写入")
+        registry = root / "registry.json"
+        if registry.is_symlink() or not registry.is_file():
+            raise PublicReleaseError("公开资料包注册表未初始化")
+        for path in root.rglob("*"):
+            if path.is_symlink():
+                raise PublicReleaseError("公开资料包注册表不能包含符号链接")
+            mode = path.stat().st_mode
+            if mode & 0o022:
+                raise PublicReleaseError("公开资料包注册表内容不能被组/其他用户写入")
 
     def _wait_healthy(self, url: str, attempts: int = 20) -> None:
         for _ in range(attempts):
@@ -532,6 +562,7 @@ class PublicReleaseController:
     def _run_candidates(self, image: str, agent_image: str) -> None:
         self._verify_agent_env()
         self._ensure_agent_budget_state()
+        self._verify_agent_package_registry()
         self._remove_optional(CANDIDATE_AGENT_CONTAINER)
         self._remove_optional(CANDIDATE_CONTAINER)
         self._target(
@@ -570,6 +601,7 @@ class PublicReleaseController:
     def _start_live(self, image: str, agent_image: str) -> None:
         self._verify_agent_env()
         self._ensure_agent_budget_state()
+        self._verify_agent_package_registry()
         self._ensure_storage()
         self._target(
             *self._agent_container_args(
@@ -615,6 +647,7 @@ class PublicReleaseController:
     def apply(self, tag: str) -> dict[str, object]:
         tag = validate_tag(tag)
         self._ensure_network()
+        self._verify_agent_package_registry()
         state = self._load_state()
         current = str(state.get("current") or "") or self._container_tag(LIVE_CONTAINER)
         live_agent_tag = self._container_tag(LIVE_AGENT_CONTAINER, AGENT_IMAGE_REPOSITORY)
@@ -809,6 +842,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 live_url=args.live_url,
                 agent_env_file=args.agent_env_file.resolve(),
                 agent_budget_state_file=args.agent_budget_state_file.resolve(),
+                agent_package_registry_root=Path(
+                    os.getenv("SAGE_PUBLIC_PACKAGE_REGISTRY_ROOT", "/var/lib/sage-public-release/packages")
+                ).resolve(),
             )
         ).execute(action, tag)
     except PublicReleaseError as exc:

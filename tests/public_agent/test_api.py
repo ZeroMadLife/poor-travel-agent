@@ -1,5 +1,7 @@
 """Standalone public Agent API, rate limit, and isolation coverage."""
 
+import hashlib
+import json
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -12,6 +14,7 @@ from public_agent.client_identity import PublicClientIdentityResolver
 from public_agent.corpus import PublicDocument
 from public_agent.limiter import SlidingWindowRateLimiter
 from public_agent.model import PublicModelAnswer
+from public_agent.registry import PublishedPackageRegistry
 
 
 class StubModel:
@@ -184,3 +187,61 @@ def test_unconfigured_public_agent_fails_closed() -> None:
     assert response.headers["cache-control"] == "no-store"
     assert response.headers["x-public-package-revision"] == "2026-07-22.1"
     assert response.json() == {"detail": "public Agent is not configured"}
+
+
+def test_public_api_follows_publish_and_revoke_without_process_restart(tmp_path: Path) -> None:
+    registry = PublishedPackageRegistry(tmp_path)
+    registry.bootstrap(Path("data/public/sage-public-v1.json"), actor="root")
+    client = TestClient(
+        create_public_agent_app(package_registry_root=tmp_path, model=StubModel())
+    )
+
+    before = client.post("/api/public/v1/ask", json={"question": "Sage 是什么？"})
+    assert before.json()["receipt"]["package_revision"] == "2026-07-22.1"
+
+    payload = json.loads(Path("data/public/sage-public-v1.json").read_text(encoding="utf-8"))
+    payload["revision"] = "2026-07-23.1"
+    content = payload["documents"][0]["content"] + " P3 发布验证"
+    payload["documents"][0]["content"] = content
+    payload["documents"][0]["content_sha256"] = hashlib.sha256(content.encode()).hexdigest()
+    registry.stage_payload(payload, actor="sage-deploy")
+    registry.activate(
+        "sage-public",
+        "2026-07-23.1",
+        expected_active_revision="2026-07-22.1",
+        actor="sage-deploy",
+    )
+
+    published = client.post("/api/public/v1/ask", json={"question": "Sage 是什么？"})
+    assert published.headers["x-public-package-revision"] == "2026-07-23.1"
+    assert published.json()["receipt"]["package_revision"] == "2026-07-23.1"
+
+    registry.revoke(
+        "sage-public",
+        "2026-07-23.1",
+        expected_active_revision="2026-07-23.1",
+        actor="sage-deploy",
+        reason="E2E 回退",
+    )
+    rolled_back = client.post("/api/public/v1/ask", json={"question": "Sage 是什么？"})
+    assert rolled_back.headers["x-public-package-revision"] == "2026-07-22.1"
+    assert rolled_back.json()["receipt"]["package_revision"] == "2026-07-22.1"
+
+
+def test_public_api_reports_degraded_when_active_registry_is_invalid(tmp_path: Path) -> None:
+    registry = PublishedPackageRegistry(tmp_path)
+    registry.bootstrap(Path("data/public/sage-public-v1.json"), actor="root")
+    active = tmp_path / "packages/sage-public/2026-07-22.1.json"
+    active.write_text("{}", encoding="utf-8")
+    client = TestClient(
+        create_public_agent_app(package_registry_root=tmp_path, model=StubModel())
+    )
+
+    health = client.get("/healthz")
+    response = client.post("/api/public/v1/ask", json={"question": "Sage 是什么？"})
+
+    assert health.status_code == 200
+    assert health.json()["status"] == "degraded"
+    assert health.headers["x-public-package-revision"] == "unavailable"
+    assert response.status_code == 503
+    assert response.json() == {"detail": "public package unavailable"}
