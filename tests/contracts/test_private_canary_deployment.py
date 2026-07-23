@@ -108,6 +108,7 @@ def test_public_agent_image_contains_only_public_runtime_inputs() -> None:
     assert "PIP_DEFAULT_TIMEOUT=120" in dockerfile
     assert "PIP_RETRIES=10" in dockerfile
     assert "--mount=type=cache,target=/root/.cache/pip" in dockerfile
+    assert "# syntax=docker/dockerfile:1" not in dockerfile
 
 
 def test_private_canary_environment_template_tracks_server_topology() -> None:

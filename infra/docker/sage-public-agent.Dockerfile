@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 ARG SAGE_DOCKER_REGISTRY=docker.io
 FROM ${SAGE_DOCKER_REGISTRY}/library/python:3.12.13-slim
 
