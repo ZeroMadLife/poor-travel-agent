@@ -42,7 +42,7 @@ class PublicAskResponse(BaseModel):
 
 
 class PublicHealthResponse(BaseModel):
-    status: Literal["ready", "not_configured"]
+    status: Literal["ready", "not_configured", "degraded"]
     package_id: str
     package_revision: str
     package_digest: str
