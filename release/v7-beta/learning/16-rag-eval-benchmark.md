@@ -4,6 +4,8 @@
 
 > 本章目标：能画出 RAG 从文档到回答的全链路，解释 sparse/dense/hybrid 三路检索的差别，并读懂三模型评测数据背后的取舍。
 
+![RAG 检索与评测](assets/16-rag-eval-benchmark.png)
+
 ## RAG 解决什么问题
 
 模型的参数化知识有截止日期，也不知道你的私人材料。RAG（Retrieval-Augmented Generation）的本质是**给模型外挂一个可检索、可引用、受控写入的长期记忆**。
