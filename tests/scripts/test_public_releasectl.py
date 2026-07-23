@@ -237,6 +237,38 @@ def test_apply_verifies_candidate_then_atomically_switches_live(tmp_path: Path) 
     assert not any(value.startswith("0.0.0.0:") for value in live_agent)
 
 
+def test_live_agent_waits_for_runtime_readiness_before_switching_gateway(
+    tmp_path: Path,
+) -> None:
+    class StartingDocker(FakeDocker):
+        def __init__(self) -> None:
+            super().__init__()
+            self.live_agent_attempts = 0
+
+        def __call__(self, command, timeout):
+            args = list(command)[3:]
+            if args[:3] == ["container", "exec", LIVE_AGENT_CONTAINER]:
+                self.calls.append(list(command))
+                self.live_agent_attempts += 1
+                return CommandResult(0 if self.live_agent_attempts == 3 else 1)
+            return super().__call__(command, timeout)
+
+    docker = StartingDocker()
+    controller = PublicReleaseController(
+        _config(tmp_path),
+        runner=docker,
+        http_probe=lambda _url: True,
+        agent_probe=lambda _url: True,
+        api_probe=lambda _url: True,
+    )
+
+    result = controller.apply(NEXT_SHA)
+
+    assert result["status"] == "deployed"
+    assert docker.live_agent_attempts == 3
+    assert docker.containers[LIVE_CONTAINER] == f"sage-public:{NEXT_SHA}"
+
+
 def test_failed_live_switch_restores_previous_container(tmp_path: Path) -> None:
     docker = FakeDocker()
     docker.fail_live = True

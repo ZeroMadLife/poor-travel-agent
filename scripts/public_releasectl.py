@@ -456,6 +456,13 @@ class PublicReleaseController:
         )
         return result.returncode == 0
 
+    def _wait_agent_container_healthy(self, name: str, attempts: int = 20) -> bool:
+        for _ in range(attempts):
+            if self._agent_container_healthy(name):
+                return True
+            time.sleep(0.25)
+        return False
+
     def _load_state(self) -> dict[str, object]:
         if not self.config.state_file.is_file():
             return {}
@@ -571,7 +578,7 @@ class PublicReleaseController:
                 network_alias=LIVE_AGENT_CONTAINER,
             )
         )
-        if not self._agent_container_healthy(LIVE_AGENT_CONTAINER):
+        if not self._wait_agent_container_healthy(LIVE_AGENT_CONTAINER):
             raise PublicReleaseError("公开 Agent 正式容器健康检查失败")
         self._target(
             *self._container_args(
@@ -598,7 +605,7 @@ class PublicReleaseController:
         if agent_enabled:
             self._target("container", "rename", PREVIOUS_AGENT_CONTAINER, LIVE_AGENT_CONTAINER)
             self._target("container", "start", LIVE_AGENT_CONTAINER)
-            if not self._agent_container_healthy(LIVE_AGENT_CONTAINER):
+            if not self._wait_agent_container_healthy(LIVE_AGENT_CONTAINER):
                 raise PublicReleaseError("上一公开 Agent 容器恢复失败")
         self._target("container", "rename", PREVIOUS_CONTAINER, LIVE_CONTAINER)
         self._target("container", "start", LIVE_CONTAINER)
