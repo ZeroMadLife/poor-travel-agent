@@ -5,6 +5,14 @@
 	https_port 8443
 }
 
+# Direct public fallback while the domain is pending ICP filing.
+http://121.40.185.188 {
+	route {
+		import /etc/caddy/public-agent
+		import /etc/caddy/public-static
+	}
+}
+
 http://:8081 {
 	route {
 		@health path /healthz
