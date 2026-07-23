@@ -5,6 +5,8 @@
 这套手册不是宣传稿，也不是源码的逐行翻译。它的目标是建立一种可重复的学习方法：
 从产品问题进入架构，沿真实调用链找到状态与证据，再用测试校正自己的理解。
 
+![Sage 持续学习手册阅读地图](assets/00-reading-map.png)
+
 阅读时始终把 Sage 看成一个 **Personal AI Learning Companion**：
 
 ```text
