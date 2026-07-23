@@ -184,7 +184,7 @@ sage-agent/
 ├── frontend/                    # Vue 3 产品界面
 ├── tests/                       # 后端、API、契约与集成测试
 ├── release/v7-beta/             # 当前发布说明、评审与学习手册
-├── docs/                        # 设计、计划、Review 与运维文档
+├── docs/                        # 产品、架构、当前路线与运维文档
 └── docker-compose.yml           # 本地 PostgreSQL/pgvector + Redis + SearXNG
 ```
 
@@ -196,11 +196,11 @@ sage-agent/
   smoke，且永不共享主对话权限。
 - Knowledge 已完成本地来源工作流；云端租户级来源与元数据隔离尚未开放。
 - Container Sandbox 已有实现与测试，正式公网任务的部署、资源和运维门禁仍需收口。
-- Loop Engineer 的代码、测试和设计资料仍保留，但自动扫描服务目前暂停，不属于运行中的产品能力。
 - 原 TourSwarm 旅游规划能力作为领域 Skill 与多约束 benchmark 保留，不再是主产品入口。
 
 ## 文档
 
+- [文档索引](docs/README.md)
 - [V7 Beta 发布入口](release/v7-beta/README.md)
 - [持续学习手册](release/v7-beta/learning/00-reading-map.md)
 - [Sage V7 产品设计](docs/superpowers/specs/2026-07-15-sage-v7-personal-assistant-knowledge-evolution-design.md)

@@ -4,9 +4,9 @@
 >
 > 基线：`dev/sage-v7@fdd7411`
 >
-> 状态：P2.1 已交付；P2.2-P2.4 待实施
+> 状态：架构基线；当前交付事实以代码、测试和 `release/v7-beta/` 为准
 >
-> 视觉原型：`docs/assets/v7-2-knowledge-platform/sage-knowledge-workbench.html`
+> 架构图：`docs/assets/v7-2-knowledge-platform/sage-knowledge-platform-architecture.png`
 
 ## 1. 产品结论
 
