@@ -1,1 +1,0 @@
-"""Loop Harness tests."""

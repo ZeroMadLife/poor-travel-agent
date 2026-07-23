@@ -124,7 +124,6 @@ Sage 的价值不依赖“其他产品一定没有某个功能”的结论，而
 - `local_workspace` 只适合可信开发机；公网必须强制 Container Sandbox。
 - Knowledge 的云端 tenant-scoped 来源与元数据工作流尚未开放。
 - 公开主页不是公网 Harness，也没有主账号的私有工具权限。
-- Loop Engineer 自动扫描服务暂停，不属于当前运行能力。
 
 ## 第一入口
 
