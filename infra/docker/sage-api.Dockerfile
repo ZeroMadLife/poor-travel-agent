@@ -39,6 +39,7 @@ COPY data ./data
 COPY db ./db
 COPY mcp_servers ./mcp_servers
 COPY models ./models
+COPY public_agent ./public_agent
 COPY infra/docker/sage-api-entrypoint.sh /usr/local/bin/sage-api-entrypoint
 RUN chmod 0755 /usr/local/bin/sage-api-entrypoint
 
