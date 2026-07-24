@@ -23,10 +23,18 @@ def test_public_package_verifies_digests_and_retrieves_bounded_sources() -> None
     results = package.retrieve("Harness 如何审批恢复 durable timeline？", limit=2)
 
     assert package.package_id == "sage-public"
-    assert package.revision == "2026-07-22.1"
+    assert package.revision == "2026-07-24.1"
     assert [item.document_id for item in results] == ["harness-2"]
     assert results[0].url.startswith("https://")
     assert len(results[0].content) <= 420
+
+
+def test_public_package_retrieves_the_bounded_identity_document() -> None:
+    package = PublicPackage.load(PACKAGE)
+
+    results = package.retrieve("你是谁？")
+
+    assert [item.document_id for item in results] == ["sage-identity"]
 
 
 def test_public_package_rejects_modified_content(tmp_path: Path) -> None:

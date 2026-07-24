@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,7 @@ from scripts.public_releasectl import (
     PublicReleaseController,
     PublicReleaseError,
     parse_request,
+    probe_public_api,
     validate_tag,
 )
 
@@ -75,6 +77,40 @@ def test_request_is_bounded_json_with_exact_fields() -> None:
         parse_request(io.StringIO('{"action":"apply","tag":"' + SHA + '","shell":"id"}'))
     with pytest.raises(PublicReleaseError):
         parse_request(io.StringIO("{" + "x" * 2100 + "}"))
+
+
+def test_public_api_probe_verifies_the_minimum_identity_question(monkeypatch) -> None:
+    captured: list[urllib.request.Request] = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        @staticmethod
+        def read(_limit: int) -> bytes:
+            return json.dumps(
+                {
+                    "status": "answered",
+                    "citations": [{"document_id": "sage-identity"}],
+                    "receipt": {"package_revision": "2026-07-24.1"},
+                }
+            ).encode()
+
+    def urlopen(request: urllib.request.Request, *, timeout: int):
+        assert timeout == 25
+        captured.append(request)
+        return Response()
+
+    monkeypatch.setattr("scripts.public_releasectl.urllib.request.urlopen", urlopen)
+
+    assert probe_public_api("http://127.0.0.1:18081/api/public/v1/ask") is True
+    assert len(captured) == 1
+    assert json.loads(captured[0].data or b"{}")["question"] == "你是谁？"
 
 
 class FakeDocker:

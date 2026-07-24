@@ -42,6 +42,19 @@ async def test_answer_returns_versioned_citation_receipt() -> None:
     assert len(model.calls) == 1
 
 
+async def test_identity_question_returns_bounded_public_identity() -> None:
+    package = PublicPackage.load(Path("data/public/sage-public-v1.json"))
+    model = RecordingModel("我是 Sage 的受限公开资料助手。[E1]")
+    service = PublicAgentService(package, model)
+
+    result = await service.answer("你是谁？")
+
+    assert result.status == "answered"
+    assert result.citations[0].document_id == "sage-identity"
+    assert result.receipt.evidence_ids == ("sage-identity",)
+    assert len(model.calls) == 1
+
+
 async def test_private_and_prompt_injection_requests_never_reach_model() -> None:
     package = PublicPackage.load(Path("data/public/sage-public-v1.json"))
     model = RecordingModel()
