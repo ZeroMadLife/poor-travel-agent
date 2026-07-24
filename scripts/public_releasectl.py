@@ -143,7 +143,7 @@ def probe_agent_http(url: str) -> bool:
 def probe_public_api(url: str) -> bool:
     request = urllib.request.Request(
         url,
-        data=json.dumps({"question": "请用一句话说明 Sage 是什么。"}).encode("utf-8"),
+        data=json.dumps({"question": "你是谁？"}).encode("utf-8"),
         headers={"Content-Type": "application/json", "Accept": "application/json"},
         method="POST",
     )

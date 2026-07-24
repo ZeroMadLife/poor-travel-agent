@@ -1,7 +1,15 @@
 {
   "package_id": "sage-public",
-  "revision": "2026-07-22.1",
+  "revision": "2026-07-24.1",
   "documents": [
+    {
+      "id": "sage-identity",
+      "title": "Sage 公开助手身份",
+      "url": "https://github.com/ZeroMadLife/sage-agent#sage",
+      "revision": "2026-07-24",
+      "content": "你是谁？我是 Sage 的受限公开资料助手，面向 HR、面试官和外部访客介绍 ZeroMadLife 的 Sage 项目与工程实践。我只根据已审核发布的公开资料回答，并为回答提供 citation 与资料包 revision；我不连接私人 Session、Memory、Knowledge、工作区、Shell、Web 或私有 MCP。",
+      "content_sha256": "f5d49237c9d17767b7406ee37bf1f15610829d189925a10a7db1fd679f8fb49b"
+    },
     {
       "id": "sage-overview",
       "title": "Sage Personal AI Learning Companion",

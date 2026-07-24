@@ -11,7 +11,7 @@ def test_public_gateway_has_a_bounded_direct_ip_fallback() -> None:
     ip_site_start = caddyfile.index("http://121.40.185.188")
     catch_all_start = caddyfile.index("http://:8081")
     ip_site = caddyfile[ip_site_start:catch_all_start]
-    catch_all_site = caddyfile[catch_all_start:caddyfile.index("sagecompanion.top")]
+    catch_all_site = caddyfile[catch_all_start : caddyfile.index("sagecompanion.top")]
 
     assert "import /etc/caddy/public-agent" in ip_site
     assert "import /etc/caddy/public-static" in ip_site
