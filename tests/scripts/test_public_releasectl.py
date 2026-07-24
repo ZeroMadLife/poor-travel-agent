@@ -11,6 +11,7 @@ import pytest
 
 from scripts.public_releasectl import (
     AGENT_IMAGE_REPOSITORY,
+    AGENT_PACKAGE_REGISTRY_CONTAINER_PATH,
     CANDIDATE_AGENT_CONTAINER,
     CANDIDATE_CONTAINER,
     LIVE_AGENT_CONTAINER,
@@ -36,6 +37,9 @@ def _config(tmp_path: Path) -> PublicReleaseConfig:
     env_file = tmp_path / "public-agent.env"
     env_file.write_text("SAGE_PUBLIC_AGENT_API_KEY=test\n", encoding="utf-8")
     env_file.chmod(0o600)
+    package_registry = tmp_path / "packages"
+    package_registry.mkdir(exist_ok=True)
+    (package_registry / "registry.json").write_text("{}\n", encoding="utf-8")
     return PublicReleaseConfig(
         source_docker_host="unix:///run/user/1002/docker.sock",
         target_docker_host="unix:///var/run/docker.sock",
@@ -48,6 +52,8 @@ def _config(tmp_path: Path) -> PublicReleaseConfig:
         agent_env_file=env_file,
         agent_env_owner_uid=os.getuid(),
         agent_budget_state_file=tmp_path / "agent-budget.json",
+        agent_package_registry_root=package_registry,
+        agent_package_registry_owner_uid=os.getuid(),
         agent_runtime_uid=os.getuid(),
     )
 
@@ -233,6 +239,13 @@ def test_apply_verifies_candidate_then_atomically_switches_live(tmp_path: Path) 
     assert "--env-file" in candidate_agent
     assert "SAGE_PUBLIC_BUDGET_STATE_PATH=/var/lib/sage-public-agent/budget.json" in candidate_agent
     assert any(value.startswith("type=bind,source=") for value in candidate_agent)
+    assert (
+        f"SAGE_PUBLIC_PACKAGE_REGISTRY={AGENT_PACKAGE_REGISTRY_CONTAINER_PATH}" in candidate_agent
+    )
+    assert any(
+        value.endswith(f"target={AGENT_PACKAGE_REGISTRY_CONTAINER_PATH},readonly")
+        for value in candidate_agent
+    )
     assert f"SAGE_PUBLIC_AGENT_UPSTREAM={CANDIDATE_AGENT_CONTAINER}:8082" in candidate
     assert not any(value.startswith("0.0.0.0:") for value in live_agent)
 

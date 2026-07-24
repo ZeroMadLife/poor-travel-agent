@@ -57,4 +57,4 @@
 - Container Sandbox 有实现和测试，但没有完成公网 workload admission。
 - Knowledge 的本地来源工作流不等于云端 tenant-scoped 导入。
 - 公开主页问答是限定静态内容，不是拥有私有文件权限的 Agent。
-- Loop Engineer 自动扫描服务暂停；其设计与代码仅保留为后续受控自动化基础。
+- 实验性的 Loop Engineer 自动扫描实现已从当前发布树移除；历史实现仍可从 Git 追溯。

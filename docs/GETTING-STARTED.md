@@ -377,7 +377,10 @@ stdio 模式下 Server 会等待输入，这是正常的。用 MCP Inspector 或
 
 - [x] Sage Coding、Knowledge、durable timeline、审批与 Vue 主界面
 - [x] Python 3.12 + LangChain/LangGraph 1.x 依赖基线
-- [ ] DeerFlow 方向的 `sage_harness` 分波迁移
-- [ ] 服务器 Container Sandbox 与发布门禁
+- [x] Harness 2.0 默认 `deerflow_v2` runtime 与统一 timeline
+- [x] Container Sandbox 实现、测试和私有 Canary 发布链路
+- [x] 独立 Public Facade、受限 Public Agent 与不可变资料包发布链路
+- [ ] 私有 Harness 的公网 admission、云端 Knowledge 租户隔离与正式发布门禁
 
-**下一步：** 按 `docs/superpowers/plans/2026-07-16-sage-deerflow-harness-migration.md` 执行 Harness 迁移。
+**下一步：** 从 `/#/assistant` 创建主对话，通过设置页配置 Provider 和 Knowledge 来源；
+架构、运维和仍在推进的路线统一从[文档索引](README.md)进入。
